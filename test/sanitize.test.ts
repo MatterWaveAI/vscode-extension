@@ -18,7 +18,7 @@ describe("sanitizeHtml", () => {
     expect(sanitizeHtml(`<a href="javascript:alert(1)">x</a>`)).toBe(`<a rel="noopener noreferrer nofollow">x</a>`);
     expect(sanitizeHtml(`<a href="java&#x09;script:alert(1)">x</a>`)).not.toContain("href");
     expect(sanitizeHtml(`<a href="data:text/html,<b>">x</a>`)).not.toContain("href");
-    expect(sanitizeHtml(`<a href="https://example.com/a?b=1">x</a>`)).toContain(`href="https://example.com/a?b=1"`);
+    expect(sanitizeHtml(`<a href="https://app.matterwave.ai/a?b=1">x</a>`)).toContain(`href="https://app.matterwave.ai/a?b=1"`);
   });
 
   it("drops unknown tags and comments but keeps their text", () => {
@@ -42,7 +42,7 @@ describe("renderMarkdown", () => {
   });
 
   it("renders links only with a safe protocol", () => {
-    expect(renderMarkdown("[ok](https://example.com)")).toContain(`href="https://example.com/"`);
+    expect(renderMarkdown("[ok](https://app.matterwave.ai)")).toContain(`href="https://app.matterwave.ai/"`);
     expect(renderMarkdown("[bad](javascript:alert(1))")).not.toContain("href");
   });
 

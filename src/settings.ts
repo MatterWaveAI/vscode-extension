@@ -27,7 +27,7 @@ export function serverUrlProblem(raw: string): string | null {
   try {
     url = new URL(value);
   } catch {
-    return "Enter a full URL, such as https://app.example.com";
+    return "Enter a full URL, such as https://app.matterwave.ai";
   }
   if (url.protocol !== "https:" && url.protocol !== "http:") return "The URL must start with https:// or http://";
   if (!url.hostname) return "The URL needs a host name.";
