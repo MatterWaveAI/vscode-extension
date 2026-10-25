@@ -1,0 +1,559 @@
+import type { ConversationFrame } from "@matterwave/sdk";
+import type { MatterWaveClient } from "../api/client";
+import { ApiError } from "../api/errors";
+import { isUntrustedCertificate } from "../api/transport";
+import type { Conversation, Message, ModelInfo } from "../api/types";
+import { fileAttachment } from "../context";
+import { initialModel } from "../models";
+import { classifyStreamError, STREAM_ERROR_COPY, type StreamErrorKind } from "../streamErrors";
+import { appendDelta, deltaText, emptyAssistant, partFromStart, setPart } from "./assemble";
+import { switchTarget, transcriptOf } from "./branches";
+import type { ErrorView, HostMessage, Meter, ViewState, WebviewMessage } from "./protocol";
+
+/**
+ * The chat's state and every request it makes, with no editor API in it.
+ *
+ * The view provider forwards webview intents here and posts back whatever
+ * this emits; the commands call the same methods. Keeping it editor-free is
+ * what lets the tests drive a whole turn over a fake `fetch` and inspect
+ * every message that would have crossed into the webview.
+ */
+
+export interface StatusInfo {
+  signedIn: boolean;
+  offline: boolean;
+  identity: string | null;
+  model: string | null;
+  /** 0-100, or null when the server does not know the count or the window. */
+  meterPercent: number | null;
+}
+
+export interface ChatDeps {
+  client: MatterWaveClient;
+  post: (message: HostMessage) => void;
+  isSignedIn: () => Promise<boolean>;
+  rememberedModel: { get(): string | null; set(id: string): void };
+  /** Editor-side actions the webview can ask for: the model QuickPick, sign-in, the clipboard. */
+  runCommand: (command: "pickModel" | "signIn" | "copyRequestId") => void;
+  onStatus?: (status: StatusInfo) => void;
+}
+
+/** What the Continue button sends after a cut answer. */
+export const CONTINUE_PROMPT = "Continue from where you stopped.";
+
+interface FailedTurn {
+  content: string;
+  attachmentIds: string[];
+  userMessageId: string | null;
+}
+
+export class ChatController {
+  private signedIn = false;
+  private offline = false;
+  private identity: string | null = null;
+  private conversations: Conversation[] = [];
+  private activeId: string | null = null;
+  private path: Message[] = [];
+  private tree: Message[] = [];
+  private live: Message | null = null;
+  private models: ModelInfo[] = [];
+  private model: ModelInfo | null = null;
+  private meter: Meter | null = null;
+  private error: ErrorView | null = null;
+  private notice: string | null = null;
+  private abort: AbortController | null = null;
+  private failed: FailedTurn | null = null;
+  private reloadAfterTurn = false;
+  lastRequestId: string | null = null;
+
+  constructor(private readonly deps: ChatDeps) {}
+
+  // --- intents from the webview --------------------------------------------
+
+  async handle(message: WebviewMessage): Promise<void> {
+    switch (message.type) {
+      case "ready":
+      case "reconnect":
+        return this.refresh();
+      case "newChat":
+        return this.newChat();
+      case "openConversation":
+        return this.openConversation(message.id);
+      case "send":
+        return this.send(message.content);
+      case "stop":
+        this.abort?.abort();
+        return;
+      case "retry":
+        return this.retry();
+      case "edit":
+        return this.edit(message.messageId, message.content);
+      case "regenerate":
+        return this.regenerate(message.messageId);
+      case "switchBranch":
+        return this.switchBranch(message.messageId, message.step);
+      case "continue":
+        return this.send(CONTINUE_PROMPT);
+      case "compact":
+        return this.compact();
+      case "pickModel":
+      case "signIn":
+      case "copyRequestId":
+        this.deps.runCommand(message.type);
+        return;
+    }
+  }
+
+  // --- loading ---------------------------------------------------------------
+
+  async refresh(): Promise<void> {
+    this.signedIn = await this.deps.isSignedIn();
+    // A re-read answers the error it is about to retry (the API could not be
+    // reached, the list did not load); one that holds a turn to send again
+    // stays, since its Retry is how that text gets through.
+    if (!this.failed) this.error = null;
+    if (!this.signedIn) {
+      this.identity = null;
+      this.conversations = [];
+      this.activeId = null;
+      this.path = [];
+      this.tree = [];
+      this.meter = null;
+      this.emit();
+      return;
+    }
+    await this.guard(async () => {
+      const [me, models, conversations] = await Promise.all([
+        this.deps.client.me(),
+        this.deps.client.models(),
+        this.deps.client.listConversations(),
+      ]);
+      this.identity = me.name || me.email || me.subject;
+      this.models = models.data;
+      this.model = initialModel(models.data, this.deps.rememberedModel.get(), models.default_model);
+      this.conversations = conversations;
+      if (this.activeId) await this.loadConversation(this.activeId);
+    });
+    this.emit();
+  }
+
+  async openConversation(id: string): Promise<void> {
+    // A turn still streaming belongs to the conversation being left: stop it
+    // (the server keeps what arrived as a cut answer) and let go of it, so
+    // none of its frames land in the one being opened.
+    if (id !== this.activeId) this.detachTurn();
+    this.activeId = id;
+    this.error = null;
+    this.notice = null;
+    await this.guard(() => this.loadConversation(id));
+    this.emit();
+  }
+
+  newChat(): void {
+    this.detachTurn();
+    this.activeId = null;
+    this.path = [];
+    this.tree = [];
+    this.live = null;
+    this.meter = null;
+    this.error = null;
+    this.notice = null;
+    this.emit();
+  }
+
+  private detachTurn(): void {
+    this.abort?.abort();
+    this.abort = null;
+    this.live = null;
+  }
+
+  private async loadConversation(id: string): Promise<void> {
+    const [detail, tree] = await Promise.all([this.deps.client.getConversation(id), this.deps.client.tree(id)]);
+    if (this.activeId !== id) return;
+    this.path = detail.messages;
+    this.tree = tree;
+    await this.loadMeter(id);
+  }
+
+  private async loadMeter(id: string): Promise<void> {
+    try {
+      const usage = await this.deps.client.context(id, this.model?.id);
+      this.meter = { usedTokens: usage.used_tokens, contextWindow: usage.context_window, compactable: usage.compactable };
+    } catch {
+      // A deployment without the context route still chats; the meter just
+      // stays blank rather than turning the whole view into an error.
+      this.meter = null;
+    }
+  }
+
+  // --- turns -----------------------------------------------------------------
+
+  async send(content: string, attachmentIds: string[] = []): Promise<void> {
+    if (this.abort) return;
+    const id = await this.ensureConversation();
+    if (!id) {
+      // The composer has already let the text go; when the conversation
+      // could not be made, Retry is the one place it is still held.
+      if (this.error) this.failed = { content, attachmentIds, userMessageId: null };
+      return;
+    }
+    const parent = this.path[this.path.length - 1] ?? null;
+    const optimistic: Message = {
+      ...emptyAssistant(id, parent?.id ?? null),
+      role: "user",
+      parts: [{ type: "text", text: content }],
+      content,
+    };
+    this.path = [...this.path, optimistic];
+    const body = { content, ...(this.model ? { model: this.model.id } : {}), ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}) };
+    await this.runTurn(id, (signal) => this.deps.client.sendMessage(id, body, signal), { content, attachmentIds, userMessageId: null });
+  }
+
+  async edit(messageId: string, content: string): Promise<void> {
+    if (this.abort || !this.activeId) return;
+    const id = this.activeId;
+    const body = { content, ...(this.model ? { model: this.model.id } : {}) };
+    await this.runTurn(id, (signal) => this.deps.client.editMessage(id, messageId, body, signal), { content, attachmentIds: [], userMessageId: messageId });
+  }
+
+  async regenerate(messageId: string): Promise<void> {
+    if (this.abort || !this.activeId) return;
+    const id = this.activeId;
+    const body = this.model ? { model: this.model.id } : {};
+    const at = this.path.findIndex((m) => m.id === messageId);
+    if (at >= 0) this.path = this.path.slice(0, at);
+    await this.runTurn(id, (signal) => this.deps.client.regenerate(id, messageId, body, signal), null);
+  }
+
+  /** Try a failed turn again in the cheapest way that cannot double-post it. */
+  async retry(): Promise<void> {
+    const failed = this.failed;
+    if (!failed) return;
+    // No conversation yet: nothing reached the server, so the first send is the retry.
+    if (!this.activeId) return this.send(failed.content, failed.attachmentIds);
+    await this.guard(() => this.loadConversation(this.activeId ?? ""));
+    const last = this.path[this.path.length - 1];
+    if (last?.role === "assistant") return this.regenerate(last.id);
+    if (failed.userMessageId) return this.edit(failed.userMessageId, failed.content);
+    return this.send(failed.content, failed.attachmentIds);
+  }
+
+  /** "Ask about file": upload the text, then send the question with the attachment. */
+  async askAboutFile(question: string, text: string, path: string): Promise<void> {
+    const id = await this.ensureConversation();
+    if (!id) return;
+    const { blob, filename } = fileAttachment(text, path);
+    let attachmentId: string;
+    try {
+      const attachment = await this.deps.client.uploadAttachment(blob, filename, id);
+      attachmentId = attachment.id;
+      this.notice = attachment.extract_truncated
+        ? `${path} is longer than the model reads from one file: only its start was sent.`
+        : null;
+    } catch (error) {
+      this.fail(error);
+      this.emit();
+      return;
+    }
+    await this.send(question, [attachmentId]);
+  }
+
+  private async ensureConversation(): Promise<string | null> {
+    if (this.activeId) return this.activeId;
+    if (!this.signedIn) {
+      this.deps.runCommand("signIn");
+      return null;
+    }
+    try {
+      const conv = await this.deps.client.createConversation(this.model ? { model: this.model.id } : {});
+      this.conversations = [conv, ...this.conversations];
+      this.activeId = conv.id;
+      this.path = [];
+      this.tree = [];
+      return conv.id;
+    } catch (error) {
+      this.fail(error);
+      this.emit();
+      return null;
+    }
+  }
+
+  private async runTurn(
+    conversationId: string,
+    start: (signal: AbortSignal) => AsyncGenerator<ConversationFrame>,
+    retryable: FailedTurn | null,
+  ): Promise<void> {
+    const abort = new AbortController();
+    this.abort = abort;
+    this.error = null;
+    this.failed = null;
+    this.reloadAfterTurn = false;
+    const parent = this.path[this.path.length - 1] ?? null;
+    this.live = emptyAssistant(conversationId, parent?.id ?? null);
+    let userMessageId = retryable?.userMessageId ?? null;
+    // False once the user has moved to another conversation: from then on
+    // the turn's frames, errors and reloads are dropped.
+    const attached = () => this.abort === abort && this.activeId === conversationId;
+    this.emit();
+    try {
+      for await (const frame of start(abort.signal)) {
+        if (!attached()) break;
+        const result = this.applyFrame(conversationId, frame);
+        if (frame.event === "message" && typeof frame.message.id === "string") userMessageId = frame.message.id;
+        if (result === "failed" && retryable) this.failed = { ...retryable, userMessageId };
+      }
+    } catch (error) {
+      if (!attached()) {
+        // Detached: the conversation now open has nothing to do with this turn.
+      } else if (abort.signal.aborted) {
+        this.notice = "Stopped. Whatever arrived is kept; the server saves it as a cut answer.";
+      } else {
+        this.fail(error);
+        if (retryable) this.failed = { ...retryable, userMessageId };
+      }
+      if (attached()) this.keepPartial();
+    } finally {
+      if (this.abort === abort) this.abort = null;
+    }
+    if (!attached() && this.abort !== null) return;
+    if (this.activeId !== conversationId) return;
+    // The server is the record: the tree (sibling counts), the meter, and --
+    // after a failure or a compaction -- the transcript itself are re-read.
+    await this.guard(async () => {
+      if (this.activeId !== conversationId) return;
+      if (this.error || this.reloadAfterTurn || abort.signal.aborted) {
+        await this.loadConversation(conversationId);
+      } else {
+        this.tree = await this.deps.client.tree(conversationId);
+        await this.loadMeter(conversationId);
+      }
+    });
+    this.emit();
+  }
+
+  /** One frame's effect. Returns "failed" for a frame that ends the turn in error. */
+  private applyFrame(conversationId: string, frame: ConversationFrame): "ok" | "failed" {
+    switch (frame.event) {
+      case "message": {
+        const message = frame.message as Message;
+        const own = this.path.findIndex((m) => m.id === message.id);
+        if (own >= 0) {
+          this.path = this.path.slice(0, own + 1);
+        } else {
+          const withoutOptimistic = this.path.filter((m) => m.id !== "");
+          const parentAt = withoutOptimistic.findIndex((m) => m.id === message.parent_id);
+          this.path = [...withoutOptimistic.slice(0, parentAt + 1), message];
+        }
+        this.live = emptyAssistant(conversationId, message.id);
+        this.emit();
+        return "ok";
+      }
+      case "title": {
+        if (frame.title) this.conversations = this.conversations.map((c) => (c.id === conversationId ? { ...c, title: frame.title } : c));
+        this.emit();
+        return "ok";
+      }
+      case "part_start": {
+        if (!this.live) return "ok";
+        const part = partFromStart(frame);
+        setPart(this.live, frame.index, part);
+        this.deps.post({ type: "part", index: frame.index, part });
+        return "ok";
+      }
+      case "delta": {
+        if (!this.live) return "ok";
+        const text = deltaText(frame);
+        if (!text) return "ok";
+        appendDelta(this.live, frame.index, text);
+        this.deps.post({ type: "delta", index: frame.index, field: "text", text });
+        return "ok";
+      }
+      case "context": {
+        const prompt = frame.prompt_tokens;
+        this.meter = {
+          usedTokens: prompt === null ? null : prompt + (frame.completion_tokens ?? 0),
+          contextWindow: frame.context_window ?? this.meter?.contextWindow ?? null,
+          compactable: this.meter?.compactable ?? true,
+        };
+        this.emit();
+        return "ok";
+      }
+      case "compaction": {
+        // The SDK reads a missing count as 0; a summary of nothing is not a thing, so 0 means unknown.
+        const { tokens_before: before, tokens_after: after } = frame;
+        this.notice =
+          before > 0
+            ? `Earlier turns were summarised to fit the context window (${before.toLocaleString()} → ${after.toLocaleString()} tokens).`
+            : "Earlier turns were summarised to fit the context window.";
+        this.reloadAfterTurn = true;
+        this.emit();
+        return "ok";
+      }
+      case "notice": {
+        // The API puts a notice's text in `detail`, like its errors.
+        if (frame.detail) this.notice = frame.detail;
+        this.emit();
+        return "ok";
+      }
+      case "done": {
+        const message = frame.message as Message;
+        this.path = [...this.path.filter((m) => m.id !== ""), message];
+        this.live = null;
+        this.emit();
+        return "ok";
+      }
+      case "moderation_block": {
+        const requestId = frame.request_id ?? this.lastRequestId;
+        if (requestId) this.lastRequestId = requestId;
+        this.error = errorView("moderation", requestId);
+        this.path = this.path.filter((m) => m.id !== "");
+        this.live = null;
+        this.emit();
+        return "failed";
+      }
+      case "error": {
+        this.error = errorView(classifyStreamError(frame.detail, undefined, frame.code ?? undefined), this.lastRequestId);
+        this.keepPartial();
+        this.emit();
+        return "failed";
+      }
+      default:
+        return "ok";
+    }
+  }
+
+  /** A cut answer stays on screen, marked as cut, until the server's copy replaces it. */
+  private keepPartial(): void {
+    if (this.live && this.live.parts.length > 0) this.path = [...this.path, { ...this.live, truncated: true }];
+    this.live = null;
+  }
+
+  // --- branches, compaction, model ----------------------------------------------
+
+  async switchBranch(messageId: string, step: -1 | 1): Promise<void> {
+    if (!this.activeId || this.abort) return;
+    const leaf = switchTarget(this.tree, messageId, step);
+    if (!leaf) return;
+    const id = this.activeId;
+    await this.guard(async () => {
+      const detail = await this.deps.client.setActiveLeaf(id, leaf);
+      if (this.activeId === id) this.path = detail.messages;
+    });
+    this.emit();
+  }
+
+  async compact(): Promise<void> {
+    if (!this.activeId || this.abort) return;
+    const id = this.activeId;
+    try {
+      await this.deps.client.compact(id, this.model?.id);
+      this.notice = "Earlier turns were summarised. Use Show originals on the divider to read them.";
+      await this.loadConversation(id);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        this.notice = "Nothing to compact yet: the conversation is short enough as it is.";
+      } else {
+        this.fail(error);
+      }
+    }
+    this.emit();
+  }
+
+  availableModels(): readonly ModelInfo[] {
+    return this.models;
+  }
+
+  currentModel(): ModelInfo | null {
+    return this.model;
+  }
+
+  async loadModels(): Promise<readonly ModelInfo[]> {
+    const list = await this.deps.client.models();
+    this.models = list.data;
+    if (!this.model) this.model = initialModel(list.data, this.deps.rememberedModel.get(), list.default_model);
+    return this.models;
+  }
+
+  /** Only an included model is accepted; the picker never offers another, and this holds if it did. */
+  setModel(model: ModelInfo): boolean {
+    if (!model.included) return false;
+    this.model = model;
+    this.deps.rememberedModel.set(model.id);
+    this.emit();
+    return true;
+  }
+
+  setOffline(offline: boolean): void {
+    if (this.offline === offline) return;
+    this.offline = offline;
+    this.emit();
+  }
+
+  hasConversation(): boolean {
+    return this.activeId !== null;
+  }
+
+  // --- plumbing ------------------------------------------------------------------
+
+  private async guard(work: () => Promise<void>): Promise<void> {
+    try {
+      await work();
+    } catch (error) {
+      this.fail(error);
+    }
+  }
+
+  private fail(error: unknown): void {
+    if (error instanceof ApiError) {
+      if (error.requestId) this.lastRequestId = error.requestId;
+      const kind =
+        error.status === 0
+          ? isUntrustedCertificate(error.detail)
+            ? "untrusted_certificate"
+            : "network"
+          : classifyStreamError(error.detail, error.status, error.code ?? undefined);
+      this.error = errorView(kind, error.requestId);
+    } else {
+      this.error = errorView("unknown", null);
+    }
+  }
+
+  snapshot(): ViewState {
+    return {
+      signedIn: this.signedIn,
+      offline: this.offline,
+      identity: this.identity,
+      conversations: this.conversations.map((c) => ({ id: c.id, title: c.title })),
+      activeId: this.activeId,
+      transcript: transcriptOf(this.path, this.tree),
+      live: this.live,
+      model: this.model ? { id: this.model.id, label: this.model.label || this.model.id } : null,
+      meter: this.meter,
+      streaming: this.abort !== null,
+      error: this.error,
+      notice: this.notice,
+    };
+  }
+
+  emit(): void {
+    const state = this.snapshot();
+    this.deps.post({ type: "state", state });
+    this.deps.onStatus?.({
+      signedIn: state.signedIn,
+      offline: state.offline,
+      identity: state.identity,
+      model: state.model?.label ?? null,
+      meterPercent: meterPercent(state.meter),
+    });
+  }
+}
+
+export function meterPercent(meter: Meter | null): number | null {
+  if (!meter || meter.usedTokens === null || !meter.contextWindow) return null;
+  return Math.min(100, Math.round((meter.usedTokens / meter.contextWindow) * 100));
+}
+
+function errorView(kind: StreamErrorKind, requestId: string | null): ErrorView {
+  return { ...STREAM_ERROR_COPY[kind], requestId };
+}
+

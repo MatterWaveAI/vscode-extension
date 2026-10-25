@@ -1,0 +1,158 @@
+{
+  "name": "matterwave",
+  "displayName": "MatterWave",
+  "description": "Chat with your organisation's MatterWave models from the editor.",
+  "version": "0.1.0",
+  "publisher": "matterwave",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "MatterWave",
+      "properties": {
+        "matterwave.baseUrl": {
+          "type": "string",
+          "default": "https://app.matterwave.dev",
+          "description": "The MatterWave deployment this editor talks to.",
+          "scope": "application"
+        },
+        "matterwave.caFile": {
+          "type": "string",
+          "default": "",
+          "description": "Path to a PEM file holding the certificate authority that signed the deployment's TLS certificate, for a deployment behind a private CA. Trusted in addition to the system's authorities. Empty uses the system's authorities alone.",
+          "scope": "application"
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "matterwave",
+          "title": "MatterWave",
+          "icon": "media/matterwave.svg"
+        }
+      ]
+    },
+    "views": {
+      "matterwave": [
+        {
+          "type": "webview",
+          "id": "matterwave.chat",
+          "name": "Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "matterwave.signInWithDeviceCode",
+        "title": "Sign In (Device Code)",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.signInWithApiKey",
+        "title": "Sign In with API Key",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.signOut",
+        "title": "Sign Out",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.newChat",
+        "title": "New Chat",
+        "category": "MatterWave",
+        "icon": "$(add)"
+      },
+      {
+        "command": "matterwave.askAboutSelection",
+        "title": "Ask about Selection",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.askAboutFile",
+        "title": "Ask about File",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.pickModel",
+        "title": "Pick Model",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.compactNow",
+        "title": "Compact Conversation Now",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.copyRequestId",
+        "title": "Copy Last Request ID",
+        "category": "MatterWave"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "matterwave.newChat",
+          "when": "view == matterwave.chat",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "matterwave.askAboutSelection",
+          "when": "editorHasSelection",
+          "group": "matterwave@1"
+        },
+        {
+          "command": "matterwave.askAboutFile",
+          "when": "editorTextFocus",
+          "group": "matterwave@2"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:e2e": "pnpm run build && node e2e/run.mjs",
+    "package": "pnpm run build && vsce package --no-dependencies --skip-license --allow-missing-repository"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/mocha": "10.0.10",
+    "@types/node": "^22.10.0",
+    "@types/vscode": "~1.90.0",
+    "@vscode/test-electron": "3.1.0",
+    "@vscode/vsce": "^3.2.1",
+    "esbuild": "^0.24.0",
+    "eslint": "^9.17.0",
+    "globals": "^15.14.0",
+    "happy-dom": "^15.11.7",
+    "mocha": "12.0.3",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.0",
+    "undici": "^7.30.1",
+    "vitest": "^2.1.8"
+  },
+  "packageManager": "pnpm@10.12.3",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

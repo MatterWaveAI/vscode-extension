@@ -1,0 +1,11 @@
+event: message
+data: {"id": "m_user", "conversation_id": "c_1", "role": "user", "parts": [{"type": "text", "text": "What time is it?"}], "content": "What time is it?", "content_version": 2, "created_at": "2026-10-18T10:00:00+00:00", "parent_id": null, "model": null, "truncated": false}
+
+id: gen_7f3a:0
+event: part_start
+data: {"index": 0, "type": "text"}
+
+id: gen_7f3a:1
+event: delta
+data: {"content": "It is ", "index": 0}
+

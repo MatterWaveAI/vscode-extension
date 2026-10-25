@@ -1,0 +1,58 @@
+event: message
+data: {"id": "m_user", "conversation_id": "c_1", "role": "user", "parts": [{"type": "text", "text": "What time is it?"}], "content": "What time is it?", "content_version": 2, "created_at": "2026-10-18T10:00:00+00:00", "parent_id": null, "model": null, "truncated": false}
+
+event: title
+data: {"title": "What time is it?"}
+
+id: gen_7f3a:0
+event: part_start
+data: {"index": 0, "type": "reasoning"}
+
+id: gen_7f3a:1
+event: delta
+data: {"reasoning": "Need the clock.", "index": 0}
+
+id: gen_7f3a:2
+event: part_end
+data: {"index": 0}
+
+: mw-heartbeat
+
+id: gen_7f3a:3
+event: part_start
+data: {"index": 1, "type": "tool_call", "id": "call_1", "name": "get_current_time", "arguments": "{}"}
+
+id: gen_7f3a:4
+event: part_end
+data: {"index": 1}
+
+id: gen_7f3a:5
+event: part_start
+data: {"index": 2, "type": "tool_result", "id": "call_1", "output": "10:00 UTC", "is_error": false}
+
+id: gen_7f3a:6
+event: part_end
+data: {"index": 2}
+
+id: gen_7f3a:7
+event: part_start
+data: {"index": 3, "type": "text"}
+
+id: gen_7f3a:8
+event: delta
+data: {"content": "It is ", "index": 3}
+
+id: gen_7f3a:9
+event: delta
+data: {"content": "10:00 UTC.", "index": 3}
+
+id: gen_7f3a:10
+event: part_end
+data: {"index": 3}
+
+event: context
+data: {"prompt_tokens": 1200, "completion_tokens": 34, "context_window": 32768}
+
+event: done
+data: {"id": "m_asst", "conversation_id": "c_1", "role": "assistant", "parts": [{"type": "reasoning", "text": "Need the clock."}, {"type": "tool_call", "id": "call_1", "name": "get_current_time", "arguments": "{}"}, {"type": "tool_result", "id": "call_1", "output": "10:00 UTC", "is_error": false}, {"type": "text", "text": "It is 10:00 UTC."}], "content": "It is 10:00 UTC.", "content_version": 2, "created_at": "2026-10-18T10:00:01+00:00", "parent_id": "m_user", "model": "grt-small", "truncated": false}
+
