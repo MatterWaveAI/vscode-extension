@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { Message } from "../src/api/types";
 import type { HostMessage, ViewState, WebviewMessage } from "../src/chat/protocol";
 
@@ -22,7 +22,9 @@ function state(over: Partial<ViewState>): ViewState {
     signedIn: true,
     offline: false,
     identity: "Ada",
-    conversations: [{ id: "c_1", title: "Clock" }],
+    conversations: [{ id: "c_1", title: "Clock", pinned: false, archived: false }],
+    archivedConversations: [],
+    searchResults: null,
     activeId: "c_1",
     transcript: [],
     live: null,
@@ -80,8 +82,8 @@ describe("the chat webview", () => {
     const app = document.getElementById("app") as HTMLElement;
     expect(app.querySelector("strong")?.textContent).toBe("Bold");
     expect(app.querySelector("img, script:not([nonce])")).toBeNull();
-    expect(app.querySelectorAll("details")).toHaveLength(3);
-    expect(app.querySelector("details")?.hasAttribute("open")).toBe(false);
+    expect(app.querySelectorAll(".transcript details")).toHaveLength(3);
+    expect(app.querySelector(".transcript details")?.hasAttribute("open")).toBe(false);
     expect(app.textContent).toContain("2 / 3");
     expect(app.textContent).toContain("50% of context");
     // The user's own text is shown as text, not markup.
@@ -145,5 +147,122 @@ describe("the chat webview", () => {
       state: state({ error: { title: "The model gateway did not answer", guidance: "Try again.", retryable: true, requestId: "req-1" } }),
     });
     expect(document.querySelector(".error")?.textContent).toContain("Reference: req-1");
+  });
+
+  it("renders the sidebar rows with their actions, and sends their intents", () => {
+    post({
+      type: "state",
+      state: state({
+        conversations: [
+          { id: "c_1", title: "Clock", pinned: true, archived: false },
+          { id: "c_2", title: "Weather", pinned: false, archived: false },
+        ],
+        archivedConversations: [{ id: "c_3", title: "Old", pinned: false, archived: true }],
+      }),
+    });
+    const titles = Array.from(document.querySelectorAll<HTMLButtonElement>(".convos > .convos-list .row .title"));
+    expect(titles.map((r) => r.textContent)).toEqual(["Clock", "Weather"]);
+    // The pinned conversation leads, exactly as the server ordered it.
+    expect(document.querySelector(".convos-list .row")?.className).toContain("active");
+
+    const buttonsIn = (row: number) => Array.from(document.querySelectorAll<HTMLButtonElement>(".convos-list > .row")[row]?.querySelectorAll("button") ?? []);
+    // Pin toggles, archive archives, delete confirms before sending.
+    buttonsIn(1)
+      .find((b) => b.textContent === "Pin")
+      ?.click();
+    expect(sent.at(-1)).toEqual({ type: "pinConversation", id: "c_2", pinned: true });
+    buttonsIn(1)
+      .find((b) => b.textContent === "Archive")
+      ?.click();
+    expect(sent.at(-1)).toEqual({ type: "archiveConversation", id: "c_2", archived: true });
+    buttonsIn(1)
+      .find((b) => b.textContent === "Delete")
+      ?.click();
+    expect(sent.at(-1)?.type).not.toBe("deleteConversation");
+    // Re-rendered: the delete now asks for confirmation first.
+    expect(buttonsIn(1).find((b) => b.textContent === "Delete?")).toBeTruthy();
+    buttonsIn(1)
+      .find((b) => b.textContent === "Delete?")
+      ?.click();
+    expect(sent.at(-1)).toEqual({ type: "deleteConversation", id: "c_2" });
+
+    // The archive folds away under its own heading, with unarchive and delete.
+    expect(document.querySelector(".convos details.archived")?.getAttribute("hidden")).toBeNull();
+    const unarchive = Array.from(document.querySelectorAll<HTMLButtonElement>(".convos details.archived button")).find(
+      (b) => b.textContent === "Unarchive",
+    );
+    unarchive?.click();
+    expect(sent.at(-1)).toEqual({ type: "archiveConversation", id: "c_3", archived: false });
+  });
+
+  it("searches from the sidebar box, debounced, and shows the results", async () => {
+    vi.useFakeTimers();
+    try {
+      post({
+        type: "state",
+        state: state({
+          searchResults: [{ id: "c_9", title: "Clock tower", pinned: false, archived: false, snippet: "…the clock…" }],
+        }),
+      });
+      expect(document.querySelector(".convos-list")?.textContent).toContain("Clock tower");
+      expect(document.querySelector(".convos-list")?.textContent).toContain("…the clock…");
+      // Searching hides the archive section until the query clears.
+      expect(document.querySelector(".convos details.archived")?.getAttribute("hidden")).not.toBeNull();
+
+      const box = document.querySelector(".convos input") as HTMLInputElement;
+      box.value = "clock";
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      expect(sent.at(-1)?.type).not.toBe("searchConversations");
+      vi.advanceTimersByTime(300);
+      expect(sent.at(-1)).toEqual({ type: "searchConversations", query: "clock" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends feedback from the thumbs under a reply, and withdraws it", () => {
+    post({
+      type: "state",
+      state: state({
+        transcript: [
+          {
+            message: message({ id: "a1", role: "assistant", parent_id: "u1", parts: [{ type: "text", text: "Answer" }] }),
+            siblingIndex: 1,
+            siblingCount: 1,
+          },
+        ],
+      }),
+    });
+    const thumbs = () => Array.from(document.querySelectorAll<HTMLButtonElement>(".msg .actions button"));
+    expect(thumbs().map((b) => b.textContent)).toEqual(["Like", "Dislike", "Regenerate"]);
+    thumbs()
+      .find((b) => b.textContent === "Like")
+      ?.click();
+    expect(sent.at(-1)).toEqual({ type: "rateMessage", messageId: "a1", rating: 1 });
+    // The webview's own copy of the rating shows immediately, without a round-trip.
+    expect(thumbs().map((b) => b.textContent)).toEqual(["Liked", "Dislike", "Regenerate"]);
+    thumbs()
+      .find((b) => b.textContent === "Liked")
+      ?.click();
+    expect(sent.at(-1)).toEqual({ type: "rateMessage", messageId: "a1", rating: 0 });
+  });
+
+  it("offers export and share only while a conversation is open", () => {
+    post({ type: "state", state: state({}) });
+    const headerButtons = () => Array.from(document.querySelectorAll<HTMLButtonElement>(".bar button"));
+    expect(headerButtons().find((b) => b.textContent === "Export")?.disabled).toBe(false);
+    expect(headerButtons().find((b) => b.textContent === "Share")?.disabled).toBe(false);
+    headerButtons()
+      .find((b) => b.textContent === "Export")
+      ?.click();
+    expect(sent.at(-1)).toEqual({ type: "exportConversation" });
+    headerButtons()
+      .find((b) => b.textContent === "Share")
+      ?.click();
+    expect(sent.at(-1)).toEqual({ type: "shareConversation" });
+
+    post({ type: "state", state: state({ activeId: null }) });
+    expect(headerButtons().find((b) => b.textContent === "Export")?.disabled).toBe(true);
+    expect(headerButtons().find((b) => b.textContent === "Share")?.disabled).toBe(true);
   });
 });

@@ -42,3 +42,28 @@ export function fitsContentCap(content: string): boolean {
 export function fileAttachment(text: string, path: string): { blob: Blob; filename: string } {
   return { blob: new Blob([text], { type: "text/plain" }), filename: path };
 }
+
+/**
+ * The image types the vision models read, by filename extension. The upload
+ * route sniffs an attachment's bytes for its real type; the type here is
+ * what the Blob carries so the browser's `FormData` names it correctly.
+ */
+const IMAGE_TYPES: ReadonlyMap<string, string> = new Map([
+  [".png", "image/png"],
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
+  [".gif", "image/gif"],
+  [".webp", "image/webp"],
+]);
+
+/** The image content type for `path`, or null when it is not one the API takes as an image. */
+export function imageContentType(path: string): string | null {
+  const dot = path.lastIndexOf(".");
+  if (dot < 0) return null;
+  return IMAGE_TYPES.get(path.slice(dot).toLowerCase()) ?? null;
+}
+
+/** The upload for an image file: its own bytes, named and typed as itself. */
+export function imageAttachment(bytes: Uint8Array, path: string, contentType: string): { blob: Blob; filename: string } {
+  return { blob: new Blob([bytes as BlobPart], { type: contentType }), filename: path };
+}

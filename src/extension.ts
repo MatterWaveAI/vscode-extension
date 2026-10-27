@@ -8,7 +8,8 @@ import { signOut } from "./auth/signOut";
 import { ChatController } from "./chat/controller";
 import type { HostMessage } from "./chat/protocol";
 import { ChatViewProvider } from "./chat/viewProvider";
-import { fitsContentCap, MAX_CONTENT_CHARS, selectionContent } from "./context";
+import { fitsContentCap, MAX_CONTENT_CHARS, imageAttachment, imageContentType, selectionContent } from "./context";
+import { conversationToMarkdown } from "./chat/export";
 import { pickerRows, resolvePick, type PickerRow } from "./models";
 import { DEFAULT_BASE_URL, normalizeServerUrl, serverUrlProblem, shouldPromptForServer } from "./settings";
 import { StatusBar } from "./statusBar";
@@ -164,6 +165,35 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
     await vscode.env.clipboard.writeText(chat.lastRequestId);
     void vscode.window.showInformationMessage(`Copied request id ${chat.lastRequestId}.`);
   });
+  command("matterwave.exportConversation", async () => {
+    if (!chat.hasConversation()) {
+      void vscode.window.showInformationMessage("Open a conversation to export it.");
+      return;
+    }
+    const target = await vscode.window.showSaveDialog({
+      title: "Export conversation as Markdown",
+      saveLabel: "Export",
+      filters: { Markdown: ["md"] },
+    });
+    if (!target) return;
+    await vscode.workspace.fs.writeFile(target, new TextEncoder().encode(conversationToMarkdown(chat.snapshot())));
+    void vscode.window.showInformationMessage(`Conversation exported to ${target.path}.`);
+  });
+  command("matterwave.shareConversation", async () => {
+    const id = chat.activeConversationId();
+    if (!id) {
+      void vscode.window.showInformationMessage("Open a conversation to share it.");
+      return;
+    }
+    try {
+      const share = await client.createShare(id);
+      const url = `${client.baseUrl}${share.path}`;
+      await vscode.env.clipboard.writeText(url);
+      void vscode.window.showInformationMessage(`Share link copied to the clipboard: ${url}`);
+    } catch (error) {
+      void vscode.window.showErrorMessage(`The share link could not be created: ${describe(error)}`);
+    }
+  });
 
   void chat.refresh();
   void promptForServer(context);
@@ -278,6 +308,14 @@ async function askAboutFile(chat: ChatController, view: ChatViewProvider): Promi
   if (!question) return;
   const path = vscode.workspace.asRelativePath(editor.document.uri, false);
   await view.reveal();
+  // An image is sent as its own bytes for the vision-capable models; a text
+  // file is sent extracted, as before.
+  const contentType = imageContentType(path);
+  if (contentType) {
+    const bytes = await vscode.workspace.fs.readFile(editor.document.uri);
+    await chat.sendAttachment(question, imageAttachment(bytes, path, contentType));
+    return;
+  }
   await chat.askAboutFile(question, editor.document.getText(), path);
 }
 

@@ -1,10 +1,11 @@
-import type { ConversationMessage, ConversationWithMessages, DeviceToken } from "@matterwave/sdk";
+import type { ConversationMessage, ConversationWithMessages, DeviceToken } from "../lib/matterwaveClient";
 
 /**
- * The wire shapes of the `/api` routes this extension reads. What the SDK
- * types is taken from it; the rest is as the API writes it (`store.py`
- * `to_dict`, `parts.py`, `app.py`). Fields the extension never reads are
- * left out rather than guessed at.
+ * The wire shapes of the `/api` routes this extension reads. What the
+ * vendored SDK client (`src/lib/matterwaveClient.ts`) types is taken from
+ * it; the rest is as the API writes it (`store.py` `to_dict`, `parts.py`,
+ * `app.py`). Fields the extension never reads are left out rather than
+ * guessed at.
  *
  * A message's parts are the one place this file is stricter than the SDK:
  * the renderer switches over the part types the API writes, and the SDK
@@ -16,7 +17,7 @@ export type {
   DeviceCode as DeviceAuthorization,
   DeviceToken,
   Me,
-} from "@matterwave/sdk";
+} from "../lib/matterwaveClient";
 
 export type Role = "user" | "assistant" | "system";
 

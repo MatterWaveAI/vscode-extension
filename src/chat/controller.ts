@@ -1,4 +1,4 @@
-import type { ConversationFrame } from "@matterwave/sdk";
+import type { ConversationFrame } from "../lib/matterwaveClient";
 import type { MatterWaveClient } from "../api/client";
 import { ApiError } from "../api/errors";
 import { isUntrustedCertificate } from "../api/transport";
@@ -8,7 +8,15 @@ import { initialModel } from "../models";
 import { classifyStreamError, STREAM_ERROR_COPY, type StreamErrorKind } from "../streamErrors";
 import { appendDelta, deltaText, emptyAssistant, partFromStart, setPart } from "./assemble";
 import { switchTarget, transcriptOf } from "./branches";
-import type { ErrorView, HostMessage, Meter, ViewState, WebviewMessage } from "./protocol";
+import type {
+  ConversationSummary,
+  ErrorView,
+  HostMessage,
+  Meter,
+  SearchHitView,
+  ViewState,
+  WebviewMessage,
+} from "./protocol";
 
 /**
  * The chat's state and every request it makes, with no editor API in it.
@@ -33,8 +41,10 @@ export interface ChatDeps {
   post: (message: HostMessage) => void;
   isSignedIn: () => Promise<boolean>;
   rememberedModel: { get(): string | null; set(id: string): void };
-  /** Editor-side actions the webview can ask for: the model QuickPick, sign-in, the clipboard. */
-  runCommand: (command: "pickModel" | "signIn" | "copyRequestId") => void;
+  /** Editor-side actions the webview can ask for: the model QuickPick, sign-in, the clipboard, saving and sharing. */
+  runCommand: (
+    command: "pickModel" | "signIn" | "copyRequestId" | "exportConversation" | "shareConversation",
+  ) => void;
   onStatus?: (status: StatusInfo) => void;
 }
 
@@ -52,6 +62,9 @@ export class ChatController {
   private offline = false;
   private identity: string | null = null;
   private conversations: Conversation[] = [];
+  private archived: Conversation[] = [];
+  /** Non-null while the sidebar's search box holds a query. */
+  private searchResults: (Conversation & { snippet: string })[] | null = null;
   private activeId: string | null = null;
   private path: Message[] = [];
   private tree: Message[] = [];
@@ -79,6 +92,20 @@ export class ChatController {
         return this.newChat();
       case "openConversation":
         return this.openConversation(message.id);
+      case "searchConversations":
+        return this.searchConversations(message.query);
+      case "renameConversation":
+        return this.renameConversation(message.id, message.title);
+      case "deleteConversation":
+        return this.deleteConversation(message.id);
+      case "pinConversation":
+        return this.pinConversation(message.id, message.pinned);
+      case "archiveConversation":
+        return this.archiveConversation(message.id, message.archived);
+      case "exportConversation":
+      case "shareConversation":
+        this.deps.runCommand(message.type);
+        return;
       case "send":
         return this.send(message.content);
       case "stop":
@@ -90,6 +117,8 @@ export class ChatController {
         return this.edit(message.messageId, message.content);
       case "regenerate":
         return this.regenerate(message.messageId);
+      case "rateMessage":
+        return this.rateMessage(message.messageId, message.rating);
       case "switchBranch":
         return this.switchBranch(message.messageId, message.step);
       case "continue":
@@ -115,6 +144,8 @@ export class ChatController {
     if (!this.signedIn) {
       this.identity = null;
       this.conversations = [];
+      this.archived = [];
+      this.searchResults = null;
       this.activeId = null;
       this.path = [];
       this.tree = [];
@@ -123,15 +154,17 @@ export class ChatController {
       return;
     }
     await this.guard(async () => {
-      const [me, models, conversations] = await Promise.all([
+      const [me, models, conversations, archived] = await Promise.all([
         this.deps.client.me(),
         this.deps.client.models(),
         this.deps.client.listConversations(),
+        this.deps.client.listArchivedConversations(),
       ]);
       this.identity = me.name || me.email || me.subject;
       this.models = models.data;
       this.model = initialModel(models.data, this.deps.rememberedModel.get(), models.default_model);
       this.conversations = conversations;
+      this.archived = archived;
       if (this.activeId) await this.loadConversation(this.activeId);
     });
     this.emit();
@@ -158,6 +191,7 @@ export class ChatController {
     this.meter = null;
     this.error = null;
     this.notice = null;
+    this.searchResults = null;
     this.emit();
   }
 
@@ -184,6 +218,98 @@ export class ChatController {
       // stays blank rather than turning the whole view into an error.
       this.meter = null;
     }
+  }
+
+  // --- sidebar management ----------------------------------------------------
+
+  activeConversationId(): string | null {
+    return this.activeId;
+  }
+
+  /** The sidebar's search. An empty query leaves search mode for the list. */
+  async searchConversations(query: string): Promise<void> {
+    const q = query.trim();
+    if (!q) {
+      this.searchResults = null;
+      this.emit();
+      return;
+    }
+    await this.guard(async () => {
+      this.searchResults = await this.deps.client.searchConversations(q);
+    });
+    this.emit();
+  }
+
+  async renameConversation(id: string, title: string): Promise<void> {
+    const trimmed = title.trim();
+    if (!trimmed) return;
+    await this.guard(async () => {
+      const updated = await this.deps.client.updateConversation(id, { title: trimmed });
+      this.replaceRow(updated);
+    });
+    this.emit();
+  }
+
+  async deleteConversation(id: string): Promise<void> {
+    await this.guard(async () => {
+      await this.deps.client.deleteConversation(id);
+      this.conversations = this.conversations.filter((c) => c.id !== id);
+      this.archived = this.archived.filter((c) => c.id !== id);
+      this.searchResults = this.searchResults?.filter((c) => c.id !== id) ?? null;
+      // The record is gone; the open view would only be a 404 on the next turn.
+      if (this.activeId === id) this.newChat();
+    });
+    this.emit();
+  }
+
+  async pinConversation(id: string, pinned: boolean): Promise<void> {
+    await this.guard(async () => {
+      const updated = await this.deps.client.pinConversation(id, pinned);
+      this.replaceRow(updated);
+    });
+    this.emit();
+  }
+
+  async archiveConversation(id: string, archived: boolean): Promise<void> {
+    await this.guard(async () => {
+      const updated = await this.deps.client.archiveConversation(id, archived);
+      this.replaceRow(updated);
+      // Archiving the open conversation closes it: it has left the list the
+      // sidebar opens from, exactly as in the web app.
+      if (archived && this.activeId === id) this.newChat();
+    });
+    this.emit();
+  }
+
+  /** A row moved between lists (or re-sorted) comes back from the API as a whole row. */
+  private replaceRow(updated: Conversation): void {
+    this.conversations = this.conversations.filter((c) => c.id !== updated.id);
+    this.archived = this.archived.filter((c) => c.id !== updated.id);
+    if (updated.archived_at) this.archived.push(updated);
+    else this.conversations.push(updated);
+    this.sortRows(this.conversations);
+    this.sortRows(this.archived);
+    if (this.searchResults) {
+      this.searchResults = this.searchResults.map((hit) => (hit.id === updated.id ? { ...updated, snippet: hit.snippet } : hit));
+    }
+  }
+
+  /** The server's sidebar order: pinned first, then as sent (newest activity first). */
+  private sortRows(rows: Conversation[]): void {
+    rows.sort((a, b) => Number(Boolean(b.pinned_at)) - Number(Boolean(a.pinned_at)));
+  }
+
+  /** Thumbs on a reply. Rating 0 withdraws. */
+  async rateMessage(messageId: string, rating: -1 | 0 | 1): Promise<void> {
+    try {
+      if (rating === 0) await this.deps.client.deleteFeedback(messageId);
+      else await this.deps.client.setFeedback(messageId, rating);
+    } catch (error) {
+      // A thumbs click that failed is told through the error banner; a click
+      // that worked needs none.
+      this.fail(error);
+    }
+    this.emit();
   }
 
   // --- turns -----------------------------------------------------------------
@@ -238,7 +364,13 @@ export class ChatController {
     return this.send(failed.content, failed.attachmentIds);
   }
 
-  /** "Ask about file": upload the text, then send the question with the attachment. */
+  /**
+   * "Ask about file": upload the text, then send the question with the attachment.
+   *
+   * Images go the same road with their own bytes and content type, for the
+   * models that can see them; the API decides an upload's type from the
+   * bytes, so the shape the conversation records is the file's own.
+   */
   async askAboutFile(question: string, text: string, path: string): Promise<void> {
     const id = await this.ensureConversation();
     if (!id) return;
@@ -250,6 +382,22 @@ export class ChatController {
       this.notice = attachment.extract_truncated
         ? `${path} is longer than the model reads from one file: only its start was sent.`
         : null;
+    } catch (error) {
+      this.fail(error);
+      this.emit();
+      return;
+    }
+    await this.send(question, [attachmentId]);
+  }
+
+  /** Upload `attachment` into the conversation, then send `question` about it. */
+  async sendAttachment(question: string, attachment: { blob: Blob; filename: string }): Promise<void> {
+    const id = await this.ensureConversation();
+    if (!id) return;
+    let attachmentId: string;
+    try {
+      const saved = await this.deps.client.uploadAttachment(attachment.blob, attachment.filename, id);
+      attachmentId = saved.id;
     } catch (error) {
       this.fail(error);
       this.emit();
@@ -474,11 +622,26 @@ export class ChatController {
     return this.models;
   }
 
-  /** Only an included model is accepted; the picker never offers another, and this holds if it did. */
+  /**
+   * Only an included model is accepted; the picker never offers another, and this holds if it did.
+   *
+   * The pick is remembered twice: in the editor (the model every new
+   * conversation starts with) and, when a conversation is open, on the
+   * conversation itself (`default_model`), so the web app's next turn in it
+   * uses the same model. The conversation write is best-effort: a deployment
+   * without the route, or briefly offline, still chats -- every turn names
+   * its model anyway.
+   */
   setModel(model: ModelInfo): boolean {
     if (!model.included) return false;
     this.model = model;
     this.deps.rememberedModel.set(model.id);
+    const conversationId = this.activeId;
+    if (conversationId) {
+      void this.deps.client.updateConversation(conversationId, { default_model: model.id }).catch(() => {
+        /* the conversation keeps its previous default; the next turn still sends this one */
+      });
+    }
     this.emit();
     return true;
   }
@@ -523,7 +686,9 @@ export class ChatController {
       signedIn: this.signedIn,
       offline: this.offline,
       identity: this.identity,
-      conversations: this.conversations.map((c) => ({ id: c.id, title: c.title })),
+      conversations: this.conversations.map(conversationSummary),
+      archivedConversations: this.archived.map(conversationSummary),
+      searchResults: this.searchResults?.map((hit): SearchHitView => ({ ...conversationSummary(hit), snippet: hit.snippet })) ?? null,
       activeId: this.activeId,
       transcript: transcriptOf(this.path, this.tree),
       live: this.live,
@@ -551,6 +716,11 @@ export class ChatController {
 export function meterPercent(meter: Meter | null): number | null {
   if (!meter || meter.usedTokens === null || !meter.contextWindow) return null;
   return Math.min(100, Math.round((meter.usedTokens / meter.contextWindow) * 100));
+}
+
+/** What the sidebar needs from a row; `pinned_at`/`archived_at` read as flags. */
+function conversationSummary(c: Conversation): ConversationSummary {
+  return { id: c.id, title: c.title, pinned: Boolean(c.pinned_at), archived: Boolean(c.archived_at) };
 }
 
 function errorView(kind: StreamErrorKind, requestId: string | null): ErrorView {

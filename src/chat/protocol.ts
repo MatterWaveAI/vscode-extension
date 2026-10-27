@@ -22,6 +22,19 @@ export interface Meter {
   compactable: boolean;
 }
 
+/** One row of the sidebar. */
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  pinned: boolean;
+  archived: boolean;
+}
+
+/** A conversation a search matched, with the headline around the match. */
+export interface SearchHitView extends ConversationSummary {
+  snippet: string;
+}
+
 export interface TranscriptEntry {
   message: Message;
   /** 1-based position among its siblings, and how many there are. */
@@ -35,7 +48,12 @@ export interface ViewState {
   signedIn: boolean;
   offline: boolean;
   identity: string | null;
-  conversations: { id: string; title: string }[];
+  /** The unarchived conversations, pinned first, as the server orders them. */
+  conversations: ConversationSummary[];
+  /** The archive, shown folded away under its own heading. */
+  archivedConversations: ConversationSummary[];
+  /** The matches for the search box's text; null when no search is active. */
+  searchResults: SearchHitView[] | null;
   activeId: string | null;
   transcript: TranscriptEntry[];
   /** The assistant message being streamed, assembled from frames. */
@@ -59,11 +77,22 @@ export type WebviewMessage =
   | { type: "reconnect" }
   | { type: "newChat" }
   | { type: "openConversation"; id: string }
+  /** Empty query leaves search mode. */
+  | { type: "searchConversations"; query: string }
+  | { type: "renameConversation"; id: string; title: string }
+  | { type: "deleteConversation"; id: string }
+  | { type: "pinConversation"; id: string; pinned: boolean }
+  | { type: "archiveConversation"; id: string; archived: boolean }
+  /** The web app's same conversation, as a Markdown file. */
+  | { type: "exportConversation" }
+  | { type: "shareConversation" }
   | { type: "send"; content: string }
   | { type: "stop" }
   | { type: "retry" }
   | { type: "edit"; messageId: string; content: string }
   | { type: "regenerate"; messageId: string }
+  /** 0 withdraws a rating. */
+  | { type: "rateMessage"; messageId: string; rating: -1 | 0 | 1 }
   | { type: "switchBranch"; messageId: string; step: -1 | 1 }
   | { type: "continue" }
   | { type: "compact" }
@@ -72,8 +101,10 @@ export type WebviewMessage =
   | { type: "copyRequestId" };
 
 const WEBVIEW_TYPES = new Set<WebviewMessage["type"]>([
-  "ready", "reconnect", "newChat", "openConversation", "send", "stop", "retry", "edit",
-  "regenerate", "switchBranch", "continue", "compact", "pickModel", "signIn", "copyRequestId",
+  "ready", "reconnect", "newChat", "openConversation", "searchConversations", "renameConversation",
+  "deleteConversation", "pinConversation", "archiveConversation", "exportConversation", "shareConversation",
+  "send", "stop", "retry", "edit", "regenerate", "rateMessage", "switchBranch", "continue",
+  "compact", "pickModel", "signIn", "copyRequestId",
 ]);
 
 /** The webview is a lower trust level than the host: its messages are checked, not cast. */
@@ -82,15 +113,36 @@ export function parseWebviewMessage(raw: unknown): WebviewMessage | null {
   const msg = raw as Record<string, unknown>;
   if (typeof msg.type !== "string" || !WEBVIEW_TYPES.has(msg.type as WebviewMessage["type"])) return null;
   const str = (key: string) => typeof msg[key] === "string" && (msg[key] as string).length > 0;
+  const id = () => str("id");
   switch (msg.type) {
     case "openConversation":
-      return str("id") ? (msg as WebviewMessage) : null;
+      return id() ? (msg as WebviewMessage) : null;
+    case "searchConversations":
+      // The empty query is the one that leaves search mode; anything string is a search.
+      return typeof msg.query === "string" && msg.query.length <= 200 ? (msg as WebviewMessage) : null;
+    case "renameConversation": {
+      if (!id() || typeof msg.title !== "string") return null;
+      const title = msg.title.trim();
+      return title.length > 0 && title.length <= 200 ? (msg as WebviewMessage) : null;
+    }
+    case "deleteConversation":
+      return id() ? (msg as WebviewMessage) : null;
+    case "pinConversation":
+      return id() && typeof msg.pinned === "boolean" ? (msg as WebviewMessage) : null;
+    case "archiveConversation":
+      return id() && typeof msg.archived === "boolean" ? (msg as WebviewMessage) : null;
     case "send":
       return str("content") ? (msg as WebviewMessage) : null;
     case "edit":
       return str("messageId") && str("content") ? (msg as WebviewMessage) : null;
     case "regenerate":
       return str("messageId") ? (msg as WebviewMessage) : null;
+    case "rateMessage":
+      return (
+        str("messageId") && (msg.rating === 1 || msg.rating === 0 || msg.rating === -1)
+          ? (msg as WebviewMessage)
+          : null
+      );
     case "switchBranch":
       return str("messageId") && (msg.step === 1 || msg.step === -1) ? (msg as WebviewMessage) : null;
     default:

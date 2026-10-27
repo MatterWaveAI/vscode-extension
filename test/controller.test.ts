@@ -7,7 +7,7 @@ import { TokenStore } from "../src/auth/session";
 import { ChatController, type StatusInfo } from "../src/chat/controller";
 import type { HostMessage, ViewState } from "../src/chat/protocol";
 import { ChatViewProvider } from "../src/chat/viewProvider";
-import { CONVERSATION, fakeFetch, fixture, json, MODELS, sse } from "./fakeApi";
+import { CONVERSATION, fakeFetch, fixture, json, MODELS, sse, type Call } from "./fakeApi";
 import { FakeWebview, MemorySecrets } from "./vscode-mock";
 import { STREAM_ERROR_COPY } from "../src/streamErrors";
 
@@ -107,7 +107,7 @@ describe("the webview message channel", () => {
     expect(state.streaming).toBe(false);
     expect(state.live).toBeNull();
     expect(state.transcript.map((e) => e.message.id)).toEqual(["m_user", "m_asst"]);
-    expect(state.conversations).toEqual([{ id: "c_1", title: "What time is it?" }]);
+    expect(state.conversations).toEqual([{ id: "c_1", title: "What time is it?", pinned: false, archived: false }]);
     expect(state.meter).toEqual({ usedTokens: 1234, contextWindow: 32768, compactable: true });
     expect(statuses.at(-1)).toMatchObject({ signedIn: true, identity: "Ada", model: "GRT Small", meterPercent: 4 });
 
@@ -215,8 +215,173 @@ describe("branch switching", () => {
   });
 });
 
+function manage(controller: ChatController, extra: Record<string, (call: Call) => Response>) {
+    const fake = fakeFetch({
+      ...routes(),
+      "GET /api/conversations": () => json({ data: [CONVERSATION], filter: "default" }),
+      ...extra,
+    });
+  controller["deps"].client = new MatterWaveClient({ baseUrl: "https://mw.test", getToken: async () => TOKEN, fetch: fake.fetch });
+  return fake.calls;
+}
+
+describe("conversation management", () => {
+  it("renames through PATCH, trimmed, and the sidebar row follows", async () => {
+    const { controller } = await setup();
+    const calls = manage(controller, {
+      "PATCH /api/conversations/c_1": (call) => {
+        expect(JSON.parse(String(call.body))).toEqual({ title: "Better name" });
+        return json({ ...CONVERSATION, title: "Better name" });
+      },
+    });
+    await controller.refresh();
+    await controller.handle({ type: "renameConversation", id: "c_1", title: "  Better name  " });
+    expect(calls.find((c) => c.method === "PATCH")?.url).toBe("/api/conversations/c_1");
+    expect(controller.snapshot().conversations).toEqual([{ id: "c_1", title: "Better name", pinned: false, archived: false }]);
+  });
+
+  it("pins and unpins over PUT and DELETE, pinned sorting first", async () => {
+    const { controller } = await setup();
+    const second = { ...CONVERSATION, id: "c_2", title: "Second" };
+    const calls = manage(controller, {
+      "GET /api/conversations": () => json({ data: [CONVERSATION, second], filter: "default" }),
+      "PUT /api/conversations/c_2/pin": () => json({ ...second, pinned_at: second.created_at }),
+      "DELETE /api/conversations/c_2/pin": () => json(second),
+    });
+    await controller.refresh();
+    await controller.handle({ type: "pinConversation", id: "c_2", pinned: true });
+    expect(controller.snapshot().conversations.map((c) => c.id)).toEqual(["c_2", "c_1"]);
+    await controller.handle({ type: "pinConversation", id: "c_2", pinned: false });
+    expect(controller.snapshot().conversations.map((c) => c.id)).toEqual(["c_1", "c_2"]);
+    expect(calls.filter((c) => c.method !== "GET").map((c) => `${c.method} ${c.url}`)).toEqual([
+      "PUT /api/conversations/c_2/pin",
+      "DELETE /api/conversations/c_2/pin",
+    ]);
+  });
+
+  it("archives, which moves the row to the archive and closes it when open", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    manage(controller, {
+      "PUT /api/conversations/c_1/archive": () => json({ ...CONVERSATION, archived_at: CONVERSATION.created_at }),
+    });
+    await controller.handle({ type: "archiveConversation", id: "c_1", archived: true });
+    const state = controller.snapshot();
+    expect(state.conversations).toEqual([]);
+    expect(state.archivedConversations).toEqual([{ id: "c_1", title: "New chat", pinned: false, archived: true }]);
+    expect(state.activeId).toBeNull();
+    // Unarchiving puts it back.
+    controller["deps"].client = new MatterWaveClient({
+      baseUrl: "https://mw.test",
+      getToken: async () => TOKEN,
+      fetch: fakeFetch({
+        ...routes(),
+        "GET /api/conversations": () => json({ data: [], filter: "default" }),
+        "DELETE /api/conversations/c_1/archive": () => json(CONVERSATION),
+      }).fetch,
+    });
+    await controller.handle({ type: "archiveConversation", id: "c_1", archived: false });
+    expect(controller.snapshot().archivedConversations).toEqual([]);
+    expect(controller.snapshot().conversations.map((c) => c.id)).toEqual(["c_1"]);
+  });
+
+  it("deletes, and closes the view when the open conversation was the one deleted", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    const calls = manage(controller, { "DELETE /api/conversations/c_1": () => json({ status: "deleted" }) });
+    await controller.handle({ type: "deleteConversation", id: "c_1" });
+    expect(calls.find((c) => c.method === "DELETE")?.url).toBe("/api/conversations/c_1");
+    const state = controller.snapshot();
+    expect(state.conversations).toEqual([]);
+    expect(state.activeId).toBeNull();
+    expect(state.transcript).toEqual([]);
+  });
+
+  it("searches, and an empty query returns to the list", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    let query = "";
+    const calls = manage(controller, {
+      "GET /api/conversations/search": (call) => {
+        query = String(new URL(`https://mw.test${call.url}`).searchParams.get("q"));
+        return json({ data: [{ ...CONVERSATION, snippet: "the clock struck" }], query });
+      },
+    });
+    await controller.handle({ type: "searchConversations", query: "clock" });
+    expect(query).toBe("clock");
+    expect(controller.snapshot().searchResults).toEqual([{ id: "c_1", title: "New chat", pinned: false, archived: false, snippet: "the clock struck" }]);
+    const searches = calls.filter((c) => c.url.startsWith("/api/conversations/search")).length;
+    await controller.handle({ type: "searchConversations", query: "   " });
+    expect(controller.snapshot().searchResults).toBeNull();
+    expect(calls.filter((c) => c.url.startsWith("/api/conversations/search")).length).toBe(searches);
+  });
+});
+
+describe("per-conversation model memory", () => {
+  it("writes the picked model to the open conversation as its default_model", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    const calls = manage(controller, {
+      "PATCH /api/conversations/c_1": (call) => {
+        expect(JSON.parse(String(call.body))).toEqual({ default_model: "partner-x" });
+        return json({ ...CONVERSATION, default_model: "partner-x" });
+      },
+    });
+    const partner = MODELS.data.find((m) => m.id === "partner-x") as ModelInfo;
+    expect(controller.setModel(partner)).toBe(true);
+    await vi.waitFor(() => expect(calls.some((c) => c.method === "PATCH")).toBe(true));
+  });
+
+  it("keeps the write best-effort: a refusal is not a chat error", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    manage(controller, { "PATCH /api/conversations/c_1": () => json({ detail: "no" }, 422) });
+    const partner = MODELS.data.find((m) => m.id === "partner-x") as ModelInfo;
+    expect(controller.setModel(partner)).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(controller.snapshot().error).toBeNull();
+    expect(controller.currentModel()?.id).toBe("partner-x");
+  });
+
+  it("writes nothing while no conversation is open", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    const calls = manage(controller, {});
+    const partner = MODELS.data.find((m) => m.id === "partner-x") as ModelInfo;
+    controller.setModel(partner);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+  });
+});
+
+describe("message feedback", () => {
+  it("rates a reply with PUT and withdraws the rating with DELETE", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    const calls = manage(controller, {
+      "PUT /api/messages/m_asst/feedback": (call) => {
+        expect(JSON.parse(String(call.body))).toEqual({ rating: 1 });
+        return json({ message_id: "m_asst", rating: 1 });
+      },
+      "DELETE /api/messages/m_asst/feedback": () => json({ status: "removed" }),
+    });
+    await controller.handle({ type: "rateMessage", messageId: "m_asst", rating: 1 });
+    await controller.handle({ type: "rateMessage", messageId: "m_asst", rating: 0 });
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      "PUT /api/messages/m_asst/feedback",
+      "DELETE /api/messages/m_asst/feedback",
+    ]);
+    expect(controller.snapshot().error).toBeNull();
+  });
+});
+
 describe("the API's wire shapes", () => {
-  function withRoutes(controller: ChatController, extra: Record<string, (call: never) => Response>) {
+  function withRoutes(controller: ChatController, extra: Record<string, (call: Call) => Response>) {
     const fake = fakeFetch({ ...routes(), ...extra });
     controller["deps"].client = new MatterWaveClient({ baseUrl: "https://mw.test", getToken: async () => TOKEN, fetch: fake.fetch });
     return fake.calls;

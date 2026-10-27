@@ -8,7 +8,7 @@ import {
   type ConversationStream,
   type Fetch,
   type RequestOptions,
-} from "@matterwave/sdk";
+} from "../lib/matterwaveClient";
 import { ApiError, detailOf, parseRetryAfter } from "./errors";
 import type {
   ApiKeyListing,
@@ -29,11 +29,13 @@ import type {
  * bearer goes through here, in the host; the webview never makes a request
  * and never sees a credential.
  *
- * Conversations, their streamed turns and device login come from
- * `@matterwave/sdk`, bundled from `sdk/typescript/src` so no publish step
- * sits between the two. What the SDK does not cover stays here: the chat
- * model list, the context meter and compaction sized by the picked model,
- * attachment upload (multipart), and revoking the key device login minted.
+ * Conversations, their streamed turns and device login come from the
+ * MatterWave SDK, vendored at `src/lib/matterwaveClient.ts` (the package is
+ * not published to npm, and this repository no longer sits beside its
+ * source). What the SDK does not cover stays here: the chat model list, the
+ * context meter and compaction sized by the picked model, attachment upload
+ * (multipart), the conversation's pin / archive / delete toggles, share
+ * links, reply feedback, and revoking the key device login minted.
  *
  * The SDK takes its key at construction and the editor's can change at any
  * moment (sign-in, sign-out, a new base URL), so an SDK client is built for
@@ -145,8 +147,25 @@ export class MatterWaveClient {
     return list.data;
   }
 
+  /** The archive sidebar draws from: every row whose `archived_at` is set. */
+  async listArchivedConversations(): Promise<Conversation[]> {
+    const list = await this.call(({ reads }) => reads.conversations.list({ filter: "archived" }));
+    return list.data;
+  }
+
+  /** Full-text search over the caller's own messages, newest matches first. */
+  async searchConversations(query: string): Promise<(Conversation & { snippet: string })[]> {
+    const results = await this.call(({ reads }) => reads.conversations.search(query));
+    return results.data;
+  }
+
   createConversation(body: { title?: string; model?: string } = {}): Promise<Conversation> {
     return this.call(({ writes }) => writes.conversations.create(body));
+  }
+
+  /** Rename, or set (or clear) the model the conversation's turns default to. */
+  updateConversation(id: string, params: { title?: string; default_model?: string | null }): Promise<Conversation> {
+    return this.call(({ reads }) => reads.conversations.update(id, params));
   }
 
   async getConversation(id: string): Promise<ConversationDetail> {
@@ -159,6 +178,39 @@ export class MatterWaveClient {
 
   async setActiveLeaf(id: string, messageId: string): Promise<ConversationDetail> {
     return narrow(await this.call(({ reads }) => reads.conversations.setActiveLeaf(id, messageId)));
+  }
+
+  // --- sidebar management (PUT sets a state, DELETE clears it) -------------
+
+  pinConversation(id: string, pinned: boolean): Promise<Conversation> {
+    return this.json(pinned ? "PUT" : "DELETE", `/api/conversations/${encodeURIComponent(id)}/pin`);
+  }
+
+  archiveConversation(id: string, archived: boolean): Promise<Conversation> {
+    return this.json(archived ? "PUT" : "DELETE", `/api/conversations/${encodeURIComponent(id)}/archive`);
+  }
+
+  async deleteConversation(id: string): Promise<void> {
+    await this.json("DELETE", `/api/conversations/${encodeURIComponent(id)}`);
+  }
+
+  /**
+   * Mint a read-only link to a snapshot of the active path. The token is in
+   * this one answer and nowhere else; `path` is the web app's `/share/…`
+   * route, which the caller prefixes with its origin.
+   */
+  createShare(id: string): Promise<{ token: string; path: string }> {
+    return this.json("POST", `/api/conversations/${encodeURIComponent(id)}/share`, {});
+  }
+
+  /** Rate a reply (1 or -1), or change the rating. */
+  setFeedback(messageId: string, rating: 1 | -1): Promise<void> {
+    return this.json("PUT", `/api/messages/${encodeURIComponent(messageId)}/feedback`, { rating });
+  }
+
+  /** Withdraw a rating; idempotent on a message with none. */
+  async deleteFeedback(messageId: string): Promise<void> {
+    await this.json("DELETE", `/api/messages/${encodeURIComponent(messageId)}/feedback`);
   }
 
   /** `model` sizes the meter by that model's window; the conversation's default otherwise. */

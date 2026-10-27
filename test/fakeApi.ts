@@ -72,4 +72,6 @@ export const CONVERSATION = {
   last_message_at: null,
   default_model: null,
   current_leaf_message_id: null,
+  pinned_at: null,
+  archived_at: null,
 };

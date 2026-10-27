@@ -14,10 +14,7 @@
     "isolatedModules": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "noEmit": true,
-    "paths": {
-      "@matterwave/sdk": ["../../sdk/typescript/src/index.ts"]
-    }
+    "noEmit": true
   },
   "include": ["src", "test", "e2e", "vitest.config.mts"]
 }

@@ -17,6 +17,11 @@ const send = (message: WebviewMessage) => vscode.postMessage(message);
 
 let state: ViewState | null = null;
 let editingId: string | null = null;
+/** The conversation whose rename box is open, and the one a delete is confirmed for. */
+let renamingConversationId: string | null = null;
+let confirmingDeleteId: string | null = null;
+/** This session's ratings, so the thumbs show what was sent. The server keeps the record. */
+const ratings = new Map<string, -1 | 1>();
 const expandedSummaries = new Set<string>();
 
 const app = document.getElementById("app") as HTMLElement;
@@ -45,6 +50,21 @@ function button(label: string, onClick: () => void, opts: { className?: string; 
 // --- the static frame: built once so the composer keeps its draft ---------------
 
 const header = el("div", { className: "bar" });
+const convos = el("div", { className: "convos" });
+const convoSearch = document.createElement("input");
+convoSearch.type = "text";
+convoSearch.placeholder = "Search conversations…";
+convoSearch.setAttribute("aria-label", "Search conversations");
+let searchTimer: ReturnType<typeof setTimeout> | undefined;
+convoSearch.addEventListener("input", () => {
+  // One request per pause in typing, not per keystroke.
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => send({ type: "searchConversations", query: convoSearch.value }), 250);
+});
+const convoList = el("div", { className: "convos-list" });
+const archivedList = el("div", { className: "convos-list" });
+const archivedBlock = el("details", { className: "archived" }, [el("summary", { text: "Archived" }), archivedList]);
+convos.append(convoSearch, convoList, archivedBlock);
 const meta = el("div", { className: "meta" });
 const banners = el("div");
 const transcript = el("div", { className: "transcript" });
@@ -83,8 +103,9 @@ function render(): void {
     app.replaceChildren(signIn);
     return;
   }
-  if (!app.contains(composer)) app.replaceChildren(header, meta, banners, transcript, composer);
+  if (!app.contains(composer)) app.replaceChildren(header, convos, meta, banners, transcript, composer);
   renderHeader(state);
+  renderConversations(state);
   renderMeta(state);
   renderBanners(state);
   renderTranscript(state);
@@ -97,24 +118,97 @@ function render(): void {
 }
 
 function renderHeader(s: ViewState): void {
-  const select = el("select", { title: "Conversations" });
-  const option = (label: string, value: string, selected: boolean) => {
-    const node = el("option", { text: label });
-    node.value = value;
-    node.selected = selected;
-    return node;
-  };
-  select.appendChild(option("New chat", "", !s.activeId));
-  for (const c of s.conversations) select.appendChild(option(c.title || "Untitled", c.id, c.id === s.activeId));
-  select.addEventListener("change", () => {
-    if (select.value) send({ type: "openConversation", id: select.value });
-    else send({ type: "newChat" });
-  });
   header.replaceChildren(
-    select,
-    button("+", () => send({ type: "newChat" }), { title: "New chat" }),
     button(s.model?.label ?? "Pick model", () => send({ type: "pickModel" }), { className: "link", title: "Pick model" }),
+    button("+", () => send({ type: "newChat" }), { className: "link", title: "New chat" }),
+    button("Export", () => send({ type: "exportConversation" }), { className: "link", disabled: !s.activeId, title: "Save this conversation as Markdown" }),
+    button("Share", () => send({ type: "shareConversation" }), { className: "link", disabled: !s.activeId, title: "Copy a read-only link to this conversation" }),
   );
+}
+
+// --- the conversation sidebar ---------------------------------------------------
+
+function renderConversations(s: ViewState): void {
+  const rows = s.searchResults ?? s.conversations;
+  if (rows.length === 0) {
+    convoList.replaceChildren(
+      el("p", { className: "empty", text: s.searchResults ? "No conversations match." : "No conversations yet." }),
+    );
+  } else {
+    convoList.replaceChildren(...rows.map((row) => conversationRow(row, s)));
+  }
+  // The archive folds away, and never during a search: the results are what is asked about.
+  archivedBlock.open = archivedBlock.open && !s.searchResults;
+  archivedBlock.hidden = s.searchResults !== null || s.archivedConversations.length === 0;
+  archivedList.replaceChildren(...s.archivedConversations.map((row) => archivedRow(row)));
+}
+
+function conversationRow(row: ViewState["conversations"][number], s: ViewState): HTMLElement {
+  const actions = el("div", { className: "row-actions" });
+  if (renamingConversationId === row.id) {
+    const box = document.createElement("input");
+    box.type = "text";
+    box.value = row.title;
+    box.setAttribute("aria-label", "Conversation name");
+    const done = (save: boolean) => {
+      const title = box.value.trim();
+      renamingConversationId = null;
+      confirmingDeleteId = null;
+      if (save && title && title !== row.title) send({ type: "renameConversation", id: row.id, title });
+      else render();
+    };
+    box.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") done(true);
+      else if (event.key === "Escape") done(false);
+    });
+    box.addEventListener("blur", () => done(true));
+    const wrap = el("div", { className: "row" }, [box, button("Save", () => done(true), { className: "link", title: "Save the name" })]);
+    setTimeout(() => box.focus(), 0);
+    return wrap;
+  }
+  const title = button(row.title || "Untitled", () => send({ type: "openConversation", id: row.id }), {
+    className: "link title",
+    title: row.title || "Untitled",
+  });
+  actions.append(
+    button(row.pinned ? "Unpin" : "Pin", () => send({ type: "pinConversation", id: row.id, pinned: !row.pinned }), { className: "link", title: row.pinned ? "Unpin" : "Pin to the top" }),
+    button("Rename", () => {
+      confirmingDeleteId = null;
+      renamingConversationId = row.id;
+      render();
+    }, { className: "link", title: "Rename" }),
+    button("Archive", () => send({ type: "archiveConversation", id: row.id, archived: true }), { className: "link", title: "Archive" }),
+    button(confirmingDeleteId === row.id ? "Delete?" : "Delete", () => {
+      if (confirmingDeleteId === row.id) {
+        confirmingDeleteId = null;
+        send({ type: "deleteConversation", id: row.id });
+      } else {
+        confirmingDeleteId = row.id;
+        render();
+      }
+    }, { className: "link", title: "Delete the conversation and its messages" }),
+  );
+  const main = el("div", { className: "row-main" }, [title]);
+  // A search hit shows the headline around the match, the reason it was found.
+  if (isSearchHit(row)) main.append(el("div", { className: "snippet", text: row.snippet }));
+  const node = el("div", { className: `row${row.id === s.activeId ? " active" : ""}` }, [main, actions]);
+  return node;
+}
+
+function archivedRow(row: ViewState["archivedConversations"][number]): HTMLElement {
+  const actions = el("div", { className: "row-actions" });
+  actions.append(
+    button("Unarchive", () => send({ type: "archiveConversation", id: row.id, archived: false }), { className: "link", title: "Move back into the list" }),
+    button("Delete", () => send({ type: "deleteConversation", id: row.id }), { className: "link", title: "Delete the conversation and its messages" }),
+  );
+  return el("div", { className: "row archived-row" }, [
+    button(row.title || "Untitled", () => send({ type: "openConversation", id: row.id }), { className: "link title", title: row.title || "Untitled" }),
+    actions,
+  ]);
+}
+
+function isSearchHit(row: unknown): row is { snippet: string } {
+  return typeof (row as { snippet?: unknown })?.snippet === "string";
 }
 
 function renderMeta(s: ViewState): void {
@@ -228,11 +322,34 @@ function renderEntry(entry: TranscriptEntry, isLast: boolean, streaming: boolean
         }, { className: "link" }),
       );
     } else if (m.role === "assistant") {
+      const rating = ratings.get(m.id);
+      actions.appendChild(
+        button(rating === 1 ? "Liked" : "Like", () => {
+          const next = rating === 1 ? 0 : 1;
+          setRating(m.id, next);
+          send({ type: "rateMessage", messageId: m.id, rating: next });
+          render();
+        }, { className: `link${rating === 1 ? " rated" : ""}`, title: "Good reply — send feedback" }),
+      );
+      actions.appendChild(
+        button(rating === -1 ? "Disliked" : "Dislike", () => {
+          const next = rating === -1 ? 0 : -1;
+          setRating(m.id, next);
+          send({ type: "rateMessage", messageId: m.id, rating: next });
+          render();
+        }, { className: `link${rating === -1 ? " rated" : ""}`, title: "Bad reply — send feedback" }),
+      );
       actions.appendChild(button("Regenerate", () => send({ type: "regenerate", messageId: m.id }), { className: "link" }));
     }
     node.appendChild(actions);
   }
   return node;
+}
+
+/** Record this session's rating, so the thumbs show the state that was sent. */
+function setRating(messageId: string, rating: -1 | 0 | 1): void {
+  if (rating === 0) ratings.delete(messageId);
+  else ratings.set(messageId, rating);
 }
 
 function renderUserBody(m: Message): HTMLElement {

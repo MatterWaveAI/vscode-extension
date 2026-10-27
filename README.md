@@ -92,7 +92,7 @@ deployment. Against an API started on this machine
 with `MW_AUTH_MODE=none`, `E2E_AUTH=none` skips the sign-in and the dev principal approves the
 code; `E2E_MODEL` names whatever that API serves.
 
-`@matterwave/sdk` resolves to `../../sdk/typescript/src` (the alias is in `tsconfig.json`,
-`esbuild.mjs` and `vitest.config.mts`), so the SDK needs no build or publish for the extension
-to pick up a change there. Without a connection the composer is disabled and the draft is kept;
-**Reconnect** in the view tries the API again.
+The MatterWave SDK is vendored at `src/lib/matterwaveClient.ts` (trimmed from
+[MatterWaveAI/typescript-sdk](https://github.com/MatterWaveAI/typescript-sdk), MIT): the package
+is not published to npm, so the extension carries the client it needs. Without a connection the
+composer is disabled and the draft is kept; **Reconnect** in the view tries the API again.

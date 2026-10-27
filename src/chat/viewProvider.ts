@@ -126,4 +126,18 @@ details pre { white-space: pre-wrap; }
 .composer textarea { resize: vertical; min-height: 48px; font: inherit; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); padding: 4px; }
 .composer .row { display: flex; gap: 6px; justify-content: flex-end; }
 .signin { padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+.convos { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--vscode-panel-border); }
+.convos input { font: inherit; font-size: 95%; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); padding: 3px 6px; min-width: 0; }
+.convos-list { display: flex; flex-direction: column; gap: 1px; max-height: 140px; overflow-y: auto; }
+.convos-list .row { display: flex; gap: 4px; align-items: center; min-height: 22px; }
+.convos-list .row .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; color: var(--vscode-foreground); }
+.convos-list .row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: stretch; }
+.convos-list .snippet { font-size: 85%; opacity: .7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convos-list .row.active .title { font-weight: 600; }
+.convos-list .row-actions { display: flex; gap: 2px; opacity: .55; flex: none; }
+.convos-list .row:hover .row-actions, .convos-list .row:focus-within .row-actions { opacity: 1; }
+.convos-list .row-actions button { font-size: 85%; padding: 0 3px; }
+.convos-list .empty { margin: 2px 0; font-size: 90%; opacity: .7; }
+.convos details.archived summary { cursor: pointer; font-size: 90%; opacity: .8; }
+button.rated { font-weight: 600; text-decoration: underline; }
 `;

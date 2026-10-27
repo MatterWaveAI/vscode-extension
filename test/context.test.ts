@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fileAttachment, fitsContentCap, MAX_CONTENT_CHARS, selectionContent } from "../src/context";
+import { fileAttachment, fitsContentCap, imageAttachment, imageContentType, MAX_CONTENT_CHARS, selectionContent } from "../src/context";
 
 describe("selectionContent", () => {
   it("puts the question first and fences the selection with its language and path", () => {
@@ -42,5 +42,24 @@ describe("fileAttachment", () => {
     expect(filename).toBe("src/a.ts");
     expect(blob.type).toBe("text/plain");
     expect(await blob.text()).toBe("export const a = 1;\n");
+  });
+});
+
+describe("image attachments", () => {
+  it("knows the types the vision models read, by extension, case-insensitively", () => {
+    expect(imageContentType("shot.PNG")).toBe("image/png");
+    expect(imageContentType("a/photo.jpeg")).toBe("image/jpeg");
+    expect(imageContentType("a/anim.gif")).toBe("image/gif");
+    expect(imageContentType("a/pic.webp")).toBe("image/webp");
+    expect(imageContentType("notes.md")).toBeNull();
+    expect(imageContentType("noext")).toBeNull();
+  });
+
+  it("carries its own bytes under its own type", async () => {
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    const { blob, filename } = imageAttachment(bytes, "img/one.png", "image/png");
+    expect(filename).toBe("img/one.png");
+    expect(blob.type).toBe("image/png");
+    expect(new Uint8Array(await blob.arrayBuffer())).toEqual(bytes);
   });
 });

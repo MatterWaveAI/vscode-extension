@@ -1,4 +1,4 @@
-import type { DeltaFrame, PartStartFrame } from "@matterwave/sdk";
+import type { DeltaFrame, PartStartFrame } from "../lib/matterwaveClient";
 import type { Message, Part } from "../api/types";
 
 /**

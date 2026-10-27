@@ -1,4 +1,4 @@
-import { frameFromEvent, sseEvents } from "@matterwave/sdk";
+import { frameFromEvent, sseEvents } from "../src/lib/matterwaveClient";
 import { describe, expect, it } from "vitest";
 import { fixture, sse } from "./fakeApi";
 

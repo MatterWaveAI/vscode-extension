@@ -1,8 +1,8 @@
-import { setSleep } from "@matterwave/sdk";
+import { setSleep } from "../src/lib/matterwaveClient";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { MatterWaveClient } from "../src/api/client";
 import { ApiError, parseRetryAfter } from "../src/api/errors";
-import { fakeFetch, fixture, json, sse } from "./fakeApi";
+import { CONVERSATION, fakeFetch, fixture, json, sse } from "./fakeApi";
 
 // The SDK pauses before a resume and between its own retries; the tests
 // measure what it asked for, not the clock.
@@ -143,5 +143,63 @@ describe("MatterWaveClient", () => {
     });
     await expect(api.listConversations()).rejects.toMatchObject({ status: 0 });
     expect(online).toContain(false);
+  });
+
+  it("renames and sets the conversation's default model through PATCH", async () => {
+    const { api, calls } = client({ "PATCH /api/conversations/c_1": () => json(CONVERSATION) });
+    await api.updateConversation("c_1", { title: "New name" });
+    expect(calls[0]?.url).toBe("/api/conversations/c_1");
+    expect(JSON.parse(String(calls[0]?.body))).toEqual({ title: "New name" });
+    // `default_model: null` clears back to the deployment's default, so the key is sent even when null.
+    await api.updateConversation("c_1", { default_model: null });
+    expect(JSON.parse(String(calls[1]?.body))).toEqual({ default_model: null });
+  });
+
+  it("toggles pin, archive and delete over the sidebar's routes", async () => {
+    const { api, calls } = client({
+      "PUT /api/conversations/c_1/pin": () => json({ ...CONVERSATION, pinned_at: CONVERSATION.created_at }),
+      "DELETE /api/conversations/c_1/pin": () => json(CONVERSATION),
+      "PUT /api/conversations/c_1/archive": () => json({ ...CONVERSATION, archived_at: CONVERSATION.created_at }),
+      "DELETE /api/conversations/c_1/archive": () => json(CONVERSATION),
+      "DELETE /api/conversations/c_1": () => json({ status: "deleted" }),
+    });
+    await api.pinConversation("c_1", true);
+    await api.pinConversation("c_1", false);
+    await api.archiveConversation("c_1", true);
+    await api.archiveConversation("c_1", false);
+    await api.deleteConversation("c_1");
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      "PUT /api/conversations/c_1/pin",
+      "DELETE /api/conversations/c_1/pin",
+      "PUT /api/conversations/c_1/archive",
+      "DELETE /api/conversations/c_1/archive",
+      "DELETE /api/conversations/c_1",
+    ]);
+    expect(calls.every((c) => c.body === undefined)).toBe(true);
+  });
+
+  it("searches, shares and rates over the same routes the web app uses", async () => {
+    const { api, calls } = client({
+      "GET /api/conversations/search": () => json({ data: [{ ...CONVERSATION, snippet: "the clock" }], query: "clock" }),
+      "POST /api/conversations/c_1/share": () => json({ share: { id: "s_1" }, token: "tok", path: "/share/tok" }, 201),
+      "PUT /api/messages/m_1/feedback": () => json({ message_id: "m_1", rating: 1 }),
+      "DELETE /api/messages/m_1/feedback": () => json({ status: "removed" }),
+    });
+    const hits = await api.searchConversations("clock");
+    expect(calls[0]?.url).toBe("/api/conversations/search?q=clock");
+    expect(hits).toEqual([{ ...CONVERSATION, snippet: "the clock" }]);
+    const share = await api.createShare("c_1");
+    expect(JSON.parse(String(calls[1]?.body))).toEqual({});
+    expect(share).toMatchObject({ token: "tok", path: "/share/tok" });
+    await api.setFeedback("m_1", -1);
+    expect(JSON.parse(String(calls[2]?.body))).toEqual({ rating: -1 });
+    await api.deleteFeedback("m_1");
+    expect(calls[3]?.method).toBe("DELETE");
+  });
+
+  it("lists the archive with the filter the sidebar folds away", async () => {
+    const { api, calls } = client({ "GET /api/conversations": () => json({ data: [], filter: "archived" }) });
+    await api.listArchivedConversations();
+    expect(calls[0]?.url).toBe("/api/conversations?filter=archived");
   });
 });
