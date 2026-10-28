@@ -14,9 +14,11 @@ import type { ConversationMessage, ConversationWithMessages, DeviceToken } from 
 
 export type {
   Conversation,
+  ConversationInstructions,
   DeviceCode as DeviceAuthorization,
   DeviceToken,
   Me,
+  UserInstructions,
 } from "../lib/matterwaveClient";
 
 export type Role = "user" | "assistant" | "system";
@@ -144,4 +146,26 @@ export interface SendBody {
   content: string;
   model?: string;
   attachment_ids?: string[];
+}
+
+// --- message feedback --------------------------------------------------------
+
+/** A reason a reply earned its thumbs-down, as the feedback contract spells them. */
+export type FeedbackReason = "wrong" | "unhelpful" | "incomplete" | "too_long" | "off_topic" | "unsafe";
+
+export const FEEDBACK_REASONS: readonly FeedbackReason[] = [
+  "wrong",
+  "unhelpful",
+  "incomplete",
+  "too_long",
+  "off_topic",
+  "unsafe",
+];
+
+/** One of the caller's feedback rows, as `GET /api/conversations/{id}/feedback` returns it. */
+export interface FeedbackRow {
+  message_id: string;
+  rating: -1 | 1;
+  reasons: FeedbackReason[];
+  comment: string | null;
 }

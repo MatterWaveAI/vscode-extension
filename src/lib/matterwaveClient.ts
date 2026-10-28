@@ -181,6 +181,29 @@ export interface Conversation {
   pinned_at: string | null;
   archived_at: string | null;
   folder_id: string | null;
+  /** Fixed at creation; a temporary chat is in no list and is deleted 24h after its last message. */
+  temporary?: boolean | null;
+}
+
+/** `GET /api/me/instructions`: the person's own custom instructions. */
+export interface UserInstructions {
+  about: string | null;
+  style: string | null;
+}
+
+/**
+ * The instruction layers for one conversation: what `GET
+ * /api/conversations/{id}` carries as `instructions`, and what `PUT
+ * /api/conversations/{id}/instructions` answers. `effective` is the text the
+ * model is actually told.
+ */
+export interface ConversationInstructions {
+  org: string | null;
+  user: { about: string | null; style: string | null } | null;
+  conversation: string | null;
+  /** True when the conversation carries its own text instead of the person's. */
+  user_overridden: boolean;
+  effective: string | null;
 }
 
 /**
@@ -190,7 +213,7 @@ export interface Conversation {
 export interface ConversationWithMessages extends Conversation {
   messages: ConversationMessage[];
   tree?: ConversationMessage[];
-  instructions?: Record<string, unknown>;
+  instructions?: ConversationInstructions | null;
 }
 
 export type ConversationFilter = "default" | "all" | "pinned" | "archived";
@@ -226,6 +249,12 @@ export interface SearchResults {
 export interface CreateConversationParams {
   title?: string | null;
   model?: string | null;
+  /**
+   * Fixed at creation: a temporary conversation appears in no list filter or
+   * search, refuses share/pin/fork with a 409, and is deleted 24 hours after
+   * its last message. Off, the key is omitted entirely.
+   */
+  temporary?: boolean;
 }
 
 /**
@@ -819,6 +848,37 @@ export class MatterWave {
     );
   }
 
+  /** `GET /api/me/instructions`: the signed-in person's own instructions. */
+  meInstructions(options: RequestOptions = {}): Promise<WithRequestId<UserInstructions>> {
+    return this.json<UserInstructions>(
+      { method: "GET", path: "/api/me/instructions", body: undefined, keyed: true, stream: false },
+      options,
+    );
+  }
+
+  /**
+   * `PUT /api/me/instructions`: replace both fields. More than 3000
+   * characters across the two is refused with 422; a plan without the
+   * feature, with 402.
+   */
+  updateMeInstructions(
+    params: { about?: string | null; style?: string | null },
+    options: RequestOptions = {},
+  ): Promise<WithRequestId<UserInstructions>> {
+    return this.json<UserInstructions>(
+      { method: "PUT", path: "/api/me/instructions", body: { about: params.about ?? null, style: params.style ?? null }, keyed: true, stream: false },
+      options,
+    );
+  }
+
+  /** `GET /api/org/instructions`; the organisation's owner and admins only. */
+  orgInstructions(options: RequestOptions = {}): Promise<WithRequestId<UserInstructions>> {
+    return this.json<UserInstructions>(
+      { method: "GET", path: "/api/org/instructions", body: undefined, keyed: true, stream: false },
+      options,
+    );
+  }
+
   /** @internal One JSON operation, with the retry loop. */
   async json<T extends object>(prepared: Prepared, options: RequestOptions): Promise<WithRequestId<T>> {
     const { response } = await this.send(prepared, options);
@@ -1163,6 +1223,19 @@ export class Conversations {
   ): Promise<WithRequestId<ConversationWithMessages>> {
     segment("messageId", messageId);
     return this.call("PUT", conversationPath(conversationId, "/active-leaf"), { message_id: messageId }, options);
+  }
+
+  /**
+   * `PUT /api/conversations/{id}/instructions`: set the conversation's own
+   * instructions, or clear it back to the person's with `null`. Answers the
+   * effective layers, `effective` included.
+   */
+  setInstructions(
+    conversationId: string,
+    text: string | null,
+    options: RequestOptions = {},
+  ): Promise<WithRequestId<ConversationInstructions>> {
+    return this.call("PUT", conversationPath(conversationId, "/instructions"), { text }, options);
   }
 
   private async stream(prepared: Prepared, conversationId: string, options: RequestOptions): Promise<ConversationStream> {

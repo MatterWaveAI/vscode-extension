@@ -191,10 +191,75 @@ describe("MatterWaveClient", () => {
     const share = await api.createShare("c_1");
     expect(JSON.parse(String(calls[1]?.body))).toEqual({});
     expect(share).toMatchObject({ token: "tok", path: "/share/tok" });
-    await api.setFeedback("m_1", -1);
+    await api.setFeedback("m_1", { rating: -1 });
     expect(JSON.parse(String(calls[2]?.body))).toEqual({ rating: -1 });
     await api.deleteFeedback("m_1");
     expect(calls[3]?.method).toBe("DELETE");
+  });
+
+  it("creates a temporary conversation only when asked, with the key omitted otherwise", async () => {
+    const { api, calls } = client({ "POST /api/conversations": () => json(CONVERSATION, 201) });
+    await api.createConversation({ model: "grt-small" });
+    expect(JSON.parse(String(calls[0]?.body))).toEqual({ model: "grt-small" });
+    await api.createConversation({ model: "grt-small", temporary: true });
+    expect(JSON.parse(String(calls[1]?.body))).toEqual({ model: "grt-small", temporary: true });
+    await api.createConversation({ temporary: false });
+    expect(JSON.parse(String(calls[2]?.body))).toEqual({});
+  });
+
+  it("reads and writes instructions over the three routes", async () => {
+    const effective = {
+      org: "Be brief.",
+      user: { about: "Ada", style: "Terser" },
+      conversation: null,
+      user_overridden: false,
+      effective: "Be brief.",
+    };
+    const { api, calls } = client({
+      "GET /api/me/instructions": () => json({ about: "Ada", style: "Terser" }),
+      "PUT /api/me/instructions": (call) => {
+        expect(JSON.parse(String(call.body))).toEqual({ about: "About Ada", style: null });
+        return json({ about: "About Ada", style: null });
+      },
+      "GET /api/org/instructions": () => json({ about: "Be brief.", style: null }),
+      "PUT /api/conversations/c_1/instructions": (call) => {
+        // The answer carries the layers as they now stand: the text rides back
+        // as `conversation`, and clearing it falls back to the person's own.
+        const text = (JSON.parse(String(call.body)) as { text: string | null }).text;
+        return json({
+          ...effective,
+          conversation: text,
+          user_overridden: text !== null,
+          effective: text === null ? effective.effective : `${effective.effective} ${text}`,
+        });
+      },
+    });
+    await expect(api.myInstructions()).resolves.toEqual({ about: "Ada", style: "Terser" });
+    await api.updateMyInstructions({ about: "About Ada", style: null });
+    await expect(api.orgInstructions()).resolves.toEqual({ about: "Be brief.", style: null });
+    const saved = await api.setConversationInstructions("c_1", "Cite sources");
+    expect(saved).toEqual({ ...effective, conversation: "Cite sources", user_overridden: true, effective: "Be brief. Cite sources" });
+    // `null` clears the conversation's own text: the key is sent, not dropped.
+    await api.setConversationInstructions("c_1", null);
+    expect(JSON.parse(String(calls.at(-1)?.body))).toEqual({ text: null });
+  });
+
+  it("sends the full feedback contract and reads a conversation's rows back", async () => {
+    const { api, calls } = client({
+      "PUT /api/messages/m_1/feedback": () => json({ message_id: "m_1", rating: -1, reasons: ["wrong"], comment: "no" }),
+      "GET /api/conversations/c_1/feedback": () =>
+        json({ data: [{ message_id: "m_1", rating: -1, reasons: ["wrong"], comment: "no" }] }),
+    });
+    await api.setFeedback("m_1", { rating: -1, reasons: ["wrong", "unhelpful"], comment: "no" });
+    expect(JSON.parse(String(calls[0]?.body))).toEqual({ rating: -1, reasons: ["wrong", "unhelpful"], comment: "no" });
+    await api.setFeedback("m_1", { rating: 1 });
+    expect(JSON.parse(String(calls[1]?.body))).toEqual({ rating: 1 });
+    await api.setFeedback("m_1", { rating: -1, comment: null });
+    expect(JSON.parse(String(calls[2]?.body))).toEqual({ rating: -1, comment: null });
+    const rows = await api.conversationFeedback("c_1");
+    expect(rows.data).toHaveLength(1);
+    expect(rows.data[0]).toMatchObject({ message_id: "m_1", rating: -1 });
+    expect(calls[3]?.url).toBe("/api/conversations/c_1/feedback");
   });
 
   it("lists the archive with the filter the sidebar folds away", async () => {

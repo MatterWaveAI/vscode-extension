@@ -16,12 +16,16 @@ import type {
   ContextUsage,
   Conversation,
   ConversationDetail,
+  ConversationInstructions,
   DeviceAuthorization,
   DevicePoll,
+  FeedbackReason,
+  FeedbackRow,
   Me,
   Message,
   ModelList,
   SendBody,
+  UserInstructions,
 } from "./types";
 
 /**
@@ -159,8 +163,17 @@ export class MatterWaveClient {
     return results.data;
   }
 
-  createConversation(body: { title?: string; model?: string } = {}): Promise<Conversation> {
-    return this.call(({ writes }) => writes.conversations.create(body));
+  /**
+   * Create the conversation. `temporary` is fixed at creation, and the key
+   * rides only when the chat is temporary: off, it is omitted entirely, so
+   * the server's default (a kept conversation) governs.
+   */
+  createConversation(body: { title?: string; model?: string; temporary?: boolean } = {}): Promise<Conversation> {
+    const params: { title?: string; model?: string; temporary?: boolean } = {};
+    if (body.title !== undefined) params.title = body.title;
+    if (body.model !== undefined) params.model = body.model;
+    if (body.temporary === true) params.temporary = true;
+    return this.call(({ writes }) => writes.conversations.create(params));
   }
 
   /** Rename, or set (or clear) the model the conversation's turns default to. */
@@ -203,14 +216,47 @@ export class MatterWaveClient {
     return this.json("POST", `/api/conversations/${encodeURIComponent(id)}/share`, {});
   }
 
-  /** Rate a reply (1 or -1), or change the rating. */
-  setFeedback(messageId: string, rating: 1 | -1): Promise<void> {
-    return this.json("PUT", `/api/messages/${encodeURIComponent(messageId)}/feedback`, { rating });
+  /** Rate a reply (1 or -1), with the optional reasons and comment the contract takes. A re-vote replaces. */
+  setFeedback(
+    messageId: string,
+    feedback: { rating: -1 | 1; reasons?: FeedbackReason[]; comment?: string | null },
+  ): Promise<FeedbackRow> {
+    const body: { rating: -1 | 1; reasons?: FeedbackReason[]; comment?: string | null } = { rating: feedback.rating };
+    if (feedback.reasons?.length) body.reasons = feedback.reasons;
+    if (feedback.comment !== undefined) body.comment = feedback.comment;
+    return this.json("PUT", `/api/messages/${encodeURIComponent(messageId)}/feedback`, body);
   }
 
   /** Withdraw a rating; idempotent on a message with none. */
   async deleteFeedback(messageId: string): Promise<void> {
     await this.json("DELETE", `/api/messages/${encodeURIComponent(messageId)}/feedback`);
+  }
+
+  /** The caller's own feedback rows for a conversation, to rehydrate the thumbs on open. */
+  conversationFeedback(id: string): Promise<{ data: FeedbackRow[] }> {
+    return this.json("GET", `/api/conversations/${encodeURIComponent(id)}/feedback`);
+  }
+
+  // --- instructions ---------------------------------------------------------
+
+  /** `GET /api/me/instructions`: the person's own about/style text. */
+  myInstructions(): Promise<UserInstructions> {
+    return this.call(({ reads }) => reads.meInstructions());
+  }
+
+  /** `PUT /api/me/instructions`: replaces both fields; 422 past 3000 characters combined, 402 when plan-gated. */
+  updateMyInstructions(params: { about?: string | null; style?: string | null }): Promise<UserInstructions> {
+    return this.call(({ writes }) => writes.updateMeInstructions(params));
+  }
+
+  /** `GET /api/org/instructions`; owner and admins only. */
+  orgInstructions(): Promise<UserInstructions> {
+    return this.call(({ reads }) => reads.orgInstructions());
+  }
+
+  /** Set (or clear, with `null`) the conversation's own instructions; the answer carries the effective layers. */
+  setConversationInstructions(id: string, text: string | null): Promise<ConversationInstructions> {
+    return this.call(({ writes }) => writes.conversations.setInstructions(id, text));
   }
 
   /** `model` sizes the meter by that model's window; the conversation's default otherwise. */
