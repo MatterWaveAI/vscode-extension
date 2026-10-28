@@ -1,6 +1,6 @@
-import type { Message, Part } from "../api/types";
+import type { FeedbackReason, Message, Part } from "../api/types";
 import { appendDelta, setPart } from "../chat/assemble";
-import type { HostMessage, TranscriptEntry, ViewState, WebviewMessage } from "../chat/protocol";
+import type { FeedbackSummary, HostMessage, TranscriptEntry, ViewState, WebviewMessage } from "../chat/protocol";
 import { renderMarkdown } from "./markdown";
 
 /**
@@ -15,13 +15,32 @@ declare function acquireVsCodeApi(): { postMessage(message: WebviewMessage): voi
 const vscode = acquireVsCodeApi();
 const send = (message: WebviewMessage) => vscode.postMessage(message);
 
+const TEMPORARY_NOTICE =
+  "Temporary chat. It won't appear in your history or search, can't be shared, and is deleted 24 hours after the last message.";
+
+const FEEDBACK_REASONS: readonly { value: FeedbackReason; label: string }[] = [
+  { value: "wrong", label: "It is wrong" },
+  { value: "unhelpful", label: "It did not help" },
+  { value: "incomplete", label: "It is incomplete" },
+  { value: "too_long", label: "It is too long" },
+  { value: "off_topic", label: "It missed the question" },
+  { value: "unsafe", label: "It is unsafe" },
+];
+
 let state: ViewState | null = null;
 let editingId: string | null = null;
 /** The conversation whose rename box is open, and the one a delete is confirmed for. */
 let renamingConversationId: string | null = null;
 let confirmingDeleteId: string | null = null;
-/** This session's ratings, so the thumbs show what was sent. The server keeps the record. */
-const ratings = new Map<string, -1 | 1>();
+/** The message whose thumbs-down reasons/comment picker is open. */
+let feedbackPickerId: string | null = null;
+let instructionsOpen = false;
+/**
+ * This session's feedback, over the server's copy so a click shows at once.
+ * A null marks a withdrawal. Cleared whenever a full state arrives, which is
+ * the host's record taking over again.
+ */
+const feedbackSession = new Map<string, FeedbackSummary | null>();
 const expandedSummaries = new Set<string>();
 
 const app = document.getElementById("app") as HTMLElement;
@@ -73,13 +92,48 @@ const input = el("textarea");
 const PLACEHOLDER = "Ask MatterWave…  (Enter to send, Shift+Enter for a new line)";
 const OFFLINE_PLACEHOLDER = "MatterWave cannot be reached. Your draft is kept.";
 input.placeholder = PLACEHOLDER;
+const temporaryBox = document.createElement("input");
+temporaryBox.type = "checkbox";
+temporaryBox.id = "temporary-chat";
+const temporaryLabel = el("label", { text: "Temporary chat" });
+temporaryLabel.htmlFor = "temporary-chat";
+const temporaryRow = el("div", { className: "temporary" }, [temporaryBox, temporaryLabel]);
+temporaryRow.hidden = true;
 const sendButton = button("Send", submit);
 const stopButton = button("Stop", () => send({ type: "stop" }));
-const composer = el("div", { className: "composer" }, [input, el("div", { className: "row" }, [stopButton, sendButton])]);
+const composer = el("div", { className: "composer" }, [temporaryRow, input, el("div", { className: "row" }, [stopButton, sendButton])]);
 const signIn = el("div", { className: "signin" }, [
   el("p", { text: "Sign in to chat with your organisation's models." }),
   button("Sign in", () => send({ type: "signIn" })),
 ]);
+
+// The per-chat instructions editor, between the banners and the transcript.
+const instructionsPanel = el("div", { className: "instructions" });
+instructionsPanel.hidden = true;
+const instructionsArea = document.createElement("textarea");
+instructionsArea.placeholder = "Instructions for this conversation only. Left empty, it uses yours.";
+const instructionsHint = el("div", { className: "hint" });
+const instructionsEffective = el("details", {}, [el("summary", { text: "What the model sees" })]);
+instructionsPanel.append(
+  el("div", { className: "who", text: "Conversation instructions" }),
+  instructionsArea,
+  instructionsHint,
+  el("div", { className: "row" }, [
+    button("Close", () => {
+      instructionsOpen = false;
+      render();
+    }, { className: "link" }),
+    button("Use my instructions", () => {
+      instructionsArea.value = "";
+      send({ type: "setInstructions", text: null });
+    }, { className: "link", title: "Clear this conversation's own text and use yours" }),
+    button("Save", () => {
+      const text = instructionsArea.value.trim();
+      send({ type: "setInstructions", text: text || null });
+    }, { title: "Set this conversation's instructions" }),
+  ]),
+  instructionsEffective,
+);
 
 input.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
@@ -91,7 +145,10 @@ input.addEventListener("keydown", (event) => {
 function submit(): void {
   const content = input.value.trim();
   if (!content || state?.streaming || state?.offline) return;
-  send({ type: "send", content });
+  // The toggle is offered before the first send only; once a conversation
+  // exists, whether it is temporary is already fixed.
+  const temporary = temporaryBox.checked && !state?.activeId;
+  send({ type: "send", content, ...(temporary ? { temporary: true } : {}) });
   input.value = "";
 }
 
@@ -103,11 +160,12 @@ function render(): void {
     app.replaceChildren(signIn);
     return;
   }
-  if (!app.contains(composer)) app.replaceChildren(header, convos, meta, banners, transcript, composer);
+  if (!app.contains(composer)) app.replaceChildren(header, convos, meta, banners, instructionsPanel, transcript, composer);
   renderHeader(state);
   renderConversations(state);
   renderMeta(state);
   renderBanners(state);
+  renderInstructions(state);
   renderTranscript(state);
   sendButton.disabled = state.streaming || state.offline;
   stopButton.hidden = !state.streaming;
@@ -115,15 +173,22 @@ function render(): void {
   // draft is there when the connection is.
   input.disabled = state.offline;
   input.placeholder = state.offline ? OFFLINE_PLACEHOLDER : PLACEHOLDER;
+  // The temporary toggle belongs to the not-yet-created chat: it is gone
+  // once the first send has made a conversation, whatever kind it is.
+  temporaryRow.hidden = Boolean(state.activeId) || state.temporary;
 }
 
 function renderHeader(s: ViewState): void {
-  header.replaceChildren(
+  const buttons = [
     button(s.model?.label ?? "Pick model", () => send({ type: "pickModel" }), { className: "link", title: "Pick model" }),
     button("+", () => send({ type: "newChat" }), { className: "link", title: "New chat" }),
     button("Export", () => send({ type: "exportConversation" }), { className: "link", disabled: !s.activeId, title: "Save this conversation as Markdown" }),
-    button("Share", () => send({ type: "shareConversation" }), { className: "link", disabled: !s.activeId, title: "Copy a read-only link to this conversation" }),
-  );
+  ];
+  // A temporary conversation cannot be shared: the button has nothing to do.
+  if (!s.temporary) {
+    buttons.push(button("Share", () => send({ type: "shareConversation" }), { className: "link", disabled: !s.activeId, title: "Copy a read-only link to this conversation" }));
+  }
+  header.replaceChildren(...buttons);
 }
 
 // --- the conversation sidebar ---------------------------------------------------
@@ -228,12 +293,24 @@ function renderMeta(s: ViewState): void {
   if (meter?.compactable && s.activeId) {
     parts.push(button("Compact", () => send({ type: "compact" }), { className: "link", disabled: s.streaming, title: "Summarise earlier turns to free context" }));
   }
+  if (s.activeId) {
+    // The badge: lit (bold) while custom instructions are in force, plain
+    // when there are none yet, and the editor's door either way.
+    const active = Boolean(s.instructions?.effective);
+    parts.push(
+      button(active ? "Instructions on" : "Instructions", () => {
+        instructionsOpen = !instructionsOpen;
+        render();
+      }, { className: `link${active ? " badge" : ""}`, title: "Custom instructions for this conversation" }),
+    );
+  }
   meta.replaceChildren(...parts);
   meta.hidden = parts.length === 0;
 }
 
 function renderBanners(s: ViewState): void {
   const nodes: Node[] = [];
+  if (s.temporary) nodes.push(el("div", { className: "notice", text: TEMPORARY_NOTICE }));
   if (s.notice) nodes.push(el("div", { className: "notice", text: s.notice }));
   if (s.error) {
     const e = s.error;
@@ -249,7 +326,26 @@ function renderBanners(s: ViewState): void {
       ]),
     );
   }
-  banners.replaceChildren(...nodes);
+    banners.replaceChildren(...nodes);
+}
+
+/** The per-chat instructions editor: the conversation's own text, or "use mine". */
+function renderInstructions(s: ViewState): void {
+  instructionsPanel.hidden = !instructionsOpen || !s.activeId;
+  if (instructionsPanel.hidden) return;
+  // The draft survives a re-render unless the conversation's text changed
+  // under it or the box holds no focus.
+  if (document.activeElement !== instructionsArea) {
+    instructionsArea.value = s.instructions?.conversation ?? "";
+  }
+  instructionsHint.textContent = s.instructions?.overridden
+    ? "This conversation is using its own instructions."
+    : "This conversation is using your instructions.";
+  instructionsEffective.replaceChildren(
+    ...(s.instructions?.effective
+      ? [markdown(s.instructions.effective)]
+      : [el("p", { text: "Nothing is in force yet: the model works from this conversation alone." })]),
+  );
 }
 
 function renderTranscript(s: ViewState): void {
@@ -322,34 +418,87 @@ function renderEntry(entry: TranscriptEntry, isLast: boolean, streaming: boolean
         }, { className: "link" }),
       );
     } else if (m.role === "assistant") {
-      const rating = ratings.get(m.id);
+      const fb = feedbackFor(m.id);
       actions.appendChild(
-        button(rating === 1 ? "Liked" : "Like", () => {
-          const next = rating === 1 ? 0 : 1;
-          setRating(m.id, next);
-          send({ type: "rateMessage", messageId: m.id, rating: next });
-          render();
-        }, { className: `link${rating === 1 ? " rated" : ""}`, title: "Good reply — send feedback" }),
+        button(fb?.rating === 1 ? "Liked" : "Like", () => {
+          // A second click on the raised thumb withdraws; anything else rates.
+          applyFeedback(m.id, fb?.rating === 1 ? 0 : 1);
+        }, { className: `link${fb?.rating === 1 ? " rated" : ""}`, title: "Good reply — send feedback" }),
       );
       actions.appendChild(
-        button(rating === -1 ? "Disliked" : "Dislike", () => {
-          const next = rating === -1 ? 0 : -1;
-          setRating(m.id, next);
-          send({ type: "rateMessage", messageId: m.id, rating: next });
-          render();
-        }, { className: `link${rating === -1 ? " rated" : ""}`, title: "Bad reply — send feedback" }),
+        button(fb?.rating === -1 ? "Disliked" : "Dislike", () => {
+          if (fb?.rating === -1) {
+            applyFeedback(m.id, 0);
+          } else {
+            // A thumbs-down asks why first; the rating goes with the picker's answer.
+            feedbackPickerId = m.id;
+            render();
+          }
+        }, { className: `link${fb?.rating === -1 ? " rated" : ""}`, title: feedbackTitle(fb) }),
       );
       actions.appendChild(button("Regenerate", () => send({ type: "regenerate", messageId: m.id }), { className: "link" }));
     }
     node.appendChild(actions);
   }
+  if (m.id && feedbackPickerId === m.id && m.role === "assistant") node.appendChild(feedbackPicker(m));
   return node;
 }
 
-/** Record this session's rating, so the thumbs show the state that was sent. */
-function setRating(messageId: string, rating: -1 | 0 | 1): void {
-  if (rating === 0) ratings.delete(messageId);
-  else ratings.set(messageId, rating);
+/** The thumbs' state: this session's click, else what the server rehydrated. */
+function feedbackFor(messageId: string): FeedbackSummary | null {
+  if (feedbackSession.has(messageId)) return feedbackSession.get(messageId) ?? null;
+  return state?.feedback[messageId] ?? null;
+}
+
+function feedbackTitle(fb: FeedbackSummary | null): string {
+  return fb?.reasons.length ? `Disliked (${fb.reasons.join(", ")})` : "Bad reply — send feedback";
+}
+
+/** Record the intent, show it at once, and let the host's next state confirm it. */
+function applyFeedback(messageId: string, rating: -1 | 0 | 1, reasons?: FeedbackReason[], comment?: string): void {
+  feedbackSession.set(messageId, rating === 0 ? null : { rating, reasons: reasons ?? [], comment: comment ?? null });
+  feedbackPickerId = null;
+  send({
+    type: "rateMessage",
+    messageId,
+    rating,
+    ...(reasons?.length ? { reasons } : {}),
+    ...(comment ? { comment } : {}),
+  });
+  render();
+}
+
+/** The reasons/comment form a thumbs-down opens. */
+function feedbackPicker(m: Message): HTMLElement {
+  const comment = document.createElement("textarea");
+  comment.placeholder = "Anything else to add? (optional)";
+  comment.setAttribute("aria-label", "Feedback comment");
+  const rows = FEEDBACK_REASONS.map(({ value, label }) => {
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = value;
+    box.id = `fb-${m.id}-${value}`;
+    const labelNode = el("label", { text: label });
+    labelNode.htmlFor = box.id;
+    return { value, box, node: el("div", { className: "fb-reason" }, [box, labelNode]) };
+  });
+  return el("div", { className: "fb-picker" }, [
+    el("div", { className: "who", text: "What was wrong with this reply?" }),
+    ...rows.map((row) => row.node),
+    comment,
+    el("div", { className: "row" }, [
+      button("Cancel", () => {
+        feedbackPickerId = null;
+        render();
+      }, { className: "link" }),
+      button("Skip", () => applyFeedback(m.id, -1), { className: "link", title: "Dislike without saying why" }),
+      button("Send", () => {
+        const reasons = rows.filter((row) => row.box.checked).map((row) => row.value);
+        const text = comment.value.trim();
+        applyFeedback(m.id, -1, reasons, text || undefined);
+      }, { title: "Send the feedback" }),
+    ]),
+  ]);
 }
 
 function renderUserBody(m: Message): HTMLElement {
@@ -437,6 +586,9 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
   const message = event.data;
   if (message.type === "state") {
     state = message.state;
+    // The host's feedback map is the record; this session's optimistic copy
+    // has done its job the moment a full state arrives.
+    feedbackSession.clear();
     render();
     return;
   }
