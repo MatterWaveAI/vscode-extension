@@ -9,7 +9,7 @@ import { ChatController } from "./chat/controller";
 import type { HostMessage } from "./chat/protocol";
 import { ChatViewProvider } from "./chat/viewProvider";
 import { fitsContentCap, MAX_CONTENT_CHARS, imageAttachment, imageContentType, selectionContent } from "./context";
-import { conversationToMarkdown } from "./chat/export";
+import { conversationToMarkdown, safeFilename } from "./chat/export";
 import { pickerRows, resolvePick, type PickerRow } from "./models";
 import { DEFAULT_BASE_URL, normalizeServerUrl, serverUrlProblem, shouldPromptForServer } from "./settings";
 import { StatusBar } from "./statusBar";
@@ -170,9 +170,12 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
       void vscode.window.showInformationMessage("Open a conversation to export it.");
       return;
     }
+    const id = chat.activeConversationId();
+    const title = chat.snapshot().conversations.find((c) => c.id === id)?.title ?? "";
     const target = await vscode.window.showSaveDialog({
       title: "Export conversation as Markdown",
       saveLabel: "Export",
+      defaultUri: vscode.Uri.file(`${safeFilename(title)}.md`),
       filters: { Markdown: ["md"] },
     });
     if (!target) return;

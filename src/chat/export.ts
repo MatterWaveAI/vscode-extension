@@ -2,17 +2,45 @@ import type { Message, Part } from "../api/types";
 import type { ViewState } from "./protocol";
 
 /**
- * The active conversation as a Markdown file: the same record the web app's
- * share page shows, in a form that outlives the editor. Pure, so the exact
- * output is testable without a save dialog.
+ * The active conversation as a Markdown file, in the shape the web app's
+ * export writes: a heading, an export stamp carrying the conversation id,
+ * then every message under its own role heading. Pure, so the exact output
+ * is testable without a save dialog.
  */
 
-const HEADING: Record<string, string> = { user: "You", assistant: "MatterWave", system: "System" };
+const HEADING: Record<string, string> = { user: "You", assistant: "Assistant", system: "System" };
 
-/** One message's Markdown: its text parts, its attachments named, its tools summarised. */
+/** Windows treats these base names as devices, in any letter case. */
+const WINDOWS_RESERVED = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
+
+/**
+ * The conversation title as a file's base name: NFKC-normalised, whitespace
+ * collapsed to single spaces, control characters and the punctuation a
+ * filename may not carry taken out, cut to 80 characters. A name Windows
+ * would read as a device (`CON`, `LPT1`) gains " conversation" instead of
+ * failing to save.
+ */
+export function safeFilename(title: string): string {
+  // Whitespace collapses first, so a tab or newline becomes the single space
+  // it stands for; then the rest of the control range and the punctuation go.
+  const stripped = title.normalize("NFKC").replace(/\s+/g, " ").replace(/[\p{Cc}<>:"/\\|?*]/gu, "");
+  const name = stripped.trim().slice(0, 80).trim();
+  if (WINDOWS_RESERVED.test(name)) return `${name} conversation`;
+  return name || "conversation";
+}
+
+/** `2026-10-27T01:02:03Z`: the instant, ISO without the milliseconds. */
+function exportStamp(): string {
+  return new Date().toISOString().replace(/\.\d+Z$/, "Z");
+}
+
+/** One message's Markdown: its parts, its attachments named, its tools as the web writes them. */
 export function messageToMarkdown(message: Message): string {
   const blocks: string[] = [];
-  for (const part of message.parts) blocks.push(partToMarkdown(part));
+  for (const part of message.parts) {
+    const block = partToMarkdown(part);
+    if (block) blocks.push(block);
+  }
   if (blocks.length === 0 && message.content) blocks.push(message.content);
   if (message.truncated) blocks.push("_This answer was cut off before it finished._");
   return blocks.join("\n\n");
@@ -23,41 +51,42 @@ function partToMarkdown(part: Part): string {
     case "text":
       return part.text;
     case "reasoning":
-      return part.text ? `<details>\n<summary>Reasoning</summary>\n\n${part.text}\n\n</details>` : "";
+      // The web export leaves the model's reasoning out; so does this.
+      return "";
     case "tool_call":
-      return `> Tool call: \`${part.name}\``;
+      return `Tool call \`${part.name}\`:\n\n\`\`\`json\n${part.arguments}\n\`\`\``;
     case "tool_result":
       return part.is_error ? `> Tool result (error): ${part.output}` : `> Tool result: ${part.output}`;
     case "image":
-      return `_(attached image: ${part.filename})_`;
+      return `*Attached image: ${part.filename}*`;
     case "document":
-      return part.truncated ? `_(attached ${part.filename} — only its start was read)_` : `_(attached ${part.filename})_`;
+      return `*Attached file: ${part.filename}*`;
     case "summary":
       return `> Earlier turns were summarised: ${part.text}`;
   }
 }
 
-/** The whole conversation: a heading, then every message under its role. */
+/** `## You`, or `## Assistant (model)` naming the model that answered. */
+function roleHeading(message: Message, state: ViewState): string {
+  const base = HEADING[message.role] ?? message.role;
+  if (message.role !== "assistant") return base;
+  const model = message.model ?? state.model?.id;
+  return model ? `${base} (${model})` : base;
+}
+
+/** The whole conversation: a heading and stamp, then every message under its own role heading. */
 export function conversationToMarkdown(state: ViewState): string {
-  const lines: string[] = [];
   const current = state.conversations.find((c) => c.id === state.activeId);
+  const lines: string[] = [];
   lines.push(`# ${current?.title || "MatterWave conversation"}`);
   lines.push("");
-  const bits = [`Exported from the MatterWave VS Code extension, ${new Date().toISOString().slice(0, 10)}`];
-  if (state.model) bits.push(`model: ${state.model.label}`);
-  lines.push(`_${bits.join("; ")}._`);
+  const stamp = `Exported from MatterWave on ${exportStamp()}`;
+  lines.push(state.activeId ? `${stamp}. Conversation \`${state.activeId}\`.` : `${stamp}.`);
   lines.push("");
-  let role: string | null = null;
   for (const entry of state.transcript) {
-    const message = entry.message;
-    // A summary message is rendered by its parts (the divider quote), not as a "System" section.
-    const heading = HEADING[message.role] ?? message.role;
-    if (heading !== role && !(message.role === "system" && message.parts.some((p) => p.type === "summary"))) {
-      role = heading;
-      lines.push(`## ${heading}`);
-      lines.push("");
-    }
-    const body = messageToMarkdown(message);
+    lines.push(`## ${roleHeading(entry.message, state)}`);
+    lines.push("");
+    const body = messageToMarkdown(entry.message);
     if (body) {
       lines.push(body);
       lines.push("");
