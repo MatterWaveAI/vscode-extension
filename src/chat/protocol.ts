@@ -1,4 +1,4 @@
-import type { Message, Part } from "../api/types";
+import { FEEDBACK_REASONS, type FeedbackReason, type Message, type Part } from "../api/types";
 
 /**
  * The message channel between the extension host and the chat webview.
@@ -44,6 +44,23 @@ export interface TranscriptEntry {
   originals?: Message[];
 }
 
+/** One of the caller's feedback rows, for the thumbs under a reply. */
+export interface FeedbackSummary {
+  rating: -1 | 1;
+  reasons: FeedbackReason[];
+  comment: string | null;
+}
+
+/** The instruction layers in force for the open conversation, as the API reports them. */
+export interface InstructionsView {
+  /** The conversation's own text; null when it uses the person's. */
+  conversation: string | null;
+  /** What the model is actually told, every layer combined. */
+  effective: string | null;
+  /** True when the conversation carries its own text instead of the person's. */
+  overridden: boolean;
+}
+
 export interface ViewState {
   signedIn: boolean;
   offline: boolean;
@@ -63,6 +80,12 @@ export interface ViewState {
   streaming: boolean;
   error: ErrorView | null;
   notice: string | null;
+  /** True while the open conversation is temporary: in no list, unshareable, deleted a day after its last message. */
+  temporary: boolean;
+  /** The custom instructions in force, or null when the conversation carries none of the sort. */
+  instructions: InstructionsView | null;
+  /** The caller's own feedback, by message id, as the API rehydrated it on open. */
+  feedback: Record<string, FeedbackSummary>;
 }
 
 export type HostMessage =
@@ -86,13 +109,16 @@ export type WebviewMessage =
   /** The web app's same conversation, as a Markdown file. */
   | { type: "exportConversation" }
   | { type: "shareConversation" }
-  | { type: "send"; content: string }
+  /** `temporary` rides only on a first send, before any conversation exists. */
+  | { type: "send"; content: string; temporary?: boolean }
   | { type: "stop" }
   | { type: "retry" }
   | { type: "edit"; messageId: string; content: string }
   | { type: "regenerate"; messageId: string }
-  /** 0 withdraws a rating. */
-  | { type: "rateMessage"; messageId: string; rating: -1 | 0 | 1 }
+  /** 0 withdraws a rating; a thumbs-down carries the picker's reasons and comment. */
+  | { type: "rateMessage"; messageId: string; rating: -1 | 0 | 1; reasons?: FeedbackReason[]; comment?: string | null }
+  /** `null` clears the conversation's own text: "use my instructions". */
+  | { type: "setInstructions"; text: string | null }
   | { type: "switchBranch"; messageId: string; step: -1 | 1 }
   | { type: "continue" }
   | { type: "compact" }
@@ -103,9 +129,25 @@ export type WebviewMessage =
 const WEBVIEW_TYPES = new Set<WebviewMessage["type"]>([
   "ready", "reconnect", "newChat", "openConversation", "searchConversations", "renameConversation",
   "deleteConversation", "pinConversation", "archiveConversation", "exportConversation", "shareConversation",
-  "send", "stop", "retry", "edit", "regenerate", "rateMessage", "switchBranch", "continue",
+  "send", "stop", "retry", "edit", "regenerate", "rateMessage", "setInstructions", "switchBranch", "continue",
   "compact", "pickModel", "signIn", "copyRequestId",
 ]);
+
+const FEEDBACK_REASON_SET = new Set<string>(FEEDBACK_REASONS);
+const MAX_COMMENT_CHARS = 2000;
+const MAX_INSTRUCTION_CHARS = 2000;
+
+/** The feedback reasons of an intent, or null when the array is not one the contract allows. */
+function reasonsOf(value: unknown): FeedbackReason[] | null {
+  if (!Array.isArray(value)) return null;
+  if (value.length > 6) return null;
+  const reasons: FeedbackReason[] = [];
+  for (const item of value) {
+    if (typeof item !== "string" || !FEEDBACK_REASON_SET.has(item)) return null;
+    reasons.push(item as FeedbackReason);
+  }
+  return reasons;
+}
 
 /** The webview is a lower trust level than the host: its messages are checked, not cast. */
 export function parseWebviewMessage(raw: unknown): WebviewMessage | null {
@@ -132,17 +174,29 @@ export function parseWebviewMessage(raw: unknown): WebviewMessage | null {
     case "archiveConversation":
       return id() && typeof msg.archived === "boolean" ? (msg as WebviewMessage) : null;
     case "send":
-      return str("content") ? (msg as WebviewMessage) : null;
+      return str("content") && (msg.temporary === undefined || typeof msg.temporary === "boolean")
+        ? (msg as WebviewMessage)
+        : null;
     case "edit":
       return str("messageId") && str("content") ? (msg as WebviewMessage) : null;
     case "regenerate":
       return str("messageId") ? (msg as WebviewMessage) : null;
-    case "rateMessage":
-      return (
-        str("messageId") && (msg.rating === 1 || msg.rating === 0 || msg.rating === -1)
-          ? (msg as WebviewMessage)
-          : null
-      );
+    case "rateMessage": {
+      if (!str("messageId")) return null;
+      if (msg.rating !== 1 && msg.rating !== 0 && msg.rating !== -1) return null;
+      if (msg.reasons !== undefined && reasonsOf(msg.reasons) === null) return null;
+      const comment = msg.comment;
+      if (comment !== undefined && comment !== null && (typeof comment !== "string" || comment.length > MAX_COMMENT_CHARS)) {
+        return null;
+      }
+      return msg as WebviewMessage;
+    }
+    case "setInstructions": {
+      if (msg.text === null) return { type: "setInstructions", text: null };
+      return typeof msg.text === "string" && msg.text.length <= MAX_INSTRUCTION_CHARS
+        ? { type: "setInstructions", text: msg.text }
+        : null;
+    }
     case "switchBranch":
       return str("messageId") && (msg.step === 1 || msg.step === -1) ? (msg as WebviewMessage) : null;
     default:
