@@ -2,7 +2,7 @@ import type { ConversationFrame } from "../lib/matterwaveClient";
 import type { MatterWaveClient } from "../api/client";
 import { ApiError } from "../api/errors";
 import { isUntrustedCertificate } from "../api/transport";
-import type { Conversation, Message, ModelInfo } from "../api/types";
+import type { Conversation, ConversationInstructions, FeedbackReason, Message, ModelInfo } from "../api/types";
 import { fileAttachment } from "../context";
 import { initialModel } from "../models";
 import { classifyStreamError, STREAM_ERROR_COPY, type StreamErrorKind } from "../streamErrors";
@@ -11,7 +11,9 @@ import { switchTarget, transcriptOf } from "./branches";
 import type {
   ConversationSummary,
   ErrorView,
+  FeedbackSummary,
   HostMessage,
+  InstructionsView,
   Meter,
   SearchHitView,
   ViewState,
@@ -51,10 +53,20 @@ export interface ChatDeps {
 /** What the Continue button sends after a cut answer. */
 export const CONTINUE_PROMPT = "Continue from where you stopped.";
 
+/** Shown while the open conversation is temporary, next to the hidden Share button. */
+export const TEMPORARY_CHAT_NOTICE =
+  "Temporary chat. It won't appear in your history or search, can't be shared, and is deleted 24 hours after the last message.";
+
+/** The notice when a plan-gated feature refuses with 402. */
+export const INSTRUCTIONS_UPGRADE_NOTICE =
+  "Custom instructions are not part of your plan. Upgrade the plan to use them.";
+
 interface FailedTurn {
   content: string;
   attachmentIds: string[];
   userMessageId: string | null;
+  /** Remembered so a retry of the very first send creates the same kind of chat. */
+  temporary: boolean;
 }
 
 export class ChatController {
@@ -74,6 +86,10 @@ export class ChatController {
   private meter: Meter | null = null;
   private error: ErrorView | null = null;
   private notice: string | null = null;
+  /** True while the open conversation is temporary: fixed at its creation. */
+  private temporary = false;
+  private instructions: InstructionsView | null = null;
+  private feedback = new Map<string, FeedbackSummary>();
   private abort: AbortController | null = null;
   private failed: FailedTurn | null = null;
   private reloadAfterTurn = false;
@@ -107,7 +123,7 @@ export class ChatController {
         this.deps.runCommand(message.type);
         return;
       case "send":
-        return this.send(message.content);
+        return this.send(message.content, [], message.temporary === true);
       case "stop":
         this.abort?.abort();
         return;
@@ -118,7 +134,9 @@ export class ChatController {
       case "regenerate":
         return this.regenerate(message.messageId);
       case "rateMessage":
-        return this.rateMessage(message.messageId, message.rating);
+        return this.rateMessage(message.messageId, message.rating, message.reasons, message.comment);
+      case "setInstructions":
+        return this.setInstructions(message.text);
       case "switchBranch":
         return this.switchBranch(message.messageId, message.step);
       case "continue":
@@ -150,6 +168,9 @@ export class ChatController {
       this.path = [];
       this.tree = [];
       this.meter = null;
+      this.temporary = false;
+      this.instructions = null;
+      this.feedback = new Map();
       this.emit();
       return;
     }
@@ -163,8 +184,10 @@ export class ChatController {
       this.identity = me.name || me.email || me.subject;
       this.models = models.data;
       this.model = initialModel(models.data, this.deps.rememberedModel.get(), models.default_model);
-      this.conversations = conversations;
-      this.archived = archived;
+      // A temporary conversation is in no list, whatever a deployment's rows
+      // say: it would be gone within a day anyway.
+      this.conversations = conversations.filter(notTemporary);
+      this.archived = archived.filter(notTemporary);
       if (this.activeId) await this.loadConversation(this.activeId);
     });
     this.emit();
@@ -191,6 +214,9 @@ export class ChatController {
     this.meter = null;
     this.error = null;
     this.notice = null;
+    this.temporary = false;
+    this.instructions = null;
+    this.feedback = new Map();
     this.searchResults = null;
     this.emit();
   }
@@ -206,7 +232,11 @@ export class ChatController {
     if (this.activeId !== id) return;
     this.path = detail.messages;
     this.tree = tree;
-    await this.loadMeter(id);
+    // A deployment that does not echo the flag leaves what creation said; one
+    // that does is authoritative.
+    if (detail.temporary !== undefined && detail.temporary !== null) this.temporary = detail.temporary === true;
+    this.instructions = instructionsViewOf(detail.instructions);
+    await Promise.all([this.loadMeter(id), this.loadFeedback(id)]);
   }
 
   private async loadMeter(id: string): Promise<void> {
@@ -235,7 +265,9 @@ export class ChatController {
       return;
     }
     await this.guard(async () => {
-      this.searchResults = await this.deps.client.searchConversations(q);
+      // The server keeps temporary conversations out of search; the filter
+      // holds if a row ever leaks through.
+      this.searchResults = (await this.deps.client.searchConversations(q)).filter(notTemporary);
     });
     this.emit();
   }
@@ -264,21 +296,42 @@ export class ChatController {
 
   async pinConversation(id: string, pinned: boolean): Promise<void> {
     await this.guard(async () => {
-      const updated = await this.deps.client.pinConversation(id, pinned);
-      this.replaceRow(updated);
+      try {
+        const updated = await this.deps.client.pinConversation(id, pinned);
+        this.replaceRow(updated);
+      } catch (error) {
+        if (!this.surfaceConflictNotice(error)) throw error;
+      }
     });
     this.emit();
   }
 
   async archiveConversation(id: string, archived: boolean): Promise<void> {
     await this.guard(async () => {
-      const updated = await this.deps.client.archiveConversation(id, archived);
-      this.replaceRow(updated);
-      // Archiving the open conversation closes it: it has left the list the
-      // sidebar opens from, exactly as in the web app.
-      if (archived && this.activeId === id) this.newChat();
+      try {
+        const updated = await this.deps.client.archiveConversation(id, archived);
+        this.replaceRow(updated);
+        // Archiving the open conversation closes it: it has left the list the
+        // sidebar opens from, exactly as in the web app.
+        if (archived && this.activeId === id) this.newChat();
+      } catch (error) {
+        if (!this.surfaceConflictNotice(error)) throw error;
+      }
     });
     this.emit();
+  }
+
+  /**
+   * A temporary conversation refuses pin and fork (and share, in the host
+   * command) with a 409 whose `detail` is the sentence written for people:
+   * shown as a notice rather than dressed up as a failure.
+   */
+  private surfaceConflictNotice(error: unknown): boolean {
+    if (error instanceof ApiError && error.status === 409) {
+      this.notice = error.detail;
+      return true;
+    }
+    return false;
   }
 
   /** A row moved between lists (or re-sorted) comes back from the API as a whole row. */
@@ -299,11 +352,30 @@ export class ChatController {
     rows.sort((a, b) => Number(Boolean(b.pinned_at)) - Number(Boolean(a.pinned_at)));
   }
 
-  /** Thumbs on a reply. Rating 0 withdraws. */
-  async rateMessage(messageId: string, rating: -1 | 0 | 1): Promise<void> {
+  /**
+   * Thumbs on a reply, over the full feedback contract: a thumbs-down may
+   * carry the picker's reasons and comment, a re-vote replaces, and 0
+   * withdraws. The map is the record the thumbs render; the webview holds an
+   * optimistic copy until the next state post.
+   */
+  async rateMessage(
+    messageId: string,
+    rating: -1 | 0 | 1,
+    reasons?: FeedbackReason[],
+    comment?: string | null,
+  ): Promise<void> {
     try {
-      if (rating === 0) await this.deps.client.deleteFeedback(messageId);
-      else await this.deps.client.setFeedback(messageId, rating);
+      if (rating === 0) {
+        await this.deps.client.deleteFeedback(messageId);
+        this.feedback.delete(messageId);
+      } else {
+        await this.deps.client.setFeedback(messageId, {
+          rating,
+          ...(reasons?.length ? { reasons } : {}),
+          ...(comment !== undefined ? { comment } : {}),
+        });
+        this.feedback.set(messageId, { rating, reasons: reasons ?? [], comment: comment ?? null });
+      }
     } catch (error) {
       // A thumbs click that failed is told through the error banner; a click
       // that worked needs none.
@@ -312,15 +384,50 @@ export class ChatController {
     this.emit();
   }
 
+  /** The caller's own rows, read back so the thumbs survive closing the editor. */
+  private async loadFeedback(id: string): Promise<void> {
+    try {
+      const rows = await this.deps.client.conversationFeedback(id);
+      if (this.activeId !== id) return;
+      this.feedback = new Map(
+        rows.data.map((row) => [row.message_id, { rating: row.rating, reasons: row.reasons ?? [], comment: row.comment ?? null }]),
+      );
+    } catch {
+      // A deployment without the route still chats; the thumbs just start blank.
+      this.feedback = new Map();
+    }
+  }
+
+  /**
+   * Set the open conversation's own instructions; `null` is "use my
+   * instructions". The answer carries the effective layers, which is what
+   * the badge reads.
+   */
+  async setInstructions(text: string | null): Promise<void> {
+    if (!this.activeId || this.abort) return;
+    const id = this.activeId;
+    try {
+      const saved = await this.deps.client.setConversationInstructions(id, text);
+      if (this.activeId === id) this.instructions = instructionsViewOf(saved);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 402) {
+        this.notice = INSTRUCTIONS_UPGRADE_NOTICE;
+      } else {
+        this.fail(error);
+      }
+    }
+    this.emit();
+  }
+
   // --- turns -----------------------------------------------------------------
 
-  async send(content: string, attachmentIds: string[] = []): Promise<void> {
+  async send(content: string, attachmentIds: string[] = [], temporary = false): Promise<void> {
     if (this.abort) return;
-    const id = await this.ensureConversation();
+    const id = await this.ensureConversation(temporary);
     if (!id) {
       // The composer has already let the text go; when the conversation
       // could not be made, Retry is the one place it is still held.
-      if (this.error) this.failed = { content, attachmentIds, userMessageId: null };
+      if (this.error) this.failed = { content, attachmentIds, userMessageId: null, temporary };
       return;
     }
     const parent = this.path[this.path.length - 1] ?? null;
@@ -332,14 +439,14 @@ export class ChatController {
     };
     this.path = [...this.path, optimistic];
     const body = { content, ...(this.model ? { model: this.model.id } : {}), ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}) };
-    await this.runTurn(id, (signal) => this.deps.client.sendMessage(id, body, signal), { content, attachmentIds, userMessageId: null });
+    await this.runTurn(id, (signal) => this.deps.client.sendMessage(id, body, signal), { content, attachmentIds, userMessageId: null, temporary });
   }
 
   async edit(messageId: string, content: string): Promise<void> {
     if (this.abort || !this.activeId) return;
     const id = this.activeId;
     const body = { content, ...(this.model ? { model: this.model.id } : {}) };
-    await this.runTurn(id, (signal) => this.deps.client.editMessage(id, messageId, body, signal), { content, attachmentIds: [], userMessageId: messageId });
+    await this.runTurn(id, (signal) => this.deps.client.editMessage(id, messageId, body, signal), { content, attachmentIds: [], userMessageId: messageId, temporary: this.temporary });
   }
 
   async regenerate(messageId: string): Promise<void> {
@@ -356,12 +463,12 @@ export class ChatController {
     const failed = this.failed;
     if (!failed) return;
     // No conversation yet: nothing reached the server, so the first send is the retry.
-    if (!this.activeId) return this.send(failed.content, failed.attachmentIds);
+    if (!this.activeId) return this.send(failed.content, failed.attachmentIds, failed.temporary);
     await this.guard(() => this.loadConversation(this.activeId ?? ""));
     const last = this.path[this.path.length - 1];
     if (last?.role === "assistant") return this.regenerate(last.id);
     if (failed.userMessageId) return this.edit(failed.userMessageId, failed.content);
-    return this.send(failed.content, failed.attachmentIds);
+    return this.send(failed.content, failed.attachmentIds, failed.temporary);
   }
 
   /**
@@ -392,6 +499,14 @@ export class ChatController {
 
   /** Upload `attachment` into the conversation, then send `question` about it. */
   async sendAttachment(question: string, attachment: { blob: Blob; filename: string }): Promise<void> {
+    // Before anything is sent: a model the API says cannot see images gets a
+    // refusal that names what to pick instead, not a 422 after the upload.
+    const refusal = this.visionRefusal();
+    if (refusal) {
+      this.notice = refusal;
+      this.emit();
+      return;
+    }
     const id = await this.ensureConversation();
     if (!id) return;
     let attachmentId: string;
@@ -406,18 +521,43 @@ export class ChatController {
     await this.send(question, [attachmentId]);
   }
 
-  private async ensureConversation(): Promise<string | null> {
+  /**
+   * The refusal for sending an image to a model with `supports_vision:
+   * false`, naming up to three vision-capable models. `null` (allowed) and
+   * an unknown model pass: the server's own 422 stays the backstop.
+   */
+  private visionRefusal(): string | null {
+    const model = this.model;
+    if (!model || model.supports_vision !== false) return null;
+    const capable = this.models
+      .filter((m) => m.supports_vision === true)
+      .slice(0, 3)
+      .map((m) => m.label || m.id);
+    const label = model.label || model.id;
+    return capable.length > 0
+      ? `${label} cannot see images. Pick a vision-capable model (for example ${capable.join(", ")}) to send one.`
+      : `${label} cannot see images, and no vision-capable model is available.`;
+  }
+
+  private async ensureConversation(temporary = false): Promise<string | null> {
     if (this.activeId) return this.activeId;
     if (!this.signedIn) {
       this.deps.runCommand("signIn");
       return null;
     }
     try {
-      const conv = await this.deps.client.createConversation(this.model ? { model: this.model.id } : {});
-      this.conversations = [conv, ...this.conversations];
+      const conv = await this.deps.client.createConversation({
+        ...(this.model ? { model: this.model.id } : {}),
+        ...(temporary ? { temporary: true } : {}),
+      });
+      this.temporary = temporary;
+      // A temporary conversation appears in no list, so it never joins the sidebar.
+      if (!temporary) this.conversations = [conv, ...this.conversations];
       this.activeId = conv.id;
       this.path = [];
       this.tree = [];
+      this.instructions = null;
+      this.feedback = new Map();
       return conv.id;
     } catch (error) {
       this.fail(error);
@@ -697,6 +837,9 @@ export class ChatController {
       streaming: this.abort !== null,
       error: this.error,
       notice: this.notice,
+      temporary: this.temporary,
+      instructions: this.instructions,
+      feedback: Object.fromEntries(this.feedback),
     };
   }
 
@@ -721,6 +864,21 @@ export function meterPercent(meter: Meter | null): number | null {
 /** What the sidebar needs from a row; `pinned_at`/`archived_at` read as flags. */
 function conversationSummary(c: Conversation): ConversationSummary {
   return { id: c.id, title: c.title, pinned: Boolean(c.pinned_at), archived: Boolean(c.archived_at) };
+}
+
+/** A temporary conversation is in no list and no search, whatever a row says. */
+function notTemporary(c: Conversation): boolean {
+  return c.temporary !== true;
+}
+
+/** The API's instruction layers as the view reads them; null when there are none. */
+function instructionsViewOf(raw: ConversationInstructions | null | undefined): InstructionsView | null {
+  if (!raw) return null;
+  return {
+    conversation: raw.conversation ?? null,
+    effective: raw.effective ?? null,
+    overridden: raw.user_overridden === true,
+  };
 }
 
 function errorView(kind: StreamErrorKind, requestId: string | null): ErrorView {

@@ -29,6 +29,7 @@ function routes() {
     "GET /api/conversations/c_1/tree": () => json({ ...CONVERSATION, messages: [USER, DONE] }),
     "GET /api/conversations/c_1/context": () =>
       json({ model: "grt-small", context_window: 32768, used_tokens: 1234, compactable: true }),
+    "GET /api/conversations/c_1/feedback": () => json({ data: [] }),
   };
 }
 
@@ -377,6 +378,206 @@ describe("message feedback", () => {
       "DELETE /api/messages/m_asst/feedback",
     ]);
     expect(controller.snapshot().error).toBeNull();
+  });
+
+  it("sends the full contract on a thumbs-down: reasons and comment ride, a re-vote replaces", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    const bodies: unknown[] = [];
+    const calls = manage(controller, {
+      "PUT /api/messages/m_asst/feedback": (call) => {
+        bodies.push(JSON.parse(String(call.body)));
+        return json({ message_id: "m_asst", rating: -1, reasons: bodies.length === 1 ? ["wrong"] : ["too_long"], comment: null });
+      },
+    });
+    await controller.handle({ type: "rateMessage", messageId: "m_asst", rating: -1, reasons: ["wrong"], comment: "no" });
+    await controller.handle({ type: "rateMessage", messageId: "m_asst", rating: -1, reasons: ["too_long"] });
+    expect(bodies).toEqual([
+      { rating: -1, reasons: ["wrong"], comment: "no" },
+      { rating: -1, reasons: ["too_long"] },
+    ]);
+    // The last row is what the thumbs show.
+    expect(controller.snapshot().feedback).toEqual({ m_asst: { rating: -1, reasons: ["too_long"], comment: null } });
+    expect(calls.filter((c) => c.method === "PUT")).toHaveLength(2);
+  });
+
+  it("rehydrates the caller's rows when a conversation opens", async () => {
+    const { controller } = await setup();
+    manage(controller, {
+      "GET /api/conversations/c_1/feedback": () =>
+        json({ data: [{ message_id: "m_asst", rating: -1, reasons: ["wrong", "too_long"], comment: "nope" }] }),
+    });
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    expect(controller.snapshot().feedback).toEqual({
+      m_asst: { rating: -1, reasons: ["wrong", "too_long"], comment: "nope" },
+    });
+    // A withdrawal clears the row.
+    manage(controller, { "DELETE /api/messages/m_asst/feedback": () => json({ status: "removed" }) });
+    await controller.handle({ type: "rateMessage", messageId: "m_asst", rating: 0 });
+    expect(controller.snapshot().feedback).toEqual({});
+  });
+
+  it("keeps chatting when the feedback rows cannot be read", async () => {
+    const { controller } = await setup();
+    manage(controller, { "GET /api/conversations/c_1/feedback": () => json({ detail: "no" }, 500) });
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    expect(controller.snapshot().error).toBeNull();
+    expect(controller.snapshot().transcript.map((e) => e.message.id)).toEqual(["m_user", "m_asst"]);
+  });
+});
+
+describe("temporary chats", () => {
+  it("creates the conversation with temporary: true on a first send that asks for it, and keeps it out of the sidebar", async () => {
+    const { webview, calls, fromWebview } = await setup();
+    await fromWebview({ type: "ready" });
+    await fromWebview({ type: "send", content: "Off the record", temporary: true });
+    const create = calls.find((c) => c.method === "POST" && c.url === "/api/conversations");
+    expect(JSON.parse(String(create?.body))).toEqual({ model: "grt-small", temporary: true });
+    const state = lastState(webview.posted);
+    expect(state.temporary).toBe(true);
+    expect(state.conversations).toEqual([]);
+    // The chat itself works as any other.
+    expect(state.transcript.map((e) => e.message.id)).toEqual(["m_user", "m_asst"]);
+  });
+
+  it("omits the key for an ordinary first send", async () => {
+    const { calls, fromWebview } = await setup();
+    await fromWebview({ type: "ready" });
+    await fromWebview({ type: "send", content: "On the record" });
+    const create = calls.find((c) => c.method === "POST" && c.url === "/api/conversations");
+    expect(JSON.parse(String(create?.body))).toEqual({ model: "grt-small" });
+  });
+
+  it("filters a temporary row out of the sidebar and the search on refresh", async () => {
+    const { controller } = await setup();
+    const temporary = { ...CONVERSATION, id: "c_temp", temporary: true };
+    manage(controller, {
+      "GET /api/conversations": () => json({ data: [temporary, CONVERSATION], filter: "default" }),
+      "GET /api/conversations/search": () => json({ data: [{ ...temporary, snippet: "leaked" }], query: "x" }),
+    });
+    await controller.refresh();
+    expect(controller.snapshot().conversations.map((c) => c.id)).toEqual(["c_1"]);
+    await controller.handle({ type: "searchConversations", query: "x" });
+    expect(controller.snapshot().searchResults).toEqual([]);
+  });
+
+  it("surfaces the API's 409 detail as a notice when a temporary conversation is pinned", async () => {
+    const { controller } = await setup();
+    const calls = manage(controller, {
+      "GET /api/conversations": () => json({ data: [CONVERSATION], filter: "default" }),
+      "PUT /api/conversations/c_1/pin": () =>
+        json({ detail: "A temporary conversation is not kept, so it cannot be pinned." }, 409),
+    });
+    await controller.refresh();
+    await controller.handle({ type: "pinConversation", id: "c_1", pinned: true });
+    expect(calls.some((c) => c.method === "PUT")).toBe(true);
+    expect(controller.snapshot().error).toBeNull();
+    expect(controller.snapshot().notice).toBe("A temporary conversation is not kept, so it cannot be pinned.");
+  });
+
+  it("retries a failed first send as the same kind of temporary chat", async () => {
+    const { webview, calls, fromWebview, network } = await setup();
+    await fromWebview({ type: "ready" });
+    network.dead = true;
+    await fromWebview({ type: "send", content: "Off the record", temporary: true });
+    network.dead = false;
+    await fromWebview({ type: "retry" });
+    const create = calls.find((c) => c.method === "POST" && c.url === "/api/conversations");
+    expect(JSON.parse(String(create?.body))).toEqual({ model: "grt-small", temporary: true });
+    expect(lastState(webview.posted).temporary).toBe(true);
+  });
+});
+
+describe("custom instructions", () => {
+  const EFFECTIVE = {
+    org: "Be brief.",
+    user: { about: "Ada", style: null },
+    conversation: "Cite sources",
+    user_overridden: true,
+    effective: "Be brief. Cite sources",
+  };
+
+  it("reads the layers from the conversation detail and writes them over PUT", async () => {
+    const { controller } = await setup();
+    const calls = manage(controller, {
+      "GET /api/conversations/c_1": () => json({ ...CONVERSATION, messages: [USER, DONE], instructions: EFFECTIVE }),
+      "PUT /api/conversations/c_1/instructions": (call) => {
+        // The answer carries the layers as they now stand, whatever text was set.
+        const text = (JSON.parse(String(call.body)) as { text: string | null }).text;
+        return json({ ...EFFECTIVE, conversation: text, effective: text === null ? "Be brief." : `Be brief. ${text}` });
+      },
+    });
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    expect(controller.snapshot().instructions).toEqual({
+      conversation: "Cite sources",
+      effective: "Be brief. Cite sources",
+      overridden: true,
+    });
+    await controller.handle({ type: "setInstructions", text: "Answer in French" });
+    expect(controller.snapshot().instructions).toEqual({
+      conversation: "Answer in French",
+      effective: "Be brief. Answer in French",
+      overridden: true,
+    });
+    // "Use my instructions" sends the null that clears the conversation's own text.
+    await controller.handle({ type: "setInstructions", text: null });
+    expect(JSON.parse(String(calls.filter((c) => c.method === "PUT").at(-1)?.body))).toEqual({ text: null });
+    expect(controller.snapshot().instructions?.conversation).toBeNull();
+  });
+
+  it("answers a plan-gated 402 with an upgrade notice, not an error banner", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    manage(controller, { "PUT /api/conversations/c_1/instructions": () => json({ detail: "not on this plan" }, 402) });
+    await controller.handle({ type: "setInstructions", text: "Be brief" });
+    const state = controller.snapshot();
+    expect(state.error).toBeNull();
+    expect(state.notice).toContain("plan");
+    expect(state.instructions).toBeNull();
+  });
+
+  it("shows no badge while the conversation carries no instructions", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    expect(controller.snapshot().instructions).toBeNull();
+  });
+});
+
+describe("the vision gate", () => {
+  const image = { blob: new Blob(["x"], { type: "image/png" }), filename: "shot.png" };
+
+  it("refuses an image for a model with supports_vision false, naming vision-capable models, and uploads nothing", async () => {
+    const { controller, calls, webview } = await setup();
+    await controller.refresh(); // grt-small is the default and cannot see.
+    await controller.sendAttachment("What is this?", image);
+    expect(calls.some((c) => c.url.startsWith("/api/attachments"))).toBe(false);
+    const notice = lastState(webview.posted).notice ?? "";
+    expect(notice).toContain("GRT Small cannot see images");
+    expect(notice).toContain("Partner X");
+  });
+
+  it("passes for a vision-capable model and uploads", async () => {
+    const { controller, calls } = await setup();
+    await controller.refresh();
+    const partner = MODELS.data.find((m) => m.id === "partner-x") as ModelInfo;
+    expect(controller.setModel(partner)).toBe(true);
+    await controller.sendAttachment("What is this?", image);
+    expect(calls.some((c) => c.url.startsWith("/api/attachments"))).toBe(true);
+  });
+
+  it("passes when the list does not say, leaving the server's 422 as the backstop", async () => {
+    const { controller, calls } = await setup();
+    await controller.refresh();
+    const unknown = { ...(MODELS.data[0] as ModelInfo), id: "mystery", label: "Mystery", supports_vision: null };
+    expect(controller.setModel(unknown)).toBe(true);
+    await controller.sendAttachment("What is this?", image);
+    expect(calls.some((c) => c.url.startsWith("/api/attachments"))).toBe(true);
   });
 });
 
