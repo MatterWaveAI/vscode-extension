@@ -2,10 +2,14 @@
   "name": "matterwave",
   "displayName": "MatterWave",
   "description": "Chat with your organisation's MatterWave models from the editor.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "matterwave",
   "private": true,
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MatterWaveAI/vscode-extension"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
