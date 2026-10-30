@@ -22,7 +22,7 @@ function state(over: Partial<ViewState>): ViewState {
     signedIn: true,
     offline: false,
     identity: "Ada",
-    conversations: [{ id: "c_1", title: "Clock", pinned: false, archived: false }],
+    conversations: [{ id: "c_1", title: "Clock", pinned: false, archived: false, badge: null }],
     archivedConversations: [],
     searchResults: null,
     activeId: "c_1",
@@ -169,10 +169,10 @@ describe("the chat webview", () => {
       type: "state",
       state: state({
         conversations: [
-          { id: "c_1", title: "Clock", pinned: true, archived: false },
-          { id: "c_2", title: "Weather", pinned: false, archived: false },
+          { id: "c_1", title: "Clock", pinned: true, archived: false, badge: null },
+          { id: "c_2", title: "Weather", pinned: false, archived: false, badge: null },
         ],
-        archivedConversations: [{ id: "c_3", title: "Old", pinned: false, archived: true }],
+        archivedConversations: [{ id: "c_3", title: "Old", pinned: false, archived: true, badge: null }],
       }),
     });
     const titles = Array.from(document.querySelectorAll<HTMLButtonElement>(".convos > .convos-list .row .title"));
@@ -210,13 +210,31 @@ describe("the chat webview", () => {
     expect(sent.at(-1)).toEqual({ type: "archiveConversation", id: "c_3", archived: false });
   });
 
+  it("shows a row's library badge as a suffix on its title, and nothing when there is none", () => {
+    post({
+      type: "state",
+      state: state({
+        conversations: [
+          { id: "c_1", title: "Clock", pinned: false, archived: false, badge: "Work · bug" },
+          { id: "c_2", title: "Weather", pinned: false, archived: false, badge: null },
+        ],
+      }),
+    });
+    const badges = Array.from(document.querySelectorAll<HTMLElement>(".convos-list .lib-badge"));
+    expect(badges.map((b) => b.textContent)).toEqual(["Work · bug"]);
+    // The badge rides the title it belongs to, inside the same button.
+    const titles = Array.from(document.querySelectorAll<HTMLButtonElement>(".convos-list .row .title"));
+    expect(titles[0]?.textContent).toBe("ClockWork · bug");
+    expect(titles[1]?.querySelector(".lib-badge")).toBeNull();
+  });
+
   it("searches from the sidebar box, debounced, and shows the results", async () => {
     vi.useFakeTimers();
     try {
       post({
         type: "state",
         state: state({
-          searchResults: [{ id: "c_9", title: "Clock tower", pinned: false, archived: false, snippet: "…the clock…" }],
+          searchResults: [{ id: "c_9", title: "Clock tower", pinned: false, archived: false, badge: null, snippet: "…the clock…" }],
         }),
       });
       expect(document.querySelector(".convos-list")?.textContent).toContain("Clock tower");
@@ -466,8 +484,8 @@ describe("the chat webview", () => {
       state: state({
         unreadNotifications: 1,
         notifications: [
-          { id: "n_1", kind: "budget", title: "Budget low", body: "80% of the allowance is used.", createdAt: "2026-10-29T10:00:00+00:00", read: false },
-          { id: "n_2", kind: "plan", title: "Plan changed", body: "", createdAt: "2026-10-28T09:00:00+00:00", read: true },
+          { id: "n_1", kind: "budget", title: "Budget low", body: "80% of the allowance is used.", link: null, createdAt: "2026-10-29T10:00:00+00:00", read: false },
+          { id: "n_2", kind: "plan", title: "Plan changed", body: "", link: null, createdAt: "2026-10-28T09:00:00+00:00", read: true },
         ],
       }),
     });
@@ -493,8 +511,8 @@ describe("the chat webview", () => {
       state: state({
         unreadNotifications: 0,
         notifications: [
-          { id: "n_1", kind: "budget", title: "Budget low", body: "80% of the allowance is used.", createdAt: "2026-10-29T10:00:00+00:00", read: true },
-          { id: "n_2", kind: "plan", title: "Plan changed", body: "", createdAt: "2026-10-28T09:00:00+00:00", read: true },
+          { id: "n_1", kind: "budget", title: "Budget low", body: "80% of the allowance is used.", link: null, createdAt: "2026-10-29T10:00:00+00:00", read: true },
+          { id: "n_2", kind: "plan", title: "Plan changed", body: "", link: null, createdAt: "2026-10-28T09:00:00+00:00", read: true },
         ],
       }),
     });
@@ -522,5 +540,62 @@ describe("the chat webview", () => {
     // The ask goes out either way; the panel opens only when rows arrive.
     expect(sent.at(-1)).toEqual({ type: "refreshNotifications" });
     expect((document.querySelector(".notifications") as HTMLElement).hasAttribute("hidden")).toBe(true);
+  });
+
+  it("gives a row with a link an Open action that asks the host to follow it", () => {
+    post({
+      type: "state",
+      state: state({
+        notifications: [
+          { id: "n_1", kind: "mention", title: "You were mentioned", body: "Take a look.", link: "/apps/chat?c=c_9", createdAt: "2026-10-30T09:00:00+00:00", read: false },
+        ],
+      }),
+    });
+    Array.from(document.querySelectorAll<HTMLButtonElement>(".meta button"))
+      .find((b) => b.textContent === "Notifications")
+      ?.click();
+    const open = Array.from(document.querySelectorAll<HTMLButtonElement>(".notifications .notif .row-actions button"))
+      .find((b) => b.textContent === "Open");
+    expect(open).not.toBeNull();
+    open?.click();
+    expect(sent.at(-1)).toEqual({ type: "openNotification", id: "n_1", url: "/apps/chat?c=c_9" });
+  });
+});
+
+describe("image previews", () => {
+  it("shows the named chip until the bytes arrive, then the picture", () => {
+    const imageMessage = message({
+      id: "u9",
+      role: "user",
+      parts: [{ type: "image", attachment_id: "att_1", filename: "shot.png", content_type: "image/png" }],
+      content: "What is in this picture?",
+    });
+    post({ type: "state", state: state({ transcript: [{ message: imageMessage, siblingIndex: 1, siblingCount: 1 }] }) });
+    // No bytes yet: the chip names what was attached.
+    expect(document.querySelector(".transcript img")).toBeNull();
+    expect(document.querySelector(".transcript .cut")?.textContent).toContain("Attached image shot.png");
+
+    post({ type: "imageData", attachmentId: "att_1", dataUri: "data:image/png;base64,aGVsbG8=" });
+    const img = document.querySelector<HTMLImageElement>(".transcript img.image-preview");
+    expect(img?.getAttribute("src")).toBe("data:image/png;base64,aGVsbG8=");
+    expect(img?.getAttribute("alt")).toBe("shot.png");
+  });
+
+  it("never puts a non-data: or wrong-typed URI in an img src", () => {
+    const imageMessage = message({
+      id: "u9",
+      role: "user",
+      parts: [{ type: "image", attachment_id: "att_2", filename: "x.png", content_type: "image/png" }],
+      content: "look",
+    });
+    post({ type: "state", state: state({ transcript: [{ message: imageMessage, siblingIndex: 1, siblingCount: 1 }] }) });
+    post({ type: "imageData", attachmentId: "att_2", dataUri: "javascript:alert(1)" });
+    post({ type: "imageData", attachmentId: "att_2", dataUri: "data:text/html;base64,PHNjcmlwdD4=" });
+    expect(document.querySelector(".transcript img")).toBeNull();
+  });
+
+  it("shows who is acting in the meta line", () => {
+    post({ type: "state", state: state({ identity: "Ada" }) });
+    expect(document.querySelector(".meta .identity")?.textContent).toBe("Ada");
   });
 });

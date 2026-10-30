@@ -20,7 +20,7 @@ function view(transcript: Message[]): ViewState {
     signedIn: true,
     offline: false,
     identity: "Ada",
-    conversations: [{ id: "c_1", title: "The clock question", pinned: false, archived: false }],
+    conversations: [{ id: "c_1", title: "The clock question", pinned: false, archived: false, badge: null }],
     archivedConversations: [],
     searchResults: null,
     activeId: "c_1",

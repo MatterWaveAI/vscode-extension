@@ -61,14 +61,15 @@ export function makeNonce(): string {
 /**
  * The page. Strict CSP: no default source, scripts only with this load's
  * nonce (so no inline handler and no remote script can run), styles from the
- * nonce'd block, images only from the extension itself, and no network at
- * all -- `connect-src` is absent, so the page could not reach the API even if
- * it had something to reach it with.
+ * nonce'd block, images from the extension itself or `data:` URIs the host
+ * posted for image attachments, and no network at all -- `connect-src` is
+ * absent, so the page could not reach the API even if it had something to
+ * reach it with.
  */
 export function chatHtml({ cspSource, scriptUri, nonce }: { cspSource: string; scriptUri: string; nonce: string }): string {
   const csp = [
     "default-src 'none'",
-    `img-src ${cspSource}`,
+    `img-src ${cspSource} data:`,
     `style-src 'nonce-${nonce}'`,
     `script-src 'nonce-${nonce}'`,
     `font-src ${cspSource}`,
@@ -102,6 +103,7 @@ button:disabled { opacity: .5; cursor: default; }
 .bar { display: flex; gap: 6px; align-items: center; padding: 6px 8px; border-bottom: 1px solid var(--vscode-panel-border); }
 .bar select { flex: 1; min-width: 0; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border); }
 .meta { display: flex; gap: 8px; align-items: center; padding: 4px 8px; font-size: 90%; opacity: .85; }
+.meta .identity { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 30%; }
 .meter { flex: 1; height: 4px; background: var(--vscode-progressBar-background); opacity: .3; border-radius: 2px; position: relative; }
 .meter > i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--vscode-progressBar-background); border-radius: 2px; opacity: 1; }
 .transcript { flex: 1; overflow-y: auto; padding: 8px; }
@@ -119,6 +121,7 @@ details pre { white-space: pre-wrap; }
 .error { background: var(--vscode-inputValidation-errorBackground); border: 1px solid var(--vscode-inputValidation-errorBorder); }
 .error .title { font-weight: 600; }
 .cut { margin-top: 4px; font-size: 90%; display: flex; gap: 6px; align-items: center; opacity: .9; }
+img.image-preview { display: block; max-width: 100%; max-height: 320px; margin-top: 4px; border-radius: 4px; border: 1px solid var(--vscode-panel-border); }
 .divider { display: flex; align-items: center; gap: 6px; margin: 10px 0; font-size: 90%; opacity: .85; }
 .divider::before, .divider::after { content: ""; flex: 1; border-top: 1px dashed var(--vscode-panel-border); }
 .originals { opacity: .7; border-left: 2px dashed var(--vscode-panel-border); padding-left: 6px; }
@@ -150,6 +153,7 @@ details pre { white-space: pre-wrap; }
 .convos-list .row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: stretch; }
 .convos-list .snippet { font-size: 85%; opacity: .7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .convos-list .row.active .title { font-weight: 600; }
+.convos-list .lib-badge { font-size: 85%; opacity: .7; font-weight: normal; margin-left: 6px; }
 .convos-list .row-actions { display: flex; gap: 2px; opacity: .55; flex: none; }
 .convos-list .row:hover .row-actions, .convos-list .row:focus-within .row-actions { opacity: 1; }
 .convos-list .row-actions button { font-size: 85%; padding: 0 3px; }

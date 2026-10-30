@@ -28,6 +28,8 @@ export interface ConversationSummary {
   title: string;
   pinned: boolean;
   archived: boolean;
+  /** The row's library badge -- folder and tag names -- or null when it carries neither. */
+  badge: string | null;
 }
 
 /** A conversation a search matched, with the headline around the match. */
@@ -67,6 +69,8 @@ export interface NotificationView {
   kind: string;
   title: string;
   body: string;
+  /** Where the row leads: a path of this deployment, or an http(s) URL. */
+  link: string | null;
   createdAt: string;
   read: boolean;
 }
@@ -119,7 +123,9 @@ export type HostMessage =
   | { type: "state"; state: ViewState }
   /** A streaming frame the webview applies to `live` without a full state post. */
   | { type: "part"; index: number; part: Part }
-  | { type: "delta"; index: number; field: "text"; text: string };
+  | { type: "delta"; index: number; field: "text"; text: string }
+  /** An image attachment's bytes as a `data:` URI, fetched by the host for one transcript part. */
+  | { type: "imageData"; attachmentId: string; dataUri: string };
 
 export type WebviewMessage =
   | { type: "ready" }
@@ -150,6 +156,8 @@ export type WebviewMessage =
   | { type: "refreshNotifications" }
   | { type: "readNotification"; id: string }
   | { type: "readAllNotifications" }
+  /** Open where a notification row leads, in the chat or the browser. */
+  | { type: "openNotification"; id: string; url: string }
   | { type: "switchBranch"; messageId: string; step: -1 | 1 }
   | { type: "continue" }
   | { type: "compact" }
@@ -162,11 +170,14 @@ const WEBVIEW_TYPES = new Set<WebviewMessage["type"]>([
   "deleteConversation", "pinConversation", "archiveConversation", "exportConversation", "shareConversation",
   "send", "stop", "retry", "edit", "regenerate", "rateMessage", "setInstructions", "switchBranch", "continue",
   "compact", "pickModel", "signIn", "copyRequestId", "refreshNotifications", "readNotification", "readAllNotifications",
+  "openNotification",
 ]);
 
 const FEEDBACK_REASON_SET = new Set<string>(FEEDBACK_REASONS);
 const MAX_COMMENT_CHARS = 2000;
 const MAX_INSTRUCTION_CHARS = 2000;
+/** A notification link the channel will carry; longer is not a URL but an attack. */
+const MAX_LINK_CHARS = 2048;
 
 /** The feedback reasons of an intent, or null when the array is not one the contract allows. */
 function reasonsOf(value: unknown): FeedbackReason[] | null {
@@ -232,6 +243,10 @@ export function parseWebviewMessage(raw: unknown): WebviewMessage | null {
       return str("messageId") && (msg.step === 1 || msg.step === -1) ? (msg as WebviewMessage) : null;
     case "readNotification":
       return id() ? (msg as WebviewMessage) : null;
+    case "openNotification":
+      return id() && typeof msg.url === "string" && msg.url.length > 0 && msg.url.length <= MAX_LINK_CHARS
+        ? (msg as WebviewMessage)
+        : null;
     default:
       return { type: msg.type } as WebviewMessage;
   }

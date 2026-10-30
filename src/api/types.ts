@@ -127,8 +127,66 @@ export interface Attachment {
 export interface ApiKeyListing {
   id: string;
   prefix: string;
+  name: string;
+  scopes: string[];
+  created_at: string;
   previous_prefix: string | null;
+  previous_valid_until: string | null;
+  rotated_at: string | null;
+  last_used_at: string | null;
+  expires_at: string | null;
   revoked_at: string | null;
+}
+
+/** A create or rotate answer: the listing row plus `key`, in this one answer only. */
+export type ApiKeyCreated = ApiKeyListing & { key: string };
+
+// --- entitlements ------------------------------------------------------------
+
+/**
+ * `GET /api/entitlements`: what this org's plan allows. Only the switches the
+ * extension reads are typed; `limits.features` is a bag the API may extend.
+ */
+export interface Entitlements {
+  plan: string;
+  plan_name: string;
+  limits: {
+    features?: Record<string, boolean>;
+    [key: string]: unknown;
+  };
+}
+
+// --- org instructions ----------------------------------------------------------
+
+/** `GET`/`PUT /api/org/instructions`: the org-level text, owner and admins only. */
+export interface OrgInstructions {
+  text: string;
+}
+
+// --- import -----------------------------------------------------------------
+
+/** Where an import stands: queued, running, finished, or stopped with a reason. */
+export type ImportStatus = "pending" | "running" | "done" | "failed";
+
+/** One row of `/api/me/imports`, as `ImportRecord.to_dict` writes it. */
+export interface ImportRecord {
+  id: string;
+  status: ImportStatus;
+  source: string;
+  filename: string;
+  size_bytes: number;
+  conversations_total: number;
+  conversations_done: number;
+  conversations_created: number;
+  conversations_existing: number;
+  conversations_skipped: number;
+  messages_created: number;
+  attachments_skipped: number;
+  branches_dropped: number;
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
 }
 
 export type DeviceTokenError =

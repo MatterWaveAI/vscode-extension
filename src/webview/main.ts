@@ -1,6 +1,7 @@
 import type { FeedbackReason, Message, Part } from "../api/types";
 import { appendDelta, setPart } from "../chat/assemble";
 import type { FeedbackSummary, HostMessage, NotificationView, TranscriptEntry, UsageView, ViewState, WebviewMessage } from "../chat/protocol";
+import { trustedImageDataUri } from "../chat/images";
 import { renderMarkdown } from "./markdown";
 
 /**
@@ -44,6 +45,13 @@ let notificationsOpen = false;
  */
 const feedbackSession = new Map<string, FeedbackSummary | null>();
 const expandedSummaries = new Set<string>();
+/**
+ * Image attachments this session has been handed, by attachment id. The
+ * webview cannot fetch (no network in its CSP), so the host posts the bytes
+ * as `data:` URIs here; each survives in the page until the view reloads,
+ * which is when the host re-posts them.
+ */
+const imagePreviews = new Map<string, string>();
 
 const app = document.getElementById("app") as HTMLElement;
 
@@ -254,6 +262,9 @@ function conversationRow(row: ViewState["conversations"][number], s: ViewState):
     className: "link title",
     title: row.title || "Untitled",
   });
+  // The library badge rides the row's label: the folder it is filed in and
+  // its tags, dimmed after the title.
+  if (row.badge) title.append(el("span", { className: "lib-badge", text: row.badge }));
   actions.append(
     button(row.pinned ? "Unpin" : "Pin", () => send({ type: "pinConversation", id: row.id, pinned: !row.pinned }), { className: "link", title: row.pinned ? "Unpin" : "Pin to the top" }),
     button("Rename", () => {
@@ -297,6 +308,9 @@ function isSearchHit(row: unknown): row is { snippet: string } {
 
 function renderMeta(s: ViewState): void {
   const parts: Node[] = [];
+  // Who is acting: the same line the status bar's tooltip carries, visible
+  // without it, so a switched account is never a guess.
+  if (s.identity) parts.push(el("span", { className: "identity", text: s.identity, title: "Signed in to MatterWave as" }));
   if (s.offline) {
     parts.push(el("span", { text: "Offline" }), button("Reconnect", () => send({ type: "reconnect" }), { className: "link", title: "Try to reach MatterWave again" }));
   }
@@ -427,6 +441,12 @@ function notificationRow(n: NotificationView): HTMLElement {
   const actions = el("div", { className: "row-actions" });
   if (!n.read) {
     actions.appendChild(button("Mark read", () => send({ type: "readNotification", id: n.id }), { className: "link", title: "Mark this read" }));
+  }
+  if (n.link) {
+    // The host decides where it goes: a conversation of this deployment
+    // opens in the chat, anything else in the browser.
+    const link = n.link;
+    actions.appendChild(button("Open", () => send({ type: "openNotification", id: n.id, url: link }), { className: "link", title: "Open where this leads" }));
   }
   return el("div", { className: "notif" }, [main, actions]);
 }
@@ -647,8 +667,20 @@ function renderPart(part: Part): Node {
         className: "cut",
         text: part.truncated ? `Attached ${part.filename} — cut: the model saw only its start.` : `Attached ${part.filename}`,
       });
-    case "image":
-      return el("div", { className: "cut", text: `Attached image ${part.filename}` });
+    case "image": {
+      const data = imagePreviews.get(part.attachment_id);
+      // The preview when the host has handed the bytes over; the named chip
+      // until then (and always for a type or size no preview is made for).
+      if (data === undefined) {
+        return el("div", { className: "cut", text: `Attached image ${part.filename}` });
+      }
+      const img = document.createElement("img");
+      img.className = "image-preview";
+      img.src = data;
+      img.alt = part.filename;
+      img.title = part.filename;
+      return img;
+    }
     case "summary":
       return markdown(part.text);
   }
@@ -672,6 +704,16 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
     // has done its job the moment a full state arrives.
     feedbackSession.clear();
     render();
+    return;
+  }
+  if (message.type === "imageData") {
+    // Checked, not cast: this message crossed from the host, but an `img
+    // src` is the one place a bad value becomes an element attribute, so the
+    // shape must hold before anything is kept.
+    if (trustedImageDataUri(message.dataUri)) {
+      imagePreviews.set(message.attachmentId, message.dataUri);
+      render();
+    }
     return;
   }
   const live = state?.live;

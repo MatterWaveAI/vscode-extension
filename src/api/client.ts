@@ -11,6 +11,7 @@ import {
 } from "../lib/matterwaveClient";
 import { ApiError, detailOf, parseRetryAfter } from "./errors";
 import type {
+  ApiKeyCreated,
   ApiKeyListing,
   Attachment,
   BudgetStatus,
@@ -20,15 +21,18 @@ import type {
   ConversationInstructions,
   DeviceAuthorization,
   DevicePoll,
+  Entitlements,
   FeedbackReason,
   FeedbackRow,
   FolderRow,
+  ImportRecord,
   Library,
   Me,
   Message,
   ModelList,
   NotificationListing,
   NotificationRow,
+  OrgInstructions,
   SendBody,
   ShareRow,
   TagRow,
@@ -151,6 +155,28 @@ export class MatterWaveClient {
     const { data } = await this.json<{ data: ApiKeyListing[] }>("GET", "/api/keys");
     const match = data.find((k) => k.revoked_at === null && (k.prefix === prefix || k.previous_prefix === prefix));
     if (match) await this.json("DELETE", `/api/keys/${encodeURIComponent(match.id)}`);
+  }
+
+  // --- key management ------------------------------------------------------
+
+  /** Every key the caller may see: the org's, or its own row alone without `keys:manage`. */
+  listKeys(): Promise<{ data: ApiKeyListing[] }> {
+    return this.json("GET", "/api/keys");
+  }
+
+  /** Mint a key; `key` is in this answer and nowhere else, ever. */
+  createKey(name: string): Promise<ApiKeyCreated> {
+    return this.json("POST", "/api/keys", { name });
+  }
+
+  /** A new secret for the same key; the old one keeps working while `previous_valid_until` says. */
+  rotateKey(id: string): Promise<ApiKeyCreated> {
+    return this.json("POST", `/api/keys/${encodeURIComponent(id)}/rotate`, {});
+  }
+
+  /** Revoke one key by id; a key may always revoke itself, whatever its scopes. */
+  async revokeKeyById(id: string): Promise<void> {
+    await this.json("DELETE", `/api/keys/${encodeURIComponent(id)}`);
   }
 
   // --- conversations -------------------------------------------------------
@@ -354,11 +380,6 @@ export class MatterWaveClient {
     return this.call(({ writes }) => writes.updateMeInstructions(params));
   }
 
-  /** `GET /api/org/instructions`; owner and admins only. */
-  orgInstructions(): Promise<UserInstructions> {
-    return this.call(({ reads }) => reads.orgInstructions());
-  }
-
   /** Set (or clear, with `null`) the conversation's own instructions; the answer carries the effective layers. */
   setConversationInstructions(id: string, text: string | null): Promise<ConversationInstructions> {
     return this.call(({ writes }) => writes.conversations.setInstructions(id, text));
@@ -381,6 +402,42 @@ export class MatterWaveClient {
     form.append("file", file, filename);
     const query = conversationId ? `?conversation_id=${encodeURIComponent(conversationId)}` : "";
     return this.json("POST", `/api/attachments${query}`, form);
+  }
+
+  /** An attachment's bytes, as `GET /api/attachments/{id}/content` streams them. */
+  attachmentContent(id: string): Promise<ArrayBuffer> {
+    return this.bytes("GET", `/api/attachments/${encodeURIComponent(id)}/content`);
+  }
+
+  // --- entitlements and org instructions -------------------------------------
+
+  /** `GET /api/entitlements`: what this org's plan allows, any member may read it. */
+  entitlements(): Promise<Entitlements> {
+    return this.json("GET", "/api/entitlements");
+  }
+
+  /** `GET /api/org/instructions`: the org-level text; owner and admins only (403 otherwise). */
+  orgInstructions(): Promise<OrgInstructions> {
+    return this.json("GET", "/api/org/instructions");
+  }
+
+  /** `PUT /api/org/instructions`: replace the org-level text; owner and admins only. */
+  setOrgInstructions(text: string): Promise<OrgInstructions> {
+    return this.json("PUT", "/api/org/instructions", { text });
+  }
+
+  // --- import ----------------------------------------------------------------
+
+  /** Start importing a ChatGPT or Claude export; the answer is the job row, status pending. */
+  startImport(file: Blob, filename: string): Promise<ImportRecord> {
+    const form = new FormData();
+    form.append("file", file, filename);
+    return this.json("POST", "/api/me/imports", form);
+  }
+
+  /** Where an import stands; another person's import is the same 404 as none. */
+  importStatus(id: string): Promise<ImportRecord> {
+    return this.json("GET", `/api/me/imports/${encodeURIComponent(id)}`);
   }
 
   // --- turns (SSE) ---------------------------------------------------------
@@ -493,6 +550,20 @@ export class MatterWaveClient {
       if (response.ok) return parsed as T;
       const error = this.errorFrom(response, parsed);
       const retryable = response.status === 429 || (method === "GET" && [502, 503, 504].includes(response.status));
+      const wait = error.retryAfterS ?? (retryable ? 1 : null);
+      if (!retryable || attempt >= MAX_RETRIES || wait === null || wait > MAX_RETRY_WAIT_S) throw error;
+      await this.sleep(wait * 1000);
+    }
+  }
+
+  /** A GET whose answer is the body itself: attachment bytes, not JSON. */
+  private async bytes(method: string, path: string): Promise<ArrayBuffer> {
+    for (let attempt = 0; ; attempt++) {
+      const response = await this.send(method, path, undefined);
+      if (response.ok) return response.arrayBuffer();
+      const parsed: unknown = await response.json().catch(() => null);
+      const error = this.errorFrom(response, parsed);
+      const retryable = response.status === 429 || [502, 503, 504].includes(response.status);
       const wait = error.retryAfterS ?? (retryable ? 1 : null);
       if (!retryable || attempt >= MAX_RETRIES || wait === null || wait > MAX_RETRY_WAIT_S) throw error;
       await this.sleep(wait * 1000);

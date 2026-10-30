@@ -2,12 +2,14 @@ import type { ConversationFrame } from "../lib/matterwaveClient";
 import type { MatterWaveClient } from "../api/client";
 import { ApiError } from "../api/errors";
 import { isUntrustedCertificate } from "../api/transport";
-import type { Conversation, ConversationInstructions, FeedbackReason, Message, ModelInfo, NotificationRow, UsageReport } from "../api/types";
+import type { Conversation, ConversationInstructions, FeedbackReason, Library, Message, ModelInfo, NotificationRow, UsageReport } from "../api/types";
 import { fileAttachment } from "../context";
+import { classifyNotificationLink } from "../links";
 import { initialModel } from "../models";
 import { classifyStreamError, STREAM_ERROR_COPY, type StreamErrorKind } from "../streamErrors";
 import { appendDelta, deltaText, emptyAssistant, partFromStart, setPart } from "./assemble";
 import { switchTarget, transcriptOf } from "./branches";
+import { imageDataUri, MAX_IMAGE_BYTES, renderableImageType } from "./images";
 import type {
   ConversationSummary,
   ErrorView,
@@ -53,6 +55,8 @@ export interface ChatDeps {
   runCommand: (
     command: "pickModel" | "signIn" | "copyRequestId" | "exportConversation" | "shareConversation",
   ) => void;
+  /** Open a URL in the browser: where a notification's link leads when it is not a conversation. */
+  openLink?: (url: string) => void;
   onStatus?: (status: StatusInfo) => void;
 }
 
@@ -96,10 +100,14 @@ export class ChatController {
   private temporary = false;
   private instructions: InstructionsView | null = null;
   private feedback = new Map<string, FeedbackSummary>();
+  /** Attachment ids a preview was posted for, by conversation: sent once, until a webview reload asks again. */
+  private readonly imagesSent = new Map<string, Set<string>>();
   /** The bell's rows; null once a read of them failed, so the panel says nothing rather than lies. */
   private notifications: NotificationRow[] | null = null;
   private unreadNotifications = 0;
   private usage: UsageView | null = null;
+  /** The library, read once per refresh: the rows' folder/tag badges draw from it. */
+  private library: Library | null = null;
   private abort: AbortController | null = null;
   private failed: FailedTurn | null = null;
   private reloadAfterTurn = false;
@@ -112,6 +120,10 @@ export class ChatController {
   async handle(message: WebviewMessage): Promise<void> {
     switch (message.type) {
       case "ready":
+        // A fresh webview holds no image previews: everything it shows is
+        // posted again from the transcript now loading.
+        this.imagesSent.clear();
+        return this.refresh();
       case "reconnect":
         return this.refresh();
       case "newChat":
@@ -153,6 +165,8 @@ export class ChatController {
         return this.readNotification(message.id);
       case "readAllNotifications":
         return this.readAllNotifications();
+      case "openNotification":
+        return this.openNotificationLink(message.url);
       case "switchBranch":
         return this.switchBranch(message.messageId, message.step);
       case "continue":
@@ -190,6 +204,7 @@ export class ChatController {
       this.notifications = null;
       this.unreadNotifications = 0;
       this.usage = null;
+      this.library = null;
       this.emit();
       return;
     }
@@ -207,8 +222,8 @@ export class ChatController {
       // say: it would be gone within a day anyway.
       this.conversations = conversations.filter(notTemporary);
       this.archived = archived.filter(notTemporary);
-      // Both are best-effort: a deployment without the route still chats.
-      await Promise.all([this.loadNotifications(), this.loadUsage()]);
+      // These are best-effort: a deployment without the route still chats.
+      await Promise.all([this.loadNotifications(), this.loadUsage(), this.loadLibrary()]);
       if (this.activeId) await this.loadConversation(this.activeId);
     });
     this.emit();
@@ -258,6 +273,52 @@ export class ChatController {
     if (detail.temporary !== undefined && detail.temporary !== null) this.temporary = detail.temporary === true;
     this.instructions = instructionsViewOf(detail.instructions);
     await Promise.all([this.loadMeter(id), this.loadFeedback(id)]);
+    this.prefetchImages(id);
+  }
+
+  // --- image previews ---------------------------------------------------------
+
+  /**
+   * Post the bytes of every image attachment in the conversation's path that
+   * the webview has not been handed yet: one fetch per attachment, deduped
+   * for as long as the view lives. A type no `<img>` may show, or a fetch
+   * that fails, is simply left as its named chip.
+   */
+  private prefetchImages(conversationId: string): void {
+    let sent = this.imagesSent.get(conversationId);
+    if (!sent) this.imagesSent.set(conversationId, (sent = new Set()));
+    for (const message of this.path) {
+      for (const part of message.parts) {
+        if (part.type !== "image" || sent.has(part.attachment_id)) continue;
+        if (!renderableImageType(part.content_type)) continue;
+        sent.add(part.attachment_id);
+        void this.fetchImage(conversationId, part.attachment_id, part.content_type);
+      }
+    }
+  }
+
+  private async fetchImage(conversationId: string, attachmentId: string, contentType: string): Promise<void> {
+    try {
+      const bytes = await this.deps.client.attachmentContent(attachmentId);
+      // The conversation moved on, or the picture is bigger than a preview
+      // post should carry: the chip stays either way.
+      if (this.activeId !== conversationId || bytes.byteLength > MAX_IMAGE_BYTES) return;
+      this.deps.post({ type: "imageData", attachmentId, dataUri: imageDataUri(bytes, contentType) });
+    } catch {
+      // A preview that cannot load is not an error the banners belong in.
+    }
+  }
+
+  /**
+   * Where a notification's row leads: a conversation of this deployment
+   * opens right here in the chat, everything else http(s) goes to the
+   * browser, and anything else is refused without a window.
+   */
+  private openNotificationLink(url: string): void {
+    const target = classifyNotificationLink(url, this.deps.client.baseUrl);
+    if (!target) return;
+    if (target.kind === "conversation") void this.openConversation(target.conversationId);
+    else this.deps.openLink?.(target.url);
   }
 
   private async loadMeter(id: string): Promise<void> {
@@ -469,6 +530,16 @@ export class ChatController {
     } catch {
       // A deployment without the route still chats; the line just stays off.
       this.usage = null;
+    }
+  }
+
+  /** The library for the rows' badges; a failed read loses the badges, nothing else. */
+  private async loadLibrary(): Promise<void> {
+    try {
+      this.library = await this.deps.client.listLibrary();
+    } catch {
+      // A deployment without the route still chats; the rows just go unbadged.
+      this.library = null;
     }
   }
 
@@ -708,6 +779,8 @@ export class ChatController {
         }
         this.live = emptyAssistant(conversationId, message.id);
         this.emit();
+        // A message just echoed may carry image attachments of its own.
+        this.prefetchImages(conversationId);
         return "ok";
       }
       case "title": {
@@ -762,6 +835,7 @@ export class ChatController {
         this.path = [...this.path.filter((m) => m.id !== ""), message];
         this.live = null;
         this.emit();
+        this.prefetchImages(conversationId);
         return "ok";
       }
       case "moderation_block": {
@@ -900,9 +974,9 @@ export class ChatController {
       signedIn: this.signedIn,
       offline: this.offline,
       identity: this.identity,
-      conversations: this.conversations.map(conversationSummary),
-      archivedConversations: this.archived.map(conversationSummary),
-      searchResults: this.searchResults?.map((hit): SearchHitView => ({ ...conversationSummary(hit), snippet: hit.snippet })) ?? null,
+      conversations: this.conversations.map((c) => conversationSummary(c, this.library)),
+      archivedConversations: this.archived.map((c) => conversationSummary(c, this.library)),
+      searchResults: this.searchResults?.map((hit): SearchHitView => ({ ...conversationSummary(hit, this.library), snippet: hit.snippet })) ?? null,
       activeId: this.activeId,
       transcript: transcriptOf(this.path, this.tree),
       live: this.live,
@@ -941,8 +1015,27 @@ export function meterPercent(meter: Meter | null): number | null {
 }
 
 /** What the sidebar needs from a row; `pinned_at`/`archived_at` read as flags. */
-function conversationSummary(c: Conversation): ConversationSummary {
-  return { id: c.id, title: c.title, pinned: Boolean(c.pinned_at), archived: Boolean(c.archived_at) };
+function conversationSummary(c: Conversation, library: Library | null): ConversationSummary {
+  return {
+    id: c.id,
+    title: c.title,
+    pinned: Boolean(c.pinned_at),
+    archived: Boolean(c.archived_at),
+    badge: libraryBadge(c, library),
+  };
+}
+
+/**
+ * The folder and tag names a conversation carries, as one badge: the folder
+ * it is filed in, then its tags in the library's order. Null when it
+ * carries neither, so the row shows nothing extra.
+ */
+export function libraryBadge(c: Conversation, library: Library | null): string | null {
+  const folder = library?.folders.find((f) => f.id === c.folder_id)?.name ?? null;
+  const carried = new Set(library?.assignments[c.id] ?? []);
+  const tags = (library?.tags ?? []).filter((t) => carried.has(t.id)).map((t) => t.name);
+  const badge = [folder, ...tags].filter((name) => name).join(" · ");
+  return badge || null;
 }
 
 /** A temporary conversation is in no list and no search, whatever a row says. */
@@ -960,9 +1053,17 @@ function instructionsViewOf(raw: ConversationInstructions | null | undefined): I
   };
 }
 
-/** A notification row as the bell renders it: `read` spelled out. */
+/** A notification row as the bell renders it: `read` spelled out, the link kept. */
 function notificationView(n: NotificationRow): NotificationView {
-  return { id: n.id, kind: n.kind, title: n.title, body: n.body, createdAt: n.created_at, read: n.read_at !== null };
+  return {
+    id: n.id,
+    kind: n.kind,
+    title: n.title,
+    body: n.body,
+    link: n.link,
+    createdAt: n.created_at,
+    read: n.read_at !== null,
+  };
 }
 
 /** The usage report as the line reads it: the three states folded into one. */

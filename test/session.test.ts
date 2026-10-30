@@ -36,6 +36,49 @@ describe("TokenStore", () => {
     secrets.values.set("matterwave.token:https://mw.test", "mw_abcdefgh_bare");
     expect(await tokens.session()).toEqual({ token: "mw_abcdefgh_bare", minted: false });
   });
+
+  it("keeps several accounts side by side, one acting", async () => {
+    const { tokens } = setup({});
+    await tokens.set("mw_abcdefgh_work-key1", true, { subject: "u_work", label: "Ada at Work" });
+    await tokens.set("mw_abcdefgh_home-key", false, { subject: "u_home", label: "Ada" });
+    expect(await tokens.get()).toBe("mw_abcdefgh_home-key");
+    const listed = await tokens.list();
+    expect(listed.map((a) => [a.subject, a.active])).toEqual([
+      ["u_home", true],
+      ["u_work", false],
+    ]);
+    // Switching moves the acting pointer, nothing else: both keys stay kept.
+    expect(await tokens.setActive("u_work")).toBe(true);
+    expect(await tokens.get()).toBe("mw_abcdefgh_work-key1");
+    expect(await tokens.session()).toEqual({ token: "mw_abcdefgh_work-key1", minted: true });
+    expect(await tokens.list().then((rows) => rows.map((r) => r.active))).toEqual([true, false]);
+  });
+
+  it("signs the acting account out and leaves the parked ones offered", async () => {
+    const { tokens } = setup({});
+    await tokens.set("mw_abcdefgh_work-key1", true, { subject: "u_work", label: "Ada at Work" });
+    await tokens.set("mw_abcdefgh_home-key", false, { subject: "u_home", label: "Ada" });
+    // The acting account (u_home) is the one signed out; u_work stays parked.
+    await tokens.clear();
+    expect(await tokens.get()).toBeNull();
+    const parked = await tokens.list();
+    expect(parked.map((a) => a.subject)).toEqual(["u_work"]);
+    expect(parked.every((a) => !a.active)).toBe(true);
+    // And back in: a parked account becomes the acting one again.
+    await tokens.setActive("u_work");
+    expect(await tokens.get()).toBe("mw_abcdefgh_work-key1");
+  });
+
+  it("reads a single-slot store as one unnamed account, and supersedes it on a named sign-in", async () => {
+    const { secrets, tokens } = setup({});
+    secrets.values.set("matterwave.token:https://mw.test", JSON.stringify({ token: "mw_abcdefgh_olderkey", minted: false }));
+    expect(await tokens.list()).toEqual([
+      { subject: "", label: null, token: "mw_abcdefgh_olderkey", minted: false, active: true },
+    ]);
+    await tokens.set("mw_abcdefgh_newkey00", true, { subject: "u1", label: "Ada" });
+    expect(await tokens.get()).toBe("mw_abcdefgh_newkey00");
+    expect((await tokens.list()).map((a) => a.subject)).toEqual(["u1"]);
+  });
 });
 
 describe("sign-out", () => {

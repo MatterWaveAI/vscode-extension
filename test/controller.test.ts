@@ -5,8 +5,9 @@ import { TransportError, UNTRUSTED_CERTIFICATE_MESSAGE } from "../src/api/transp
 import type { ModelInfo } from "../src/api/types";
 import { TokenStore } from "../src/auth/session";
 import { ChatController, type StatusInfo } from "../src/chat/controller";
+import { MAX_IMAGE_BYTES } from "../src/chat/images";
 import type { HostMessage, ViewState } from "../src/chat/protocol";
-import { ChatViewProvider } from "../src/chat/viewProvider";
+import { ChatViewProvider, chatHtml } from "../src/chat/viewProvider";
 import { CONVERSATION, fakeFetch, fixture, json, MODELS, sse, type Call } from "./fakeApi";
 import { FakeWebview, MemorySecrets } from "./vscode-mock";
 import { STREAM_ERROR_COPY } from "../src/streamErrors";
@@ -40,7 +41,7 @@ const USAGE = {
 const USER = JSON.parse(fixture("turn.sse").split("\n")[1]?.slice("data: ".length) ?? "{}");
 const DONE = JSON.parse(fixture("turn.sse").trimEnd().split("\n").at(-1)?.slice("data: ".length) ?? "{}");
 
-function routes() {
+function routes(over: Record<string, (call: Call) => Response> = {}) {
   return {
     "GET /api/me": () => json({ subject: "u1", kind: "user", email: "ada@example.com", name: "Ada", org_name: "Acme" }),
     "GET /api/models": () => json(MODELS),
@@ -58,14 +59,16 @@ function routes() {
     "POST /api/me/notifications/n_1/read": () => json({ ...NOTIFICATION, read_at: NOTIFICATION.created_at, unread_count: 0 }),
     "POST /api/me/notifications/read-all": () => json({ read: 1 }),
     "GET /api/me/usage": () => json(USAGE),
+    "GET /api/library": () => json({ folders: [], tags: [], assignments: {} }),
+    ...over,
   };
 }
 
-async function setup() {
+async function setup(over: Parameters<typeof routes>[0] = {}) {
   const secrets = new MemorySecrets();
   const tokens = new TokenStore(secrets as unknown as vscode.SecretStorage, () => "https://mw.test");
   await tokens.set(TOKEN);
-  const fake = fakeFetch(routes());
+  const fake = fakeFetch(routes(over));
   // `dead` stands in for a network that answers nothing, as extension.ts wires reachability;
   // `untrusted` for TLS refusing the server's chain, as transport.ts words it.
   const network = { dead: false, untrusted: false };
@@ -83,12 +86,14 @@ async function setup() {
   const webview = new FakeWebview();
   const provider = new ChatViewProvider(vscode.Uri.file("/ext"));
   const statuses: StatusInfo[] = [];
+  const openLink = vi.fn();
   const controller = new ChatController({
     client,
     post: (message) => provider.post(message),
     isSignedIn: async () => (await tokens.get()) !== null,
     rememberedModel: { get: () => null, set: () => undefined },
     runCommand: () => undefined,
+    openLink,
     onStatus: (s) => void statuses.push(s),
   });
   provider.attach(controller);
@@ -104,7 +109,7 @@ async function setup() {
     webview.receive(message);
     await handled.mock.results[before]?.value;
   };
-  return { controller, webview, calls: fake.calls, fromWebview, statuses, network };
+  return { controller, provider, webview, calls: fake.calls, fromWebview, statuses, network, openLink };
 }
 
 function lastState(posted: unknown[]): ViewState {
@@ -136,7 +141,7 @@ describe("the webview message channel", () => {
     expect(state.streaming).toBe(false);
     expect(state.live).toBeNull();
     expect(state.transcript.map((e) => e.message.id)).toEqual(["m_user", "m_asst"]);
-    expect(state.conversations).toEqual([{ id: "c_1", title: "What time is it?", pinned: false, archived: false }]);
+    expect(state.conversations).toEqual([{ id: "c_1", title: "What time is it?", pinned: false, archived: false, badge: null }]);
     expect(state.meter).toEqual({ usedTokens: 1234, contextWindow: 32768, compactable: true });
     expect(statuses.at(-1)).toMatchObject({ signedIn: true, identity: "Ada", model: "GRT Small", meterPercent: 4 });
 
@@ -266,7 +271,7 @@ describe("conversation management", () => {
     await controller.refresh();
     await controller.handle({ type: "renameConversation", id: "c_1", title: "  Better name  " });
     expect(calls.find((c) => c.method === "PATCH")?.url).toBe("/api/conversations/c_1");
-    expect(controller.snapshot().conversations).toEqual([{ id: "c_1", title: "Better name", pinned: false, archived: false }]);
+    expect(controller.snapshot().conversations).toEqual([{ id: "c_1", title: "Better name", pinned: false, archived: false, badge: null }]);
   });
 
   it("pins and unpins over PUT and DELETE, pinned sorting first", async () => {
@@ -298,7 +303,7 @@ describe("conversation management", () => {
     await controller.handle({ type: "archiveConversation", id: "c_1", archived: true });
     const state = controller.snapshot();
     expect(state.conversations).toEqual([]);
-    expect(state.archivedConversations).toEqual([{ id: "c_1", title: "New chat", pinned: false, archived: true }]);
+    expect(state.archivedConversations).toEqual([{ id: "c_1", title: "New chat", pinned: false, archived: true, badge: null }]);
     expect(state.activeId).toBeNull();
     // Unarchiving puts it back.
     controller["deps"].client = new MatterWaveClient({
@@ -340,11 +345,50 @@ describe("conversation management", () => {
     });
     await controller.handle({ type: "searchConversations", query: "clock" });
     expect(query).toBe("clock");
-    expect(controller.snapshot().searchResults).toEqual([{ id: "c_1", title: "New chat", pinned: false, archived: false, snippet: "the clock struck" }]);
+    expect(controller.snapshot().searchResults).toEqual([{ id: "c_1", title: "New chat", pinned: false, archived: false, badge: null, snippet: "the clock struck" }]);
     const searches = calls.filter((c) => c.url.startsWith("/api/conversations/search")).length;
     await controller.handle({ type: "searchConversations", query: "   " });
     expect(controller.snapshot().searchResults).toBeNull();
     expect(calls.filter((c) => c.url.startsWith("/api/conversations/search")).length).toBe(searches);
+  });
+
+  it("badges a row with its folder and tags from one library read per refresh", async () => {
+    const { webview, calls, fromWebview } = await setup({
+      "GET /api/conversations": () => json({ data: [{ ...CONVERSATION, folder_id: "f_1" }], filter: "default" }),
+      "GET /api/library": () =>
+        json({
+          folders: [{ id: "f_1", name: "Work", position: 0, created_at: "2026-10-29T10:00:00+00:00", updated_at: "2026-10-29T10:00:00+00:00" }],
+          tags: [
+            { id: "t_1", name: "bug", created_at: "2026-10-29T10:00:00+00:00" },
+            { id: "t_2", name: "spike", created_at: "2026-10-29T10:00:00+00:00" },
+          ],
+          assignments: { c_1: ["t_1"] },
+        }),
+    });
+    await fromWebview({ type: "ready" });
+    const state = lastState(webview.posted);
+    // Folder first, then the tags it carries, in the library's order.
+    expect(state.conversations).toEqual([{ id: "c_1", title: "New chat", pinned: false, archived: false, badge: "Work · bug" }]);
+    // One library read per refresh, whatever the lists asked for.
+    expect(calls.filter((c) => c.url === "/api/library")).toHaveLength(1);
+    // A deployment without the route loses the badges and nothing else.
+    const bare = new ChatController({
+      client: new MatterWaveClient({
+        baseUrl: "https://mw.test",
+        getToken: async () => TOKEN,
+        fetch: fakeFetch({
+          ...routes(),
+          "GET /api/conversations": () => json({ data: [{ ...CONVERSATION, folder_id: "f_1" }], filter: "default" }),
+          "GET /api/library": () => json({ detail: "no route" }, 404),
+        }).fetch,
+      }),
+      post: () => undefined,
+      isSignedIn: async () => true,
+      rememberedModel: { get: () => null, set: () => undefined },
+      runCommand: () => undefined,
+    });
+    await bare.refresh();
+    expect(bare.snapshot().conversations).toEqual([{ id: "c_1", title: "New chat", pinned: false, archived: false, badge: null }]);
   });
 });
 
@@ -454,6 +498,142 @@ describe("message feedback", () => {
     await controller.openConversation("c_1");
     expect(controller.snapshot().error).toBeNull();
     expect(controller.snapshot().transcript.map((e) => e.message.id)).toEqual(["m_user", "m_asst"]);
+  });
+
+  it("rehydrates the thumbs when the chat view reloads", async () => {
+    const { controller, provider, openLink } = await setup();
+    manage(controller, {
+      "GET /api/conversations/c_1/feedback": () =>
+        json({ data: [{ message_id: "m_asst", rating: 1, reasons: [], comment: null }] }),
+    });
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    // The view is replaced -- a reload, or the panel closed and reopened --
+    // so the page is new and empty while the controller is not.
+    const reloaded = new FakeWebview();
+    provider.resolveWebviewView({
+      webview: reloaded,
+      show: () => undefined,
+      onDidDispose: () => ({ dispose() {} }),
+    } as unknown as vscode.WebviewView);
+    await controller.handle({ type: "ready" });
+    const state = lastState(reloaded.posted);
+    expect(state.feedback).toEqual({ m_asst: { rating: 1, reasons: [], comment: null } });
+    expect(openLink).not.toHaveBeenCalled();
+  });
+});
+
+describe("image previews", () => {
+  const IMAGE = {
+    ...DONE,
+    id: "m_img",
+    role: "user",
+    parts: [{ type: "image", attachment_id: "att_img", filename: "shot.png", content_type: "image/png" }],
+  };
+
+  function imageDataRoutes() {
+    return {
+      "GET /api/conversations/c_1": () => json({ ...CONVERSATION, messages: [IMAGE] }),
+      "GET /api/conversations/c_1/tree": () => json({ ...CONVERSATION, messages: [IMAGE] }),
+      "GET /api/conversations/c_1/context": () =>
+        json({ model: "grt-small", context_window: 32768, used_tokens: 1234, compactable: true }),
+      "GET /api/conversations/c_1/feedback": () => json({ data: [] }),
+    };
+  }
+
+  it("fetches an image attachment's bytes and posts them as a data: URI", async () => {
+    const { controller, webview } = await setup();
+    const bytes = new Uint8Array([137, 80, 78, 71]);
+    const calls = manage(controller, {
+      ...imageDataRoutes(),
+      "GET /api/attachments/att_img/content": () =>
+        new Response(bytes, { status: 200, headers: { "Content-Type": "image/png" } }),
+    });
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    // The preview is fetched off to the side of the conversation load.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(calls.some((c) => c.url === "/api/attachments/att_img/content")).toBe(true);
+    const posted = webview.posted.find((m) => (m as { type?: string }).type === "imageData");
+    expect(posted).toEqual({
+      type: "imageData",
+      attachmentId: "att_img",
+      dataUri: `data:image/png;base64,${btoa(String.fromCharCode(...bytes))}`,
+    });
+  });
+
+  it("leaves an oversized image as its named chip, and does not fetch twice for one attachment", async () => {
+    const { controller, webview } = await setup();
+    const big = new Uint8Array(MAX_IMAGE_BYTES + 1);
+    const calls = manage(controller, {
+      ...imageDataRoutes(),
+      "GET /api/attachments/att_img/content": () =>
+        new Response(big, { status: 200, headers: { "Content-Type": "image/png" } }),
+    });
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    const posts = webview.posted.filter((m) => (m as { type?: string }).type === "imageData");
+    expect(posts).toEqual([]);
+    // A state that re-renders the transcript does not fetch the same bytes again.
+    await controller.refresh();
+    expect(calls.filter((c) => c.url === "/api/attachments/att_img/content")).toHaveLength(1);
+  });
+
+  it("does not fetch a type no img may show", async () => {
+    const { controller, webview } = await setup();
+    const svg = {
+      ...IMAGE,
+      parts: [{ type: "image", attachment_id: "att_svg", filename: "logo.svg", content_type: "image/svg+xml" }],
+    };
+    const calls = manage(controller, {
+      "GET /api/conversations/c_1": () => json({ ...CONVERSATION, messages: [svg] }),
+      "GET /api/conversations/c_1/tree": () => json({ ...CONVERSATION, messages: [svg] }),
+      "GET /api/conversations/c_1/context": () =>
+        json({ model: "grt-small", context_window: 32768, used_tokens: 1234, compactable: true }),
+      "GET /api/conversations/c_1/feedback": () => json({ data: [] }),
+    });
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    expect(calls.some((c) => c.url.includes("/content"))).toBe(false);
+    expect(webview.posted.some((m) => (m as { type?: string }).type === "imageData")).toBe(false);
+  });
+
+  it("re-posts the previews after the view reloads", async () => {
+    const { controller, webview } = await setup();
+    const calls = manage(controller, {
+      ...imageDataRoutes(),
+      "GET /api/attachments/att_img/content": () =>
+        new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "Content-Type": "image/png" } }),
+    });
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(webview.posted.some((m) => (m as { type?: string }).type === "imageData")).toBe(true);
+    await controller.handle({ type: "ready" });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(calls.filter((c) => c.url === "/api/attachments/att_img/content")).toHaveLength(2);
+  });
+});
+
+describe("notification links", () => {
+  it("opens a conversation link in the chat and any other link in the browser", async () => {
+    const { controller, openLink } = await setup();
+    await controller.refresh();
+    await controller.handle({ type: "openNotification", id: "n_1", url: "https://mw.test/apps/chat?c=c_1" });
+    expect(controller.snapshot().activeId).toBe("c_1");
+    expect(openLink).not.toHaveBeenCalled();
+    await controller.handle({ type: "openNotification", id: "n_1", url: "https://example.com/pricing" });
+    expect(openLink).toHaveBeenCalledWith("https://example.com/pricing");
+  });
+
+  it("refuses a link that is not http(s) and repairs a relative one", async () => {
+    const { controller, openLink } = await setup();
+    await controller.refresh();
+    await controller.handle({ type: "openNotification", id: "n_1", url: "javascript:alert(1)" });
+    expect(openLink).not.toHaveBeenCalled();
+    expect(controller.snapshot().activeId).toBeNull();
+    await controller.handle({ type: "openNotification", id: "n_1", url: "/apps/chat?c=c_1" });
+    expect(controller.snapshot().activeId).toBe("c_1");
   });
 });
 
@@ -798,7 +978,7 @@ describe("notifications and usage", () => {
     await controller.refresh();
     const state = controller.snapshot();
     expect(state.notifications).toEqual([
-      { id: "n_1", kind: "budget", title: "Budget low", body: "80% of the allowance is used.", createdAt: NOTIFICATION.created_at, read: false },
+      { id: "n_1", kind: "budget", title: "Budget low", body: "80% of the allowance is used.", link: null, createdAt: NOTIFICATION.created_at, read: false },
     ]);
     expect(state.unreadNotifications).toBe(1);
     expect(state.usage).toEqual({
@@ -868,5 +1048,16 @@ describe("notifications and usage", () => {
     expect(state.unreadNotifications).toBe(0);
     expect(state.usage).toBeNull();
     expect(state.error).toBeNull();
+  });
+});
+
+describe("the page itself", () => {
+  it("allows images from data: URIs beside the extension's own, and scripts only with the nonce", () => {
+    const html = chatHtml({ cspSource: "vscode-resource:", scriptUri: "vscode-resource:/webview.js", nonce: "abc123" });
+    expect(html).toContain("img-src vscode-resource: data:");
+    expect(html).toContain("script-src 'nonce-abc123'");
+    expect(html).toContain("style-src 'nonce-abc123'");
+    // No network at all: the page could not reach the API even with something to reach it with.
+    expect(html).not.toContain("connect-src");
   });
 });

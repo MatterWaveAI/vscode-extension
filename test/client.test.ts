@@ -380,4 +380,98 @@ describe("MatterWaveClient", () => {
     // A tag that is gone or was never the caller's is one 404.
     await expect(api.deleteTag("t_gone")).rejects.toMatchObject({ status: 404 });
   });
+
+  it("reads an attachment's bytes as the body, not as JSON", async () => {
+    const bytes = new Uint8Array([1, 2, 3]);
+    const { api, calls } = client({
+      "GET /api/attachments/att_1/content": () =>
+        new Response(bytes, { status: 200, headers: { "Content-Type": "image/png", "X-Request-Id": "req-img" } }),
+    });
+    const content = await api.attachmentContent("att_1");
+    expect(new Uint8Array(content)).toEqual(bytes);
+    expect(calls[0]).toMatchObject({ method: "GET", url: "/api/attachments/att_1/content" });
+    // A refusal keeps the error contract the JSON paths have.
+    await expect(
+      client({ "GET /api/attachments/att_x/content": () => json({ detail: "No such attachment" }, 404) }).api.attachmentContent("att_x"),
+    ).rejects.toMatchObject({ status: 404, detail: "No such attachment" });
+  });
+
+  it("creates, rotates and revokes keys over the keys routes", async () => {
+    const row = {
+      id: "key_1",
+      prefix: "mw_newkeyne",
+      name: "CI",
+      scopes: ["chat:read", "chat:write"],
+      created_at: "2026-10-30T00:00:00+00:00",
+      previous_prefix: null,
+      previous_valid_until: null,
+      rotated_at: null,
+      last_used_at: null,
+      expires_at: null,
+      revoked_at: null,
+    };
+    const { api, calls } = client({
+      "GET /api/keys": () => json({ data: [row] }),
+      "POST /api/keys": () => json({ ...row, id: "key_2", name: "VS Code", key: "mw_secret_value" }, 201),
+      "POST /api/keys/key_1/rotate": () => json({ ...row, prefix: "mw_rotated1", key: "mw_new_secret" }),
+      "DELETE /api/keys/key_1": () => new Response(null, { status: 204 }),
+    });
+    await expect(api.listKeys()).resolves.toEqual({ data: [row] });
+    await expect(api.createKey("VS Code")).resolves.toMatchObject({ key: "mw_secret_value" });
+    expect(JSON.parse(String(calls[1]?.body))).toEqual({ name: "VS Code" });
+    await expect(api.rotateKey("key_1")).resolves.toMatchObject({ key: "mw_new_secret" });
+    expect(calls[2]?.url).toBe("/api/keys/key_1/rotate");
+    await api.revokeKeyById("key_1");
+    expect(calls[3]).toMatchObject({ method: "DELETE", url: "/api/keys/key_1" });
+  });
+
+  it("reads the entitlements and the org instructions over their routes", async () => {
+    const entitlements = { plan: "team", plan_name: "Team", limits: { features: { custom_instructions: true } } };
+    const { api, calls } = client({
+      "GET /api/entitlements": () => json(entitlements),
+      "GET /api/org/instructions": () => json({ text: "Be brief." }),
+      "PUT /api/org/instructions": (call) => {
+        expect(JSON.parse(String(call.body))).toEqual({ text: "Answer in British English." });
+        return json({ text: "Answer in British English." });
+      },
+    });
+    await expect(api.entitlements()).resolves.toEqual(entitlements);
+    await expect(api.orgInstructions()).resolves.toEqual({ text: "Be brief." });
+    await expect(api.setOrgInstructions("Answer in British English.")).resolves.toEqual({ text: "Answer in British English." });
+    expect(calls[2]?.method).toBe("PUT");
+  });
+
+  it("starts an import as multipart and reads its status back", async () => {
+    const record = {
+      id: "imp_1",
+      status: "running",
+      source: "chatgpt",
+      filename: "conversations.json",
+      size_bytes: 10,
+      conversations_total: 3,
+      conversations_done: 1,
+      conversations_created: 1,
+      conversations_existing: 0,
+      conversations_skipped: 0,
+      messages_created: 4,
+      attachments_skipped: 0,
+      branches_dropped: 0,
+      error: null,
+      created_at: "2026-10-30T00:00:00+00:00",
+      started_at: "2026-10-30T00:00:01+00:00",
+      completed_at: null,
+    };
+    const { api, calls } = client({
+      "POST /api/me/imports": () => json({ ...record, status: "pending" }, 202),
+      "GET /api/me/imports/imp_1": () => json(record),
+    });
+    await expect(api.startImport(new Blob(["{}"], { type: "application/json" }), "conversations.json")).resolves.toMatchObject({
+      id: "imp_1",
+      status: "pending",
+    });
+    const form = calls[0]?.body as FormData;
+    expect((form.get("file") as File).name).toBe("conversations.json");
+    await expect(api.importStatus("imp_1")).resolves.toMatchObject({ status: "running" });
+    expect(calls[1]?.url).toBe("/api/me/imports/imp_1");
+  });
 });
