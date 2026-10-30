@@ -13,6 +13,30 @@ import { STREAM_ERROR_COPY } from "../src/streamErrors";
 
 const TOKEN = "mw_abcdefgh_THIS-MUST-NEVER-REACH-THE-WEBVIEW";
 
+const NOTIFICATION = {
+  id: "n_1",
+  kind: "budget",
+  title: "Budget low",
+  body: "80% of the allowance is used.",
+  link: null,
+  created_at: "2026-10-29T10:00:00+00:00",
+  read_at: null,
+};
+
+const USAGE = {
+  unit: "weighted_tokens",
+  used: 4_000_000,
+  included: 5_000_000,
+  remaining: 1_000_000,
+  percent: 80.0,
+  warn: true,
+  in_overage: false,
+  exhausted: false,
+  period_start: "2026-10-01",
+  resets_at: "2026-11-01T00:00:00+00:00",
+  plan: { code: "team", name: "Team" },
+};
+
 const USER = JSON.parse(fixture("turn.sse").split("\n")[1]?.slice("data: ".length) ?? "{}");
 const DONE = JSON.parse(fixture("turn.sse").trimEnd().split("\n").at(-1)?.slice("data: ".length) ?? "{}");
 
@@ -30,6 +54,10 @@ function routes() {
     "GET /api/conversations/c_1/context": () =>
       json({ model: "grt-small", context_window: 32768, used_tokens: 1234, compactable: true }),
     "GET /api/conversations/c_1/feedback": () => json({ data: [] }),
+    "GET /api/me/notifications": () => json({ data: [NOTIFICATION], unread_count: 1 }),
+    "POST /api/me/notifications/n_1/read": () => json({ ...NOTIFICATION, read_at: NOTIFICATION.created_at, unread_count: 0 }),
+    "POST /api/me/notifications/read-all": () => json({ read: 1 }),
+    "GET /api/me/usage": () => json(USAGE),
   };
 }
 
@@ -761,5 +789,84 @@ describe("switching conversations mid-stream", () => {
     expect(state.live).toBeNull();
     expect(state.streaming).toBe(false);
     expect(state.notice).toBeNull();
+  });
+});
+
+describe("notifications and usage", () => {
+  it("loads the bell and the allowance with the rest of the state", async () => {
+    const { controller, statuses } = await setup();
+    await controller.refresh();
+    const state = controller.snapshot();
+    expect(state.notifications).toEqual([
+      { id: "n_1", kind: "budget", title: "Budget low", body: "80% of the allowance is used.", createdAt: NOTIFICATION.created_at, read: false },
+    ]);
+    expect(state.unreadNotifications).toBe(1);
+    expect(state.usage).toEqual({
+      used: 4_000_000,
+      included: 5_000_000,
+      percent: 80,
+      state: "warn",
+      resetsAt: USAGE.resets_at,
+      planName: "Team",
+    });
+    // The status bar learns both, for its badge and its tooltip line.
+    expect(statuses.at(-1)).toMatchObject({ unreadNotifications: 1, usage: state.usage });
+  });
+
+  it("re-reads the bell on the webview's ask, without a full refresh", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    const calls = manage(controller, {});
+    await controller.handle({ type: "refreshNotifications" });
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(["GET /api/me/notifications"]);
+    expect(controller.snapshot().unreadNotifications).toBe(1);
+  });
+
+  it("marks one read, then all, and the badge follows the answers", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    const calls = manage(controller, {
+      "POST /api/me/notifications/n_1/read": (call) => {
+        expect(JSON.parse(String(call.body))).toEqual({});
+        return json({ ...NOTIFICATION, read_at: NOTIFICATION.created_at, unread_count: 0 });
+      },
+      "POST /api/me/notifications/read-all": () => json({ read: 1 }),
+    });
+    await controller.handle({ type: "readNotification", id: "n_1" });
+    expect(calls.find((c) => c.url === "/api/me/notifications/n_1/read")?.method).toBe("POST");
+    expect(controller.snapshot().unreadNotifications).toBe(0);
+    expect(controller.snapshot().notifications?.every((n) => n.read)).toBe(true);
+
+    // The rows reset with the next full refresh; mark-all clears whatever remains.
+    await controller.refresh();
+    expect(controller.snapshot().unreadNotifications).toBe(1);
+    await controller.handle({ type: "readAllNotifications" });
+    expect(calls.find((c) => c.url === "/api/me/notifications/read-all")?.method).toBe("POST");
+    expect(controller.snapshot().unreadNotifications).toBe(0);
+    expect(controller.snapshot().notifications?.every((n) => n.read)).toBe(true);
+  });
+
+  it("surfaces a refused mark-read through the error banner", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    manage(controller, { "POST /api/me/notifications/n_1/read": () => json({ detail: "No such notification" }, 404) });
+    await controller.handle({ type: "readNotification", id: "n_1" });
+    expect(controller.snapshot().error).not.toBeNull();
+    // The row stays as it was: unread, since the API refused the mark.
+    expect(controller.snapshot().notifications?.[0]?.read).toBe(false);
+  });
+
+  it("keeps a deployment without the routes quiet, not in the error banner", async () => {
+    const { controller } = await setup();
+    manage(controller, {
+      "GET /api/me/notifications": () => json({ detail: "no such route" }, 404),
+      "GET /api/me/usage": () => json({ detail: "no such route" }, 404),
+    });
+    await controller.refresh();
+    const state = controller.snapshot();
+    expect(state.notifications).toBeNull();
+    expect(state.unreadNotifications).toBe(0);
+    expect(state.usage).toBeNull();
+    expect(state.error).toBeNull();
   });
 });

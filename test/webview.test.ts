@@ -36,6 +36,9 @@ function state(over: Partial<ViewState>): ViewState {
     temporary: false,
     instructions: null,
     feedback: {},
+    notifications: [],
+    unreadNotifications: 0,
+    usage: null,
     ...over,
   };
 }
@@ -431,5 +434,93 @@ describe("the chat webview", () => {
       .find((b) => b.textContent === "Close")
       ?.click();
     expect((document.querySelector(".instructions") as HTMLElement).hasAttribute("hidden")).toBe(true);
+  });
+
+  it("shows the usage line with used, included, percent and the overage state", () => {
+    post({
+      type: "state",
+      state: state({
+        usage: { used: 1_200_000, included: 5_000_000, percent: 24, state: "overage", resetsAt: "2026-11-01T00:00:00+00:00", planName: "Team" },
+      }),
+    });
+    const line = document.querySelector(".meta .usage") as HTMLElement;
+    expect(line.textContent).toBe("1.2M / 5M tokens · 24% · overage");
+    // The exact numbers and the reset ride in the tooltip.
+    expect(line.title).toContain("1,200,000 of 5,000,000");
+    expect(line.title).toContain("Team plan");
+    // Plain sailing is unmarked; the other states say what they are.
+    post({ type: "state", state: state({ usage: { used: 10, included: 5_000, percent: 0.2, state: "ok", resetsAt: "2026-11-01T00:00:00+00:00", planName: "Team" } }) });
+    const plain = document.querySelector(".meta .usage") as HTMLElement;
+    expect(plain.textContent).toBe("10 / 5k tokens · 0%");
+    expect(plain.className).not.toContain("warn");
+  });
+
+  it("keeps the usage line off while the API has not said", () => {
+    post({ type: "state", state: state({ usage: null }) });
+    expect(document.querySelector(".meta .usage")).toBeNull();
+  });
+
+  it("opens the notifications panel from the bell, and marks one and all read", () => {
+    post({
+      type: "state",
+      state: state({
+        unreadNotifications: 1,
+        notifications: [
+          { id: "n_1", kind: "budget", title: "Budget low", body: "80% of the allowance is used.", createdAt: "2026-10-29T10:00:00+00:00", read: false },
+          { id: "n_2", kind: "plan", title: "Plan changed", body: "", createdAt: "2026-10-28T09:00:00+00:00", read: true },
+        ],
+      }),
+    });
+    // The bell carries the count and opens with a fresh read.
+    const bell = Array.from(document.querySelectorAll<HTMLButtonElement>(".meta button")).find((b) => b.textContent === "Notifications (1)");
+    expect(bell?.className).toContain("badge");
+    bell?.click();
+    expect(sent.at(-1)).toEqual({ type: "refreshNotifications" });
+
+    const rows = () => Array.from(document.querySelectorAll(".notifications .notif"));
+    expect(rows()).toHaveLength(2);
+    expect(document.querySelector(".notifications")?.textContent).toContain("80% of the allowance is used.");
+    // Unread is bold and carries the action; read is not and does not.
+    expect(document.querySelector(".notifications .notif-title.unread")?.textContent).toBe("Budget low");
+    const actions = () => Array.from(document.querySelectorAll<HTMLButtonElement>(".notifications .notif .row-actions button"));
+    expect(actions()).toHaveLength(1);
+    actions()[0]?.click();
+    expect(sent.at(-1)).toEqual({ type: "readNotification", id: "n_1" });
+
+    // The host's next state confirms it; the remaining action is mark-all.
+    post({
+      type: "state",
+      state: state({
+        unreadNotifications: 0,
+        notifications: [
+          { id: "n_1", kind: "budget", title: "Budget low", body: "80% of the allowance is used.", createdAt: "2026-10-29T10:00:00+00:00", read: true },
+          { id: "n_2", kind: "plan", title: "Plan changed", body: "", createdAt: "2026-10-28T09:00:00+00:00", read: true },
+        ],
+      }),
+    });
+    expect(document.querySelector(".notifications .notif-title.unread")).toBeNull();
+    expect(actions()).toHaveLength(0);
+    Array.from(document.querySelectorAll<HTMLButtonElement>(".notifications button"))
+      .find((b) => b.textContent === "Mark all read")
+      ?.click();
+    expect(sent.at(-1)).toEqual({ type: "readAllNotifications" });
+
+    // Empty reads as its own sentence, and Close shuts the panel.
+    post({ type: "state", state: state({ notifications: [] }) });
+    expect(document.querySelector(".notifications")?.textContent).toContain("Nothing here yet.");
+    Array.from(document.querySelectorAll<HTMLButtonElement>(".notifications button"))
+      .find((b) => b.textContent === "Close")
+      ?.click();
+    expect((document.querySelector(".notifications") as HTMLElement).hasAttribute("hidden")).toBe(true);
+  });
+
+  it("hides the notifications panel while the rows never loaded, but still asks for them", () => {
+    post({ type: "state", state: state({ notifications: null, unreadNotifications: 0 }) });
+    const bell = Array.from(document.querySelectorAll<HTMLButtonElement>(".meta button")).find((b) => b.textContent === "Notifications");
+    expect(bell?.className).not.toContain("badge");
+    bell?.click();
+    // The ask goes out either way; the panel opens only when rows arrive.
+    expect(sent.at(-1)).toEqual({ type: "refreshNotifications" });
+    expect((document.querySelector(".notifications") as HTMLElement).hasAttribute("hidden")).toBe(true);
   });
 });

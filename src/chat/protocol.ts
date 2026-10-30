@@ -61,6 +61,27 @@ export interface InstructionsView {
   overridden: boolean;
 }
 
+/** One row of the bell: the API's row with `read` spelled out. */
+export interface NotificationView {
+  id: string;
+  kind: string;
+  title: string;
+  body: string;
+  createdAt: string;
+  read: boolean;
+}
+
+/** The org's allowance this period, as the usage line renders it. */
+export interface UsageView {
+  used: number;
+  included: number;
+  percent: number;
+  /** The API's three states, none overlapping, plus plain sailing. */
+  state: "ok" | "warn" | "overage" | "exhausted";
+  resetsAt: string;
+  planName: string;
+}
+
 export interface ViewState {
   signedIn: boolean;
   offline: boolean;
@@ -86,6 +107,12 @@ export interface ViewState {
   instructions: InstructionsView | null;
   /** The caller's own feedback, by message id, as the API rehydrated it on open. */
   feedback: Record<string, FeedbackSummary>;
+  /** The bell's rows, newest first, or null when the API did not answer. */
+  notifications: NotificationView[] | null;
+  /** The unread count the status bar badges; the same number the web app's bell shows. */
+  unreadNotifications: number;
+  /** The org's allowance this period, or null when the API did not say. */
+  usage: UsageView | null;
 }
 
 export type HostMessage =
@@ -119,6 +146,10 @@ export type WebviewMessage =
   | { type: "rateMessage"; messageId: string; rating: -1 | 0 | 1; reasons?: FeedbackReason[]; comment?: string | null }
   /** `null` clears the conversation's own text: "use my instructions". */
   | { type: "setInstructions"; text: string | null }
+  /** The bell: re-read the rows, mark one read, or mark them all. */
+  | { type: "refreshNotifications" }
+  | { type: "readNotification"; id: string }
+  | { type: "readAllNotifications" }
   | { type: "switchBranch"; messageId: string; step: -1 | 1 }
   | { type: "continue" }
   | { type: "compact" }
@@ -130,7 +161,7 @@ const WEBVIEW_TYPES = new Set<WebviewMessage["type"]>([
   "ready", "reconnect", "newChat", "openConversation", "searchConversations", "renameConversation",
   "deleteConversation", "pinConversation", "archiveConversation", "exportConversation", "shareConversation",
   "send", "stop", "retry", "edit", "regenerate", "rateMessage", "setInstructions", "switchBranch", "continue",
-  "compact", "pickModel", "signIn", "copyRequestId",
+  "compact", "pickModel", "signIn", "copyRequestId", "refreshNotifications", "readNotification", "readAllNotifications",
 ]);
 
 const FEEDBACK_REASON_SET = new Set<string>(FEEDBACK_REASONS);
@@ -199,6 +230,8 @@ export function parseWebviewMessage(raw: unknown): WebviewMessage | null {
     }
     case "switchBranch":
       return str("messageId") && (msg.step === 1 || msg.step === -1) ? (msg as WebviewMessage) : null;
+    case "readNotification":
+      return id() ? (msg as WebviewMessage) : null;
     default:
       return { type: msg.type } as WebviewMessage;
   }

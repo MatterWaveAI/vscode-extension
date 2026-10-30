@@ -2,7 +2,7 @@ import type { ConversationFrame } from "../lib/matterwaveClient";
 import type { MatterWaveClient } from "../api/client";
 import { ApiError } from "../api/errors";
 import { isUntrustedCertificate } from "../api/transport";
-import type { Conversation, ConversationInstructions, FeedbackReason, Message, ModelInfo } from "../api/types";
+import type { Conversation, ConversationInstructions, FeedbackReason, Message, ModelInfo, NotificationRow, UsageReport } from "../api/types";
 import { fileAttachment } from "../context";
 import { initialModel } from "../models";
 import { classifyStreamError, STREAM_ERROR_COPY, type StreamErrorKind } from "../streamErrors";
@@ -15,7 +15,9 @@ import type {
   HostMessage,
   InstructionsView,
   Meter,
+  NotificationView,
   SearchHitView,
+  UsageView,
   ViewState,
   WebviewMessage,
 } from "./protocol";
@@ -36,6 +38,10 @@ export interface StatusInfo {
   model: string | null;
   /** 0-100, or null when the server does not know the count or the window. */
   meterPercent: number | null;
+  /** Unread notifications, for the bell on the item's face; 0 hides it. */
+  unreadNotifications: number;
+  /** The org's allowance this period, for the tooltip; null when the API did not say. */
+  usage: UsageView | null;
 }
 
 export interface ChatDeps {
@@ -90,6 +96,10 @@ export class ChatController {
   private temporary = false;
   private instructions: InstructionsView | null = null;
   private feedback = new Map<string, FeedbackSummary>();
+  /** The bell's rows; null once a read of them failed, so the panel says nothing rather than lies. */
+  private notifications: NotificationRow[] | null = null;
+  private unreadNotifications = 0;
+  private usage: UsageView | null = null;
   private abort: AbortController | null = null;
   private failed: FailedTurn | null = null;
   private reloadAfterTurn = false;
@@ -137,6 +147,12 @@ export class ChatController {
         return this.rateMessage(message.messageId, message.rating, message.reasons, message.comment);
       case "setInstructions":
         return this.setInstructions(message.text);
+      case "refreshNotifications":
+        return this.refreshNotifications();
+      case "readNotification":
+        return this.readNotification(message.id);
+      case "readAllNotifications":
+        return this.readAllNotifications();
       case "switchBranch":
         return this.switchBranch(message.messageId, message.step);
       case "continue":
@@ -171,6 +187,9 @@ export class ChatController {
       this.temporary = false;
       this.instructions = null;
       this.feedback = new Map();
+      this.notifications = null;
+      this.unreadNotifications = 0;
+      this.usage = null;
       this.emit();
       return;
     }
@@ -188,6 +207,8 @@ export class ChatController {
       // say: it would be gone within a day anyway.
       this.conversations = conversations.filter(notTemporary);
       this.archived = archived.filter(notTemporary);
+      // Both are best-effort: a deployment without the route still chats.
+      await Promise.all([this.loadNotifications(), this.loadUsage()]);
       if (this.activeId) await this.loadConversation(this.activeId);
     });
     this.emit();
@@ -395,6 +416,59 @@ export class ChatController {
     } catch {
       // A deployment without the route still chats; the thumbs just start blank.
       this.feedback = new Map();
+    }
+  }
+
+  // --- notifications and usage -------------------------------------------------
+
+  /** The bell's rows and the count, read fresh; a failed read blanks the panel rather than showing stale rows. */
+  async refreshNotifications(): Promise<void> {
+    await this.loadNotifications();
+    this.emit();
+  }
+
+  /** Mark one read; the answer carries the count that remains. */
+  async readNotification(id: string): Promise<void> {
+    try {
+      const row = await this.deps.client.readNotification(id);
+      this.notifications = (this.notifications ?? []).map((n) => (n.id === id ? row : n));
+      this.unreadNotifications = row.unread_count;
+    } catch (error) {
+      this.fail(error);
+    }
+    this.emit();
+  }
+
+  /** Mark every row read; the rows on hand are the record of what that was. */
+  async readAllNotifications(): Promise<void> {
+    try {
+      await this.deps.client.readAllNotifications();
+      this.notifications = (this.notifications ?? []).map((n) => ({ ...n, read_at: n.read_at ?? new Date().toISOString() }));
+      this.unreadNotifications = 0;
+    } catch (error) {
+      this.fail(error);
+    }
+    this.emit();
+  }
+
+  private async loadNotifications(): Promise<void> {
+    try {
+      const listing = await this.deps.client.notifications();
+      this.notifications = listing.data;
+      this.unreadNotifications = listing.unread_count;
+    } catch {
+      // A deployment without the route stays quiet: no rows, no badge.
+      this.notifications = null;
+      this.unreadNotifications = 0;
+    }
+  }
+
+  private async loadUsage(): Promise<void> {
+    try {
+      this.usage = usageViewOf(await this.deps.client.usage());
+    } catch {
+      // A deployment without the route still chats; the line just stays off.
+      this.usage = null;
     }
   }
 
@@ -840,6 +914,9 @@ export class ChatController {
       temporary: this.temporary,
       instructions: this.instructions,
       feedback: Object.fromEntries(this.feedback),
+      notifications: this.notifications?.map(notificationView) ?? null,
+      unreadNotifications: this.unreadNotifications,
+      usage: this.usage,
     };
   }
 
@@ -852,6 +929,8 @@ export class ChatController {
       identity: state.identity,
       model: state.model?.label ?? null,
       meterPercent: meterPercent(state.meter),
+      unreadNotifications: state.unreadNotifications,
+      usage: state.usage,
     });
   }
 }
@@ -878,6 +957,24 @@ function instructionsViewOf(raw: ConversationInstructions | null | undefined): I
     conversation: raw.conversation ?? null,
     effective: raw.effective ?? null,
     overridden: raw.user_overridden === true,
+  };
+}
+
+/** A notification row as the bell renders it: `read` spelled out. */
+function notificationView(n: NotificationRow): NotificationView {
+  return { id: n.id, kind: n.kind, title: n.title, body: n.body, createdAt: n.created_at, read: n.read_at !== null };
+}
+
+/** The usage report as the line reads it: the three states folded into one. */
+function usageViewOf(report: UsageReport): UsageView {
+  const state = report.exhausted ? "exhausted" : report.in_overage ? "overage" : report.warn ? "warn" : "ok";
+  return {
+    used: report.used,
+    included: report.included,
+    percent: report.percent,
+    state,
+    resetsAt: report.resets_at,
+    planName: report.plan.name,
   };
 }
 

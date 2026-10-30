@@ -40,6 +40,9 @@ describe("parseWebviewMessage", () => {
     expect(parseWebviewMessage({ type: "send", content: "hi", temporary: true })).toEqual({ type: "send", content: "hi", temporary: true });
     expect(parseWebviewMessage({ type: "setInstructions", text: null })).toEqual({ type: "setInstructions", text: null });
     expect(parseWebviewMessage({ type: "setInstructions", text: "Be brief" })).toEqual({ type: "setInstructions", text: "Be brief" });
+    expect(parseWebviewMessage({ type: "refreshNotifications" })).toEqual({ type: "refreshNotifications" });
+    expect(parseWebviewMessage({ type: "readNotification", id: "n_1" })).toEqual({ type: "readNotification", id: "n_1" });
+    expect(parseWebviewMessage({ type: "readAllNotifications" })).toEqual({ type: "readAllNotifications" });
   });
 
   it("drops malformed feedback, temporary and instructions intents instead of passing them on", () => {
@@ -59,6 +62,8 @@ describe("parseWebviewMessage", () => {
     expect(parseWebviewMessage({ type: "send", content: "hi", temporary: "yes" })).toBeNull();
     expect(parseWebviewMessage({ type: "setInstructions", text: 5 })).toBeNull();
     expect(parseWebviewMessage({ type: "setInstructions", text: "x".repeat(2001) })).toBeNull();
+    expect(parseWebviewMessage({ type: "readNotification" })).toBeNull();
+    expect(parseWebviewMessage({ type: "readNotification", id: "" })).toBeNull();
   });
 
   it("drops malformed intents instead of passing them on", () => {

@@ -126,12 +126,21 @@ details pre { white-space: pre-wrap; }
 .composer textarea { resize: vertical; min-height: 48px; font: inherit; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); padding: 4px; }
 .composer .row { display: flex; gap: 6px; justify-content: flex-end; }
 .temporary { display: flex; gap: 4px; align-items: center; font-size: 90%; opacity: .85; }
-.instructions, .fb-picker { display: flex; flex-direction: column; gap: 4px; padding: 8px; border-bottom: 1px solid var(--vscode-panel-border); }
+.instructions, .fb-picker, .notifications { display: flex; flex-direction: column; gap: 4px; padding: 8px; border-bottom: 1px solid var(--vscode-panel-border); }
 .instructions textarea, .fb-picker textarea { resize: vertical; min-height: 48px; font: inherit; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); padding: 4px; }
-.instructions .row, .fb-picker .row { display: flex; gap: 6px; justify-content: flex-end; }
+.instructions .row, .fb-picker .row, .notifications .row { display: flex; gap: 6px; justify-content: flex-end; }
 .instructions .hint { font-size: 90%; opacity: .75; }
 .fb-picker .fb-reason { display: flex; gap: 4px; align-items: center; font-size: 95%; }
 .badge { font-weight: 600; text-decoration: underline; }
+.notifications .empty { margin: 2px 0; font-size: 90%; opacity: .7; }
+.notif { display: flex; gap: 6px; align-items: flex-start; }
+.notif-main { flex: 1; min-width: 0; }
+.notif-title.unread { font-weight: 600; }
+.notif-body { font-size: 90%; opacity: .8; white-space: pre-wrap; }
+.notif-when { font-size: 85%; opacity: .6; }
+.notif .row-actions { flex: none; opacity: 1; }
+.usage { font-size: 90%; }
+.usage.warn { font-weight: 600; }
 .signin { padding: 16px; display: flex; flex-direction: column; gap: 8px; }
 .convos { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--vscode-panel-border); }
 .convos input { font: inherit; font-size: 95%; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); padding: 3px 6px; min-width: 0; }

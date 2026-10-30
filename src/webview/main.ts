@@ -1,6 +1,6 @@
 import type { FeedbackReason, Message, Part } from "../api/types";
 import { appendDelta, setPart } from "../chat/assemble";
-import type { FeedbackSummary, HostMessage, TranscriptEntry, ViewState, WebviewMessage } from "../chat/protocol";
+import type { FeedbackSummary, HostMessage, NotificationView, TranscriptEntry, UsageView, ViewState, WebviewMessage } from "../chat/protocol";
 import { renderMarkdown } from "./markdown";
 
 /**
@@ -35,6 +35,8 @@ let confirmingDeleteId: string | null = null;
 /** The message whose thumbs-down reasons/comment picker is open. */
 let feedbackPickerId: string | null = null;
 let instructionsOpen = false;
+/** Whether the bell's panel is open under the banners. */
+let notificationsOpen = false;
 /**
  * This session's feedback, over the server's copy so a click shows at once.
  * A null marks a withdrawal. Cleared whenever a full state arrives, which is
@@ -142,6 +144,22 @@ input.addEventListener("keydown", (event) => {
   }
 });
 
+// The bell's panel, between the banners and the transcript, like the instructions editor.
+const notificationsPanel = el("div", { className: "notifications" });
+notificationsPanel.hidden = true;
+const notificationsList = el("div", { className: "notif-list" });
+notificationsPanel.append(
+  el("div", { className: "who", text: "Notifications" }),
+  notificationsList,
+  el("div", { className: "row" }, [
+    button("Close", () => {
+      notificationsOpen = false;
+      render();
+    }, { className: "link" }),
+    button("Mark all read", () => send({ type: "readAllNotifications" }), { title: "Mark every notification read" }),
+  ]),
+);
+
 function submit(): void {
   const content = input.value.trim();
   if (!content || state?.streaming || state?.offline) return;
@@ -160,12 +178,13 @@ function render(): void {
     app.replaceChildren(signIn);
     return;
   }
-  if (!app.contains(composer)) app.replaceChildren(header, convos, meta, banners, instructionsPanel, transcript, composer);
+  if (!app.contains(composer)) app.replaceChildren(header, convos, meta, banners, instructionsPanel, notificationsPanel, transcript, composer);
   renderHeader(state);
   renderConversations(state);
   renderMeta(state);
   renderBanners(state);
   renderInstructions(state);
+  renderNotifications(state);
   renderTranscript(state);
   sendButton.disabled = state.streaming || state.offline;
   stopButton.hidden = !state.streaming;
@@ -293,6 +312,7 @@ function renderMeta(s: ViewState): void {
   if (meter?.compactable && s.activeId) {
     parts.push(button("Compact", () => send({ type: "compact" }), { className: "link", disabled: s.streaming, title: "Summarise earlier turns to free context" }));
   }
+  if (s.usage) parts.push(usageLine(s.usage));
   if (s.activeId) {
     // The badge: lit (bold) while custom instructions are in force, plain
     // when there are none yet, and the editor's door either way.
@@ -304,8 +324,48 @@ function renderMeta(s: ViewState): void {
       }, { className: `link${active ? " badge" : ""}`, title: "Custom instructions for this conversation" }),
     );
   }
+  const unread = s.unreadNotifications;
+  parts.push(
+    button(unread > 0 ? `Notifications (${unread})` : "Notifications", () => {
+      notificationsOpen = !notificationsOpen;
+      // Open is the moment to re-read: rows that aged in elsewhere catch up.
+      if (notificationsOpen) send({ type: "refreshNotifications" });
+      render();
+    }, { className: `link${unread > 0 ? " badge" : ""}`, title: "Notifications from your organisation" }),
+  );
   meta.replaceChildren(...parts);
   meta.hidden = parts.length === 0;
+}
+
+/** The org's allowance as one small line: used of included, the percent, the overage state. */
+function usageLine(usage: UsageView): HTMLElement {
+  const pct = Math.round(usage.percent);
+  const suffix =
+    usage.state === "exhausted"
+      ? " · exhausted"
+      : usage.state === "overage"
+        ? " · overage"
+        : usage.state === "warn"
+          ? " · running low"
+          : "";
+  return el("span", {
+    className: `usage${usage.state === "ok" ? "" : " warn"}`,
+    text: `${compactTokens(usage.used)} / ${compactTokens(usage.included)} tokens · ${pct}%${suffix}`,
+    title: `${usage.used.toLocaleString()} of ${usage.included.toLocaleString()} tokens used on the ${usage.planName} plan; resets ${new Date(usage.resetsAt).toLocaleDateString()}`,
+  });
+}
+
+/** 1234567 as "1.2M", 12345 as "12.3k", the rest as itself: a line, not a column. */
+function compactTokens(n: number): string {
+  if (n >= 1_000_000) {
+    const m = n / 1_000_000;
+    return `${Number.isInteger(m) ? m : m.toFixed(1)}M`;
+  }
+  if (n >= 1_000) {
+    const k = n / 1_000;
+    return `${Number.isInteger(k) ? k : k.toFixed(1)}k`;
+  }
+  return n.toLocaleString();
 }
 
 function renderBanners(s: ViewState): void {
@@ -348,8 +408,30 @@ function renderInstructions(s: ViewState): void {
   );
 }
 
-function renderTranscript(s: ViewState): void {
-  const nearBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 40;
+/** The bell's panel: the rows newest first, unread ones bold, each with its mark-read action. */
+function renderNotifications(s: ViewState): void {
+  notificationsPanel.hidden = !notificationsOpen || s.notifications === null;
+  if (notificationsPanel.hidden) return;
+  const rows = s.notifications ?? [];
+  notificationsList.replaceChildren(
+    ...(rows.length === 0 ? [el("p", { className: "empty", text: "Nothing here yet." })] : rows.map(notificationRow)),
+  );
+}
+
+function notificationRow(n: NotificationView): HTMLElement {
+  const main = el("div", { className: "notif-main" }, [
+    el("div", { className: `notif-title${n.read ? "" : " unread"}`, text: n.title }),
+    ...(n.body ? [el("div", { className: "notif-body", text: n.body })] : []),
+    el("div", { className: "notif-when", text: new Date(n.createdAt).toLocaleString() }),
+  ]);
+  const actions = el("div", { className: "row-actions" });
+  if (!n.read) {
+    actions.appendChild(button("Mark read", () => send({ type: "readNotification", id: n.id }), { className: "link", title: "Mark this read" }));
+  }
+  return el("div", { className: "notif" }, [main, actions]);
+}
+
+function renderTranscript(s: ViewState): void {  const nearBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 40;
   const nodes: Node[] = [];
   s.transcript.forEach((entry, i) => nodes.push(renderEntry(entry, i === s.transcript.length - 1 && !s.live, s.streaming)));
   if (s.live) nodes.push(renderLive(s.live));
