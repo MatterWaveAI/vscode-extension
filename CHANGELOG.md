@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-10-30
+
+### Added
+
+- **Organize**: a QuickPick flow that files a conversation in a folder (creating one on the spot) and tags it with a multi-select that can create a tag as it goes. Nothing is kept on this side -- the API is the state -- and finishing refreshes the sidebar.
+- **Folder and tag badge**: sidebar rows and search hits carry a dim suffix naming the conversation's folder and tags, drawn from one library read per refresh; a deployment without the route simply goes unbadged.
+- **Manage Tags**: every tag listed with the conversations carrying it, and a confirmed delete per tag -- the platform takes no rename for a tag, and a delete takes it off every conversation.
+- **Inline image previews**: image attachments render in the transcript as pictures. The host fetches an attachment's bytes through the API and posts them to the webview as `data:` URIs (the webview itself has no network); only the types an `<img>` may show (png, jpeg, gif, webp) and only under a 5 MB cap, with anything else keeping its named-attachment chip. The webview's CSP `img-src` gains `data:` beside the extension's own resources.
+- **Custom instructions at every level**: an "Edit Custom Instructions" command for the account's about/style text and the organisation's policy text (owner or admin), reading `/api/entitlements` first so a plan without the feature is named before anything is typed -- the extension-side mirror of the web app's Custom Instructions pane.
+- **API key management**: a "Manage API Keys" command over the platform's key routes -- create (the value copied to the clipboard, shown nowhere else), rotate (old secret kept for its grace window), and revoke, with the list showing each key's prefix, creation, last use and expiry.
+- **Clickable notification links**: a notification row that carries a link gets an Open action. A conversation link of the deployment (`/apps/chat?c=…`) opens right in the chat view; any other http(s) link opens in the browser; anything else is refused.
+- **Account switching**: several accounts kept side by side in the editor's secret storage, one acting. "Switch Account" lists them (the acting one marked), swaps which is acting, and offers an ordinary sign-in to add another. The active account shows in the chat view's meta line and the status bar tooltip.
+- **History import**: an "Import ChatGPT or Claude History" command that sends an export file to `POST /api/me/imports`, polls the job row, and reports what landed (conversations created, messages, what was skipped), then refreshes the sidebar.
+
+### Fixed
+
+- Feedback rehydration is pinned by a regression test through the exact reload path (a replaced webview re-`ready`s, the controller re-reads the conversation's feedback rows and the thumbs come back).
+
+### Deferred
+
+- **De-vendoring the SDK**: `@matterwave/sdk` is still not published to npm (registry 404; the sibling `typescript-sdk` repo sits at 0.3.0 unpublished), so the vendored client at `src/lib/matterwaveClient.ts` stays. Swap it for the package when it is published.
+
+[0.3.0]: https://github.com/MatterWaveAI/vscode-extension/releases/tag/v0.3.0
+
 ## [0.2.1] - 2026-10-30
 
 ### Added

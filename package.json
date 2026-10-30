@@ -2,7 +2,7 @@
   "name": "matterwave",
   "displayName": "MatterWave",
   "description": "Chat with your organisation's MatterWave models from the editor.",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "publisher": "matterwave",
   "private": true,
   "license": "MIT",
@@ -117,6 +117,36 @@
       {
         "command": "matterwave.manageShares",
         "title": "Manage Share Links",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.organizeConversation",
+        "title": "Organize",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.manageTags",
+        "title": "Manage Tags",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.customInstructions",
+        "title": "Edit Custom Instructions",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.manageApiKeys",
+        "title": "Manage API Keys",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.switchAccount",
+        "title": "Switch Account",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.importHistory",
+        "title": "Import ChatGPT or Claude History",
         "category": "MatterWave"
       }
     ],
