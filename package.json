@@ -113,6 +113,11 @@
         "command": "matterwave.shareConversation",
         "title": "Create Share Link",
         "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.manageShares",
+        "title": "Manage Share Links",
+        "category": "MatterWave"
       }
     ],
     "menus": {

@@ -197,6 +197,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
       void vscode.window.showErrorMessage(`The share link could not be created: ${describe(error)}`);
     }
   });
+  command("matterwave.manageShares", () => manageShares(client));
 
   void chat.refresh();
   void promptForServer(context);
@@ -324,8 +325,52 @@ async function askAboutFile(chat: ChatController, view: ChatViewProvider): Promi
 
 type PickItem = vscode.QuickPickItem & { row: PickerRow };
 
-async function pickModel(chat: ChatController): Promise<void> {
-  let models;
+/**
+ * Every link this person is holding out, one place to take one back: pick a
+ * share, confirm, and the list comes round again so several can be revoked
+ * in a sitting. Revoked links are not offered -- a dead link needs no
+ * managing -- and an empty list says where a link is made.
+ */
+async function manageShares(client: MatterWaveClient): Promise<void> {
+  for (;;) {
+    let shares;
+    try {
+      shares = (await client.myShares()).data;
+    } catch (error) {
+      void vscode.window.showErrorMessage(`The share links could not be loaded: ${describe(error)}`);
+      return;
+    }
+    const live = shares.filter((share) => share.revoked_at === null);
+    if (live.length === 0) {
+      void vscode.window.showInformationMessage("No share links are out. Create one with MatterWave: Create Share Link.");
+      return;
+    }
+    const picked = await vscode.window.showQuickPick(
+      live.map((share) => ({
+        share,
+        label: share.title || share.conversation_id,
+        description: `${share.status} · ${share.message_count} message${share.message_count === 1 ? "" : "s"} · ${share.view_count} view${share.view_count === 1 ? "" : "s"}`,
+        detail: share.expires_at ? `Expires ${new Date(share.expires_at).toLocaleString()}` : "Never expires",
+      })),
+      { title: "MatterWave share links", placeHolder: "Pick a link to revoke" },
+    );
+    if (!picked) return;
+    const answer = await vscode.window.showInformationMessage(
+      `Revoke the share link to “${picked.label}”? Anyone holding it loses access at once.`,
+      { modal: true },
+      "Revoke",
+    );
+    if (answer !== "Revoke") continue;
+    try {
+      await client.revokeShare(picked.share.id);
+      void vscode.window.showInformationMessage(`The share link to “${picked.label}” was revoked.`);
+    } catch (error) {
+      void vscode.window.showErrorMessage(`The share link could not be revoked: ${describe(error)}`);
+    }
+  }
+}
+
+async function pickModel(chat: ChatController): Promise<void> {  let models;
   try {
     models = await chat.loadModels();
   } catch (error) {
