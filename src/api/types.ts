@@ -239,3 +239,32 @@ export interface ShareRow {
   view_count: number;
   status: string;
 }
+
+// --- library ------------------------------------------------------------------
+
+/** One folder of the caller's library, as `Folder.to_dict` writes it. */
+export interface FolderRow {
+  id: string;
+  name: string;
+  position: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One tag of the caller's library, as `Tag.to_dict` writes it. */
+export interface TagRow {
+  id: string;
+  name: string;
+  created_at: string;
+}
+
+/**
+ * `GET /api/library`: the folders, the tags and which tags each conversation
+ * carries, in one read. `assignments` is conversation id -> tag ids rather
+ * than a field on a conversation row, so a stale copy never rides a row.
+ */
+export interface Library {
+  folders: FolderRow[];
+  tags: TagRow[];
+  assignments: Record<string, string[]>;
+}

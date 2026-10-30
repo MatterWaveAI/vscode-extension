@@ -22,6 +22,8 @@ import type {
   DevicePoll,
   FeedbackReason,
   FeedbackRow,
+  FolderRow,
+  Library,
   Me,
   Message,
   ModelList,
@@ -29,6 +31,7 @@ import type {
   NotificationRow,
   SendBody,
   ShareRow,
+  TagRow,
   UsageReport,
   UserInstructions,
 } from "./types";
@@ -44,7 +47,8 @@ import type {
  * source). What the SDK does not cover stays here: the chat model list, the
  * context meter and compaction sized by the picked model, attachment upload
  * (multipart), the conversation's pin / archive / delete toggles, share
- * links, reply feedback, and revoking the key device login minted.
+ * links, reply feedback, revoking the key device login minted, and the
+ * library's folders and tags.
  *
  * The SDK takes its key at construction and the editor's can change at any
  * moment (sign-in, sign-out, a new base URL), so an SDK client is built for
@@ -289,6 +293,53 @@ export class MatterWaveClient {
   /** Take a link back; a share that is gone or was never the caller's is one 404. */
   async revokeShare(id: string): Promise<void> {
     await this.json("DELETE", `/api/shares/${encodeURIComponent(id)}`);
+  }
+
+  // --- library -----------------------------------------------------------------
+
+  /**
+   * `GET /api/library`: the caller's folders, their tags, and which tags each
+   * conversation carries, in one read -- the sidebar's badge and the
+   * organize and manage-tags commands all draw from it.
+   */
+  listLibrary(): Promise<Library> {
+    return this.json("GET", "/api/library");
+  }
+
+  /** `POST /api/library/folders`; a name the caller already holds answers 409. */
+  createFolder(name: string): Promise<FolderRow> {
+    return this.json("POST", "/api/library/folders", { name });
+  }
+
+  /**
+   * `POST /api/library/tags`; the API reads "a tag called X" as a request
+   * with one answer, so an existing tag of that name comes back too.
+   */
+  createTag(name: string): Promise<TagRow> {
+    return this.json("POST", "/api/library/tags", { name });
+  }
+
+  /**
+   * File the conversation in one of the caller's folders, or back into the
+   * main list with `null`. The field is always sent: an omitted one would be
+   * no answer, not an unfiling.
+   */
+  moveToFolder(conversationId: string, folderId: string | null): Promise<Conversation> {
+    return this.json("PUT", `/api/library/conversations/${encodeURIComponent(conversationId)}/folder`, {
+      folder_id: folderId,
+    });
+  }
+
+  /** Replace the conversation's tags with this set; an empty one clears them. */
+  setTags(conversationId: string, tagIds: string[]): Promise<{ conversation_id: string; tag_ids: string[] }> {
+    return this.json("PUT", `/api/library/conversations/${encodeURIComponent(conversationId)}/tags`, {
+      tag_ids: tagIds,
+    });
+  }
+
+  /** Take a tag off every conversation that carries it; a gone or foreign one is one 404. */
+  async deleteTag(id: string): Promise<void> {
+    await this.json("DELETE", `/api/library/tags/${encodeURIComponent(id)}`);
   }
 
   // --- instructions ---------------------------------------------------------

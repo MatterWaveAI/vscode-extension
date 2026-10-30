@@ -349,4 +349,35 @@ describe("MatterWaveClient", () => {
     expect(calls[2]).toMatchObject({ method: "DELETE", url: "/api/shares/s_1" });
     await expect(api.revokeShare("s_gone")).rejects.toMatchObject({ status: 404 });
   });
+
+  it("reads the library and files and tags a conversation over its routes", async () => {
+    const folder = { id: "f_1", name: "Work", position: 0, created_at: "2026-10-29T10:00:00+00:00", updated_at: "2026-10-29T10:00:00+00:00" };
+    const tag = { id: "t_1", name: "bug", created_at: "2026-10-29T10:00:00+00:00" };
+    const { api, calls } = client({
+      "GET /api/library": () => json({ folders: [folder], tags: [tag], assignments: { c_1: ["t_1"] } }),
+      "POST /api/library/folders": () => json({ ...folder, id: "f_2", name: "Reading" }, 201),
+      "POST /api/library/tags": () => json({ id: "t_2", name: "api", created_at: "2026-10-29T10:00:00+00:00" }, 201),
+      "PUT /api/library/conversations/c_1/folder": () => json({ ...CONVERSATION, folder_id: "f_1" }),
+      "PUT /api/library/conversations/c_1/tags": () => json({ conversation_id: "c_1", tag_ids: ["t_1", "t_2"] }),
+      "DELETE /api/library/tags/t_2": () => json({ status: "deleted" }),
+    });
+    // The one read the sidebar badge draws from: folders, tags, and the tags each conversation carries.
+    await expect(api.listLibrary()).resolves.toEqual({ folders: [folder], tags: [tag], assignments: { c_1: ["t_1"] } });
+    expect(calls[0]?.url).toBe("/api/library");
+    await api.createFolder("Reading");
+    expect(JSON.parse(String(calls[1]?.body))).toEqual({ name: "Reading" });
+    await api.createTag("api");
+    expect(JSON.parse(String(calls[2]?.body))).toEqual({ name: "api" });
+    await api.moveToFolder("c_1", "f_1");
+    expect(JSON.parse(String(calls[3]?.body))).toEqual({ folder_id: "f_1" });
+    // Unfiling sends the null: an omitted field would be no answer, not a move out.
+    await api.moveToFolder("c_1", null);
+    expect(JSON.parse(String(calls[4]?.body))).toEqual({ folder_id: null });
+    await api.setTags("c_1", ["t_1", "t_2"]);
+    expect(JSON.parse(String(calls[5]?.body))).toEqual({ tag_ids: ["t_1", "t_2"] });
+    await api.deleteTag("t_2");
+    expect(calls[6]).toMatchObject({ method: "DELETE", url: "/api/library/tags/t_2" });
+    // A tag that is gone or was never the caller's is one 404.
+    await expect(api.deleteTag("t_gone")).rejects.toMatchObject({ status: 404 });
+  });
 });
