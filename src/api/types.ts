@@ -169,3 +169,73 @@ export interface FeedbackRow {
   reasons: FeedbackReason[];
   comment: string | null;
 }
+
+// --- notifications ------------------------------------------------------------
+
+/** One row of `GET /api/me/notifications`, as `notifications.py` writes it. */
+export interface NotificationRow {
+  id: string;
+  kind: string;
+  title: string;
+  body: string;
+  link: string | null;
+  created_at: string;
+  read_at: string | null;
+}
+
+/**
+ * What the bell reads: the rows and the unread count, whichever way they
+ * were asked for -- the count is the same under the unread-only filter.
+ */
+export interface NotificationListing {
+  data: NotificationRow[];
+  unread_count: number;
+}
+
+// --- usage and budget -----------------------------------------------------------
+
+/** `GET /api/me/usage`: the org's balance this period, as `usage_payload` writes it. */
+export interface UsageReport {
+  unit: string;
+  used: number;
+  included: number;
+  remaining: number;
+  percent: number;
+  warn: boolean;
+  in_overage: boolean;
+  exhausted: boolean;
+  period_start: string;
+  resets_at: string;
+  plan: { code: string; name: string };
+}
+
+/** `GET /api/budget`: the period's allowance and the caller's own cap, in tokens and micro-dollars. */
+export interface BudgetStatus {
+  period_start: string;
+  included_tokens: number;
+  tokens_used: number;
+  remaining_tokens: number;
+  overage_enabled: boolean;
+  overage_cap_micros: number;
+  overage_micros: number;
+  member_default_cap_micros: number | null;
+  member_cap: number | null;
+  member_spent: number;
+  member_exhausted: boolean;
+}
+
+// --- share management -----------------------------------------------------------
+
+/** One share link, as `ShareRecord.to_dict` writes it for the owner's list. */
+export interface ShareRow {
+  id: string;
+  conversation_id: string;
+  title: string;
+  message_count: number;
+  include_attachments: boolean;
+  created_at: string;
+  expires_at: string | null;
+  revoked_at: string | null;
+  view_count: number;
+  status: string;
+}

@@ -267,4 +267,86 @@ describe("MatterWaveClient", () => {
     await api.listArchivedConversations();
     expect(calls[0]?.url).toBe("/api/conversations?filter=archived");
   });
+
+  it("lists notifications with the unread count, filtered only when asked", async () => {
+    const row = { id: "n_1", kind: "budget", title: "Budget low", body: "80% used", link: null, created_at: "2026-10-29T10:00:00+00:00", read_at: null };
+    const { api, calls } = client({
+      "GET /api/me/notifications": () => json({ data: [row], unread_count: 1 }),
+      "POST /api/me/notifications/n_1/read": () => json({ ...row, read_at: row.created_at, unread_count: 0 }),
+      "POST /api/me/notifications/read-all": () => json({ read: 4 }),
+    });
+    await expect(api.notifications()).resolves.toEqual({ data: [row], unread_count: 1 });
+    expect(calls[0]?.url).toBe("/api/me/notifications");
+    await api.notifications(true);
+    expect(calls[1]?.url).toBe("/api/me/notifications?unread=1");
+    await expect(api.readNotification("n_1")).resolves.toMatchObject({ id: "n_1", unread_count: 0 });
+    expect(calls[2]?.url).toBe("/api/me/notifications/n_1/read");
+    expect(JSON.parse(String(calls[2]?.body))).toEqual({});
+    await expect(api.readAllNotifications()).resolves.toEqual({ read: 4 });
+    expect(calls[3]?.url).toBe("/api/me/notifications/read-all");
+  });
+
+  it("reads the usage report and the budget over their two routes", async () => {
+    const usage = {
+      unit: "weighted_tokens",
+      used: 1_200_000,
+      included: 5_000_000,
+      remaining: 3_800_000,
+      percent: 24.0,
+      warn: false,
+      in_overage: false,
+      exhausted: false,
+      period_start: "2026-10-01",
+      resets_at: "2026-11-01T00:00:00+00:00",
+      plan: { code: "team", name: "Team" },
+    };
+    const budget = {
+      period_start: "2026-10-01",
+      included_tokens: 5_000_000,
+      tokens_used: 1_200_000,
+      remaining_tokens: 3_800_000,
+      overage_enabled: true,
+      overage_cap_micros: 10_000_000,
+      overage_micros: 0,
+      member_default_cap_micros: null,
+      member_cap: null,
+      member_spent: 0,
+      member_exhausted: false,
+    };
+    const { api, calls } = client({
+      "GET /api/me/usage": () => json(usage),
+      "GET /api/budget": () => json(budget),
+    });
+    await expect(api.usage()).resolves.toEqual(usage);
+    expect(calls[0]?.url).toBe("/api/me/usage");
+    await expect(api.budget()).resolves.toEqual(budget);
+    expect(calls[1]?.url).toBe("/api/budget");
+  });
+
+  it("lists my shares and a conversation's shares, and revokes", async () => {
+    const row = {
+      id: "s_1",
+      conversation_id: "c_1",
+      title: "Clock",
+      message_count: 4,
+      include_attachments: false,
+      created_at: "2026-10-29T10:00:00+00:00",
+      expires_at: null,
+      revoked_at: null,
+      view_count: 2,
+      status: "live",
+    };
+    const { api, calls } = client({
+      "GET /api/me/shares": () => json({ data: [row] }),
+      "GET /api/conversations/c_1/shares": () => json({ data: [row] }),
+      "DELETE /api/shares/s_1": () => json({ status: "revoked" }),
+    });
+    await expect(api.myShares()).resolves.toEqual({ data: [row] });
+    expect(calls[0]?.url).toBe("/api/me/shares");
+    await expect(api.conversationShares("c_1")).resolves.toEqual({ data: [row] });
+    expect(calls[1]?.url).toBe("/api/conversations/c_1/shares");
+    await api.revokeShare("s_1");
+    expect(calls[2]).toMatchObject({ method: "DELETE", url: "/api/shares/s_1" });
+    await expect(api.revokeShare("s_gone")).rejects.toMatchObject({ status: 404 });
+  });
 });

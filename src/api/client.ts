@@ -13,6 +13,7 @@ import { ApiError, detailOf, parseRetryAfter } from "./errors";
 import type {
   ApiKeyListing,
   Attachment,
+  BudgetStatus,
   ContextUsage,
   Conversation,
   ConversationDetail,
@@ -24,7 +25,11 @@ import type {
   Me,
   Message,
   ModelList,
+  NotificationListing,
+  NotificationRow,
   SendBody,
+  ShareRow,
+  UsageReport,
   UserInstructions,
 } from "./types";
 
@@ -235,6 +240,55 @@ export class MatterWaveClient {
   /** The caller's own feedback rows for a conversation, to rehydrate the thumbs on open. */
   conversationFeedback(id: string): Promise<{ data: FeedbackRow[] }> {
     return this.json("GET", `/api/conversations/${encodeURIComponent(id)}/feedback`);
+  }
+
+  // --- notifications --------------------------------------------------------
+
+  /**
+   * The caller's notifications, newest first, with the unread count the bell
+   * shows. `?unread=1` lists only the unread ones; the count is the same.
+   */
+  notifications(unreadOnly = false): Promise<NotificationListing> {
+    return this.json("GET", unreadOnly ? "/api/me/notifications?unread=1" : "/api/me/notifications");
+  }
+
+  /** Mark one read; the answer carries the row and the count that remains. */
+  readNotification(id: string): Promise<NotificationRow & { unread_count: number }> {
+    return this.json("POST", `/api/me/notifications/${encodeURIComponent(id)}/read`, {});
+  }
+
+  /** Mark every row read; the answer is how many that was. */
+  readAllNotifications(): Promise<{ read: number }> {
+    return this.json("POST", "/api/me/notifications/read-all", {});
+  }
+
+  // --- usage and budget -------------------------------------------------------
+
+  /** `GET /api/me/usage`: the org's balance this period, with its warn / overage / exhausted states. */
+  usage(): Promise<UsageReport> {
+    return this.json("GET", "/api/me/usage");
+  }
+
+  /** `GET /api/budget`: the period's allowance and the caller's own cap, in tokens and micro-dollars. */
+  budget(): Promise<BudgetStatus> {
+    return this.json("GET", "/api/budget");
+  }
+
+  // --- share management -------------------------------------------------------
+
+  /** Every link this person made, live and revoked, for the manage command. */
+  myShares(): Promise<{ data: ShareRow[] }> {
+    return this.json("GET", "/api/me/shares");
+  }
+
+  /** One conversation's own links, for looking at what a share created. */
+  conversationShares(id: string): Promise<{ data: ShareRow[] }> {
+    return this.json("GET", `/api/conversations/${encodeURIComponent(id)}/shares`);
+  }
+
+  /** Take a link back; a share that is gone or was never the caller's is one 404. */
+  async revokeShare(id: string): Promise<void> {
+    await this.json("DELETE", `/api/shares/${encodeURIComponent(id)}`);
   }
 
   // --- instructions ---------------------------------------------------------
