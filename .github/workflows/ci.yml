@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The packageManager field pins the version; no `version:` needed here.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      # The packaging gate: a manifest problem (a missing icon, a bad
+      # activation event) fails here rather than at publish time.
+      - run: pnpm exec vsce package --no-dependencies --skip-license --allow-missing-repository --out matterwave.vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: matterwave.vsix
+          retention-days: 7
