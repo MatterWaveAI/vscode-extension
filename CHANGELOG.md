@@ -5,10 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.0] - 2026-10-30
+## [0.3.0] - 2026-10-31
 
 ### Added
 
+- **@-context providers**: `@file`, `@folder`, `@terminal`, `@git` and `@docs` in the composer pull context into the message -- a file's contents, a directory tree (vendored and build directories skipped), a terminal's output, the working tree's diff or the last commit's, or the text of a fetched page. Each resolves through its own pick, uploads as an attachment over the usual pipeline, and a mention backed out of sends nothing.
+- **Slash commands and the prompt library**: `/model`, `/clear`, `/compact`, `/share` and `/export` run from the composer (`//` sends a literal slash), and `/name` sends a saved prompt as a message, arguments appended. Prompts are kept in the editor's global state and managed by a "Prompt Library" command -- create, edit, delete -- capped at 50 prompts of 10,000 characters.
+- **Apply-to-file with a reviewed diff**: every code block in a finished answer gains an Apply button. The file it replaces comes from the block's info string (` ```python api/jobs.py ` and the `ts:src/a.ts` shorthand) or a pick; a diff of the file against the new code opens in a virtual document, and the write happens only on Apply, with the file reopened afterwards so its diagnostics refresh.
+- **Inline edit (Ctrl+I)**: the selection, one prompt, and the answer applied as a workspace edit on accept -- through the same reviewed diff as Apply. An answer that is not one block of code is named as such and applied never; a cut answer is never applied at all.
+- **Checkpoints**: the contents a file had before each Apply or inline edit are kept as the chat's checkpoint (20 newest per chat, files too large to snapshot faithfully refused), and "Restore Checkpoint" puts one back through the same reviewed diff -- a file that was new restores by removal, with its own confirm.
 - **Organize**: a QuickPick flow that files a conversation in a folder (creating one on the spot) and tags it with a multi-select that can create a tag as it goes. Nothing is kept on this side -- the API is the state -- and finishing refreshes the sidebar.
 - **Folder and tag badge**: sidebar rows and search hits carry a dim suffix naming the conversation's folder and tags, drawn from one library read per refresh; a deployment without the route simply goes unbadged.
 - **Manage Tags**: every tag listed with the conversations carrying it, and a confirmed delete per tag -- the platform takes no rename for a tag, and a delete takes it off every conversation.
