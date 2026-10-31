@@ -10,12 +10,27 @@ import type { HostMessage } from "./chat/protocol";
 import type { FolderRow, Library, TagRow } from "./api/types";
 import { ChatViewProvider } from "./chat/viewProvider";
 import { fitsContentCap, MAX_CONTENT_CHARS, imageAttachment, imageContentType, selectionContent } from "./context";
+import {
+  docsContext,
+  fetchDocText,
+  fileContext,
+  folderContext,
+  folderTree,
+  gitContext,
+  mentionLabel,
+  terminalContext,
+} from "./contextProviders";
+import type { Mention } from "./chat/mentions";
 import { keyDetail } from "./keys";
 import { conversationToMarkdown, safeFilename } from "./chat/export";
 import type { ApiKeyListing, ImportRecord } from "./api/types";
 import { pickerRows, resolvePick, type PickerRow } from "./models";
 import { DEFAULT_BASE_URL, normalizeServerUrl, serverUrlProblem, shouldPromptForServer } from "./settings";
 import { StatusBar } from "./statusBar";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const MODEL_KEY = "matterwave.model";
 /** Set once the server prompt has been shown, whatever was answered: it is a first-run question, not a nag. */
@@ -104,6 +119,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
     // Where a notification's link leads when it is not a conversation of
     // this deployment; only http(s) URLs the classifier accepted get here.
     openLink: (url) => void vscode.env.openExternal(vscode.Uri.parse(url)),
+    resolveMention: (mention) => resolveMention(mention),
     onStatus: (status) => statusBar.update(status),
   });
   view.attach(chat);
@@ -371,6 +387,156 @@ async function askAboutFile(chat: ChatController, view: ChatViewProvider): Promi
 }
 
 type PickItem = vscode.QuickPickItem & { row: PickerRow };
+
+// --- @-mention context providers -------------------------------------------------
+
+/**
+ * Assemble the context one @-mention in the composer names, one QuickPick
+ * (or dialog) per kind: @file a file's contents, @folder a directory tree,
+ * @terminal the output of a terminal, @git the working tree's diff or the
+ * last commit's, @docs the text of a fetched page. Null is the person
+ * backing out -- the message names context it is not going to get, so the
+ * controller sends nothing.
+ */
+async function resolveMention(mention: Mention): Promise<{ filename: string; text: string } | null> {
+  switch (mention.kind) {
+    case "file": {
+      const picked = await pickWorkspaceFile(`@file — ${mentionLabel("file")}`);
+      if (!picked) return null;
+      const bytes = await vscode.workspace.fs.readFile(picked);
+      return fileContext(relativePath(picked), new TextDecoder().decode(bytes));
+    }
+    case "folder": {
+      const picked = await vscode.window.showOpenDialog({
+        title: "@folder — pick the folder whose tree is attached",
+        canSelectFolders: true,
+        canSelectFiles: false,
+        canSelectMany: false,
+      });
+      const dir = picked?.[0];
+      if (!dir) return null;
+      const path = relativePath(dir);
+      const tree = await folderTree(path, readWorkspaceDir);
+      return folderContext(path, tree);
+    }
+    case "terminal": {
+      const terminals = vscode.window.terminals;
+      if (terminals.length === 0) {
+        void vscode.window.showInformationMessage("No terminal is open. Open one and run something to attach its output.");
+        return null;
+      }
+      const picked = await vscode.window.showQuickPick(
+        terminals.map((t) => ({ terminal: t, label: t.name })),
+        { title: "@terminal — pick the terminal whose output is attached", placeHolder: "Output since the terminal was opened" },
+      );
+      if (!picked) return null;
+      const buffer = readTerminalBuffer(picked.terminal);
+      if (buffer === null) {
+        void vscode.window.showWarningMessage(
+          `The output of “${picked.terminal.name}” could not be read. Run it again in a terminal with shell integration.`,
+        );
+        return null;
+      }
+      return terminalContext(picked.terminal.name, buffer);
+    }
+    case "git": {
+      const root = vscode.workspace.workspaceFolders?.[0];
+      if (!root) {
+        void vscode.window.showInformationMessage("Open a workspace to attach its git changes.");
+        return null;
+      }
+      const picked = await vscode.window.showQuickPick(
+        [
+          { range: "worktree" as const, label: "Working tree changes", detail: "git diff HEAD — staged and unstaged" },
+          { range: "last" as const, label: "Last commit", detail: "git diff HEAD~1" },
+        ],
+        { title: "@git — pick what is attached", placeHolder: "The diff the model is shown" },
+      );
+      if (!picked) return null;
+      const diff = await runGit(root.uri.fsPath, picked.range === "worktree" ? ["diff", "HEAD"] : ["diff", "HEAD~1"]);
+      if (diff === null) {
+        void vscode.window.showWarningMessage("git could not be run in this workspace, so its changes cannot be attached.");
+        return null;
+      }
+      return gitContext(picked.label, diff);
+    }
+    case "docs": {
+      const url = await vscode.window.showInputBox({
+        title: "@docs — fetch a page",
+        prompt: "An http(s) URL whose text is attached for this message.",
+        ignoreFocusOut: true,
+        validateInput: (value) => (/^https?:\/\/\S+$/.test(value.trim()) ? null : "An http(s) URL"),
+      });
+      if (!url) return null;
+      try {
+        const { title, text } = await fetchDocText(url.trim(), (input, init) => fetch(input, init));
+        return docsContext(url.trim(), title, text);
+      } catch (error) {
+        void vscode.window.showErrorMessage(`The page could not be fetched: ${describe(error)}`);
+        return null;
+      }
+    }
+  }
+}
+
+/** One workspace file out of a QuickPick over the whole tree. */
+async function pickWorkspaceFile(title: string): Promise<vscode.Uri | null> {
+  const files = await vscode.workspace.findFiles("**/*", "**/{.git,node_modules,dist,out,build}/**", 500);
+  if (files.length === 0) {
+    void vscode.window.showInformationMessage("This workspace has no files to attach.");
+    return null;
+  }
+  const rows = files
+    .map((uri) => ({ uri, path: relativePath(uri) }))
+    .sort((a, b) => a.path.localeCompare(b.path));
+  const picked = await vscode.window.showQuickPick(rows.map((r) => ({ ...r, label: r.path })), { title, placeHolder: "The file whose contents are attached" });
+  return picked?.uri ?? null;
+}
+
+/** A workspace-relative path, so no home path leaks into a prompt. */
+function relativePath(uri: vscode.Uri): string {
+  return vscode.workspace.asRelativePath(uri, false);
+}
+
+/** The names of one workspace directory, directories marked with a trailing `/`. */
+async function readWorkspaceDir(path: string): Promise<string[]> {
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  if (folders.length === 0) throw new Error("no workspace");
+  let last: unknown = null;
+  for (const folder of folders) {
+    try {
+      const uri = path ? vscode.Uri.joinPath(folder.uri, path) : folder.uri;
+      const rows = await vscode.workspace.fs.readDirectory(uri);
+      return rows.map(([name, type]) => (type & vscode.FileType.Directory ? `${name}/` : name));
+    } catch (error) {
+      last = error;
+    }
+  }
+  throw last instanceof Error ? last : new Error("unreadable");
+}
+
+/**
+ * A terminal's buffer through the unofficial-but-ubiquitous `buffer`
+ * property, the only read VS Code offers for output that arrived before the
+ * mention was typed; null when the host exposes none (no shell
+ * integration), which the flow above reports.
+ */
+function readTerminalBuffer(terminal: vscode.Terminal): string | null {
+  const buffer = (terminal as unknown as { buffer?: { contents?: unknown } }).buffer;
+  return typeof buffer?.contents === "string" && buffer.contents.length > 0 ? buffer.contents : null;
+}
+
+/** One git invocation in the workspace root; null rather than a throw. */
+async function runGit(cwd: string, args: string[]): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync("git", args, { cwd, maxBuffer: 16 * 1024 * 1024, timeout: 15_000 });
+    return stdout.trim() ? stdout : null;
+  } catch {
+    return null;
+  }
+}
+
+
 
 /**
  * Every link this person is holding out, one place to take one back: pick a

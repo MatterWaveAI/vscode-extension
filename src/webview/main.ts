@@ -99,7 +99,7 @@ const banners = el("div");
 const transcript = el("div", { className: "transcript" });
 transcript.setAttribute("aria-live", "polite");
 const input = el("textarea");
-const PLACEHOLDER = "Ask MatterWave…  (Enter to send, Shift+Enter for a new line)";
+const PLACEHOLDER = "Ask MatterWave…  (@file, @folder, @terminal, @git, @docs add context — Enter to send)";
 const OFFLINE_PLACEHOLDER = "MatterWave cannot be reached. Your draft is kept.";
 input.placeholder = PLACEHOLDER;
 const temporaryBox = document.createElement("input");

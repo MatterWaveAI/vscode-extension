@@ -5,6 +5,7 @@ import { isUntrustedCertificate } from "../api/transport";
 import type { Conversation, ConversationInstructions, FeedbackReason, Library, Message, ModelInfo, NotificationRow, UsageReport } from "../api/types";
 import { fileAttachment } from "../context";
 import { classifyNotificationLink } from "../links";
+import { parseMentions, type Mention } from "./mentions";
 import { initialModel } from "../models";
 import { classifyStreamError, STREAM_ERROR_COPY, type StreamErrorKind } from "../streamErrors";
 import { appendDelta, deltaText, emptyAssistant, partFromStart, setPart } from "./assemble";
@@ -57,7 +58,19 @@ export interface ChatDeps {
   ) => void;
   /** Open a URL in the browser: where a notification's link leads when it is not a conversation. */
   openLink?: (url: string) => void;
+  /**
+   * Assemble one @-mention's context (a QuickPick flow on the editor side).
+   * Null is the person backing out: the message is not sent, since it was
+   * written expecting the context it names.
+   */
+  resolveMention?: (mention: Mention) => Promise<ResolvedContext | null>;
   onStatus?: (status: StatusInfo) => void;
+}
+
+/** One @-mention's context, as the attachment upload takes it. */
+export interface ResolvedContext {
+  filename: string;
+  text: string;
 }
 
 /** What the Continue button sends after a cut answer. */
@@ -649,6 +662,16 @@ export class ChatController {
       if (this.error) this.failed = { content, attachmentIds, userMessageId: null, temporary };
       return;
     }
+    // @-mentions resolve and upload before the turn, but only on a fresh
+    // send: a retry carries the attachment ids it uploaded the first time.
+    // Prompt without a mention takes the exact path it always took.
+    let mentionIds: string[] = [];
+    if (attachmentIds.length === 0 && parseMentions(content).length > 0) {
+      const resolved = await this.attachMentions(id, content);
+      if (resolved === null) return;
+      mentionIds = resolved;
+    }
+    const ids = [...attachmentIds, ...mentionIds];
     const parent = this.path[this.path.length - 1] ?? null;
     const optimistic: Message = {
       ...emptyAssistant(id, parent?.id ?? null),
@@ -657,8 +680,49 @@ export class ChatController {
       content,
     };
     this.path = [...this.path, optimistic];
-    const body = { content, ...(this.model ? { model: this.model.id } : {}), ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}) };
-    await this.runTurn(id, (signal) => this.deps.client.sendMessage(id, body, signal), { content, attachmentIds, userMessageId: null, temporary });
+    const body = { content, ...(this.model ? { model: this.model.id } : {}), ...(ids.length ? { attachment_ids: ids } : {}) };
+    await this.runTurn(id, (signal) => this.deps.client.sendMessage(id, body, signal), { content, attachmentIds: ids, userMessageId: null, temporary });
+  }
+
+  /**
+   * Upload every @-mention's context as an attachment, in the order the
+   * prompt names it. A mention the person backs out of -- or one that fails
+   * to upload -- sends nothing: the message was written expecting the
+   * context it names, and half a context is worse than none.
+   */
+  private async attachMentions(conversationId: string, content: string): Promise<string[] | null> {
+    const mentions = parseMentions(content);
+    if (mentions.length === 0) return [];
+    const resolve = this.deps.resolveMention;
+    if (!resolve) return [];
+    const ids: string[] = [];
+    for (const mention of mentions) {
+      let part: ResolvedContext | null;
+      try {
+        part = await resolve(mention);
+      } catch (error) {
+        part = null;
+        this.fail(error);
+      }
+      if (!part) {
+        this.notice = this.error ? this.notice : `No context attached for ${mention.token}, so the message was not sent.`;
+        this.emit();
+        return null;
+      }
+      try {
+        const saved = await this.deps.client.uploadAttachment(
+          new Blob([part.text], { type: "text/plain" }),
+          part.filename,
+          conversationId,
+        );
+        ids.push(saved.id);
+      } catch (error) {
+        this.fail(error);
+        this.emit();
+        return null;
+      }
+    }
+    return ids;
   }
 
   async edit(messageId: string, content: string): Promise<void> {

@@ -64,7 +64,7 @@ function routes(over: Record<string, (call: Call) => Response> = {}) {
   };
 }
 
-async function setup(over: Parameters<typeof routes>[0] = {}) {
+async function setup(over: Parameters<typeof routes>[0] = {}, extra: { resolveMention?: (mention: unknown) => Promise<unknown> } = {}) {
   const secrets = new MemorySecrets();
   const tokens = new TokenStore(secrets as unknown as vscode.SecretStorage, () => "https://mw.test");
   await tokens.set(TOKEN);
@@ -94,6 +94,7 @@ async function setup(over: Parameters<typeof routes>[0] = {}) {
     rememberedModel: { get: () => null, set: () => undefined },
     runCommand: () => undefined,
     openLink,
+    resolveMention: extra.resolveMention as never,
     onStatus: (s) => void statuses.push(s),
   });
   provider.attach(controller);
@@ -192,6 +193,83 @@ describe("ask about file", () => {
     expect(lastState(webview.posted).notice).toContain("only its start was sent");
   });
 });
+
+describe("@-mentions", () => {
+  it("uploads each mention's context as an attachment, in the order named", async () => {
+    let n = 0;
+    const parts: Record<string, { filename: string; text: string }> = {
+      file: { filename: "src/a.ts", text: "export const a = 1;\n" },
+      git: { filename: "git-diff.diff", text: "diff --git a/a.ts b/a.ts" },
+    };
+    const picked: string[] = [];
+    const { controller, calls } = await setup(
+      { "POST /api/attachments": () => json({ id: `att_${++n}`, filename: "x", content_type: "text/plain", size_bytes: 10 }, 201) },
+      {
+        resolveMention: async (mention) => {
+          const kind = (mention as { kind: string }).kind;
+          picked.push(kind);
+          return parts[kind] ?? null;
+        },
+      },
+    );
+    await controller.refresh();
+    await controller.send("Review @file against @git, ignoring @unknown");
+
+    expect(picked).toEqual(["file", "git"]);
+    const uploads = calls.filter((c) => c.method === "POST" && c.url.startsWith("/api/attachments"));
+    expect(uploads).toHaveLength(2);
+    expect(await ((uploads[0]?.body as FormData).get("file") as File).text()).toBe("export const a = 1;\n");
+
+    const send = calls.find((c) => c.url === "/api/conversations/c_1/messages");
+    expect(JSON.parse(String(send?.body))).toEqual({
+      content: "Review @file against @git, ignoring @unknown",
+      model: "grt-small",
+      attachment_ids: ["att_1", "att_2"],
+    });
+  });
+
+  it("sends nothing when the person backs out of a pick", async () => {
+    const { controller, calls, webview } = await setup({}, { resolveMention: async () => null });
+    await controller.refresh();
+    await controller.send("Explain @file");
+
+    expect(calls.some((c) => c.url === "/api/conversations/c_1/messages")).toBe(false);
+    expect(lastState(webview.posted).notice).toContain("the message was not sent");
+    expect(lastState(webview.posted).transcript).toEqual([]);
+  });
+
+  it("sends nothing when an upload fails, with the error banner", async () => {
+    const { controller, calls, webview } = await setup(
+      { "POST /api/attachments": () => json({ detail: "too big" }, 413) },
+      { resolveMention: async () => ({ filename: "src/a.ts", text: "x" }) },
+    );
+    await controller.refresh();
+    await controller.send("Explain @file");
+
+    expect(calls.some((c) => c.url === "/api/conversations/c_1/messages")).toBe(false);
+    expect(lastState(webview.posted).error).not.toBeNull();
+  });
+
+  it("does not ask for context again when a retried turn already carried the attachments", async () => {
+    let resolveCalls = 0;
+    const { controller } = await setup(
+      { "POST /api/conversations/c_1/messages": () => json({ detail: "stream broke" }, 500) },
+      {
+        resolveMention: async () => {
+          resolveCalls++;
+          return { filename: "x.txt", text: "x" };
+        },
+      },
+    );
+    await controller.refresh();
+    await controller.send("Explain @file");
+    expect(resolveCalls).toBe(1);
+    // The retry goes out with the ids the first attempt uploaded.
+    await controller.retry();
+    expect(resolveCalls).toBe(1);
+  });
+});
+
 
 describe("model selection", () => {
   it("refuses a model the plan does not include", async () => {
