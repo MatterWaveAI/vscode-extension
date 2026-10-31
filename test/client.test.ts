@@ -268,7 +268,7 @@ describe("MatterWaveClient", () => {
     expect(calls[0]?.url).toBe("/api/conversations?filter=archived");
   });
 
-  it("lists notifications with the unread count, filtered only when asked", async () => {
+  it("lists notifications with the unread count, filtered and sized only when asked", async () => {
     const row = { id: "n_1", kind: "budget", title: "Budget low", body: "80% used", link: null, created_at: "2026-10-29T10:00:00+00:00", read_at: null };
     const { api, calls } = client({
       "GET /api/me/notifications": () => json({ data: [row], unread_count: 1 }),
@@ -277,13 +277,15 @@ describe("MatterWaveClient", () => {
     });
     await expect(api.notifications()).resolves.toEqual({ data: [row], unread_count: 1 });
     expect(calls[0]?.url).toBe("/api/me/notifications");
-    await api.notifications(true);
+    await api.notifications({ unreadOnly: true });
     expect(calls[1]?.url).toBe("/api/me/notifications?unread=1");
+    await api.notifications({ unreadOnly: true, limit: 10 });
+    expect(calls[2]?.url).toBe("/api/me/notifications?unread=1&limit=10");
     await expect(api.readNotification("n_1")).resolves.toMatchObject({ id: "n_1", unread_count: 0 });
-    expect(calls[2]?.url).toBe("/api/me/notifications/n_1/read");
-    expect(JSON.parse(String(calls[2]?.body))).toEqual({});
+    expect(calls[3]?.url).toBe("/api/me/notifications/n_1/read");
+    expect(JSON.parse(String(calls[3]?.body))).toEqual({});
     await expect(api.readAllNotifications()).resolves.toEqual({ read: 4 });
-    expect(calls[3]?.url).toBe("/api/me/notifications/read-all");
+    expect(calls[4]?.url).toBe("/api/me/notifications/read-all");
   });
 
   it("reads the usage report and the budget over their two routes", async () => {

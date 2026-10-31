@@ -156,9 +156,21 @@ input.addEventListener("keydown", (event) => {
 const notificationsPanel = el("div", { className: "notifications" });
 notificationsPanel.hidden = true;
 const notificationsList = el("div", { className: "notif-list" });
+const unreadOnlyBox = document.createElement("input");
+unreadOnlyBox.type = "checkbox";
+unreadOnlyBox.id = "notifications-unread-only";
+const unreadOnlyLabel = el("label", { text: "Unread only" });
+unreadOnlyLabel.htmlFor = unreadOnlyBox.id;
+unreadOnlyBox.addEventListener("change", () => send({ type: "setNotificationsUnreadOnly", on: unreadOnlyBox.checked }));
+const loadMoreNotifications = button("Load more", () => send({ type: "loadMoreNotifications" }), {
+  className: "link",
+  title: "Fetch older rows",
+});
 notificationsPanel.append(
   el("div", { className: "who", text: "Notifications" }),
+  el("div", { className: "notif-filters" }, [unreadOnlyBox, unreadOnlyLabel]),
   notificationsList,
+  loadMoreNotifications,
   el("div", { className: "row" }, [
     button("Close", () => {
       notificationsOpen = false;
@@ -427,9 +439,14 @@ function renderNotifications(s: ViewState): void {
   notificationsPanel.hidden = !notificationsOpen || s.notifications === null;
   if (notificationsPanel.hidden) return;
   const rows = s.notifications ?? [];
+  unreadOnlyBox.checked = s.notificationsUnreadOnly;
   notificationsList.replaceChildren(
-    ...(rows.length === 0 ? [el("p", { className: "empty", text: "Nothing here yet." })] : rows.map(notificationRow)),
+    ...(rows.length === 0
+      ? [el("p", { className: "empty", text: s.notificationsUnreadOnly ? "No unread notifications." : "Nothing here yet." })]
+      : rows.map(notificationRow)),
   );
+  // Older rows may exist only while the last window came back full.
+  loadMoreNotifications.hidden = s.notificationsComplete;
 }
 
 function notificationRow(n: NotificationView): HTMLElement {

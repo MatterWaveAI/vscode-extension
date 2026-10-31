@@ -36,6 +36,8 @@ function view(transcript: Message[]): ViewState {
     feedback: {},
     notifications: null,
     unreadNotifications: 0,
+    notificationsUnreadOnly: false,
+    notificationsComplete: true,
     usage: null,
   };
 }

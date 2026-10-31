@@ -998,7 +998,7 @@ describe("notifications and usage", () => {
     await controller.refresh();
     const calls = manage(controller, {});
     await controller.handle({ type: "refreshNotifications" });
-    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(["GET /api/me/notifications"]);
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(["GET /api/me/notifications?limit=30"]);
     expect(controller.snapshot().unreadNotifications).toBe(1);
   });
 
@@ -1046,8 +1046,101 @@ describe("notifications and usage", () => {
     const state = controller.snapshot();
     expect(state.notifications).toBeNull();
     expect(state.unreadNotifications).toBe(0);
+    expect(state.notificationsComplete).toBe(true);
     expect(state.usage).toBeNull();
     expect(state.error).toBeNull();
+  });
+});
+
+describe("notification pagination and the unread filter", () => {
+  /** A listing of `n` unread rows, n_1 newest. */
+  function page(n: number) {
+    return {
+      data: Array.from({ length: n }, (_, i) => ({ ...NOTIFICATION, id: `n_${i + 1}`, title: `Row ${i + 1}` })),
+      unread_count: n,
+    };
+  }
+
+  it("reads a first page with a limit, and Load more widens the window", async () => {
+    const { controller } = await setup();
+    const calls = manage(controller, {
+      "GET /api/me/notifications": (call) => {
+        const limit = Number(new URL(`https://mw.test${call.url}`).searchParams.get("limit"));
+        return json(page(Math.min(limit, 45)));
+      },
+    });
+    await controller.refresh();
+    // The refresh reads me, models and the lists beside the bell; the bell's own asks are what these tests follow.
+    const notes = () => calls.filter((c) => c.url.startsWith("/api/me/notifications"));
+    expect(notes()[0]?.url).toBe("/api/me/notifications?limit=30");
+    // A full page means older rows may exist.
+    expect(controller.snapshot().notifications).toHaveLength(30);
+    expect(controller.snapshot().notificationsComplete).toBe(false);
+
+    await controller.handle({ type: "loadMoreNotifications" });
+    expect(notes()[1]?.url).toBe("/api/me/notifications?limit=60");
+    // The wider window replaces the panel's rows; a short answer is the whole selection.
+    expect(controller.snapshot().notifications).toHaveLength(45);
+    expect(controller.snapshot().notificationsComplete).toBe(true);
+
+    // Nothing left to ask for: the intent goes nowhere near the API.
+    await controller.handle({ type: "loadMoreNotifications" });
+    expect(notes()).toHaveLength(2);
+  });
+
+  it("keeps the panel's rows when a wider window would not load, without the error banner", async () => {
+    const { controller } = await setup();
+    manage(controller, {
+      "GET /api/me/notifications": (call) => {
+        const limit = Number(new URL(`https://mw.test${call.url}`).searchParams.get("limit"));
+        return json(page(Math.min(limit, 30)));
+      },
+    });
+    await controller.refresh();
+    expect(controller.snapshot().notificationsComplete).toBe(false);
+    const failing = manage(controller, { "GET /api/me/notifications": () => json({ detail: "the page would not come" }, 404) });
+    await controller.handle({ type: "loadMoreNotifications" });
+    expect(failing).toHaveLength(1);
+    expect(controller.snapshot().error).toBeNull();
+    expect(controller.snapshot().notifications).toHaveLength(30);
+    expect(controller.snapshot().notificationsComplete).toBe(false);
+  });
+
+  it("lists only the unread rows while the filter is on, and reads from the top when it turns off", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    const calls = manage(controller, {
+      "GET /api/me/notifications": () => json(page(3)),
+    });
+    await controller.handle({ type: "setNotificationsUnreadOnly", on: true });
+    expect(calls[0]?.url).toBe("/api/me/notifications?unread=1&limit=30");
+    expect(controller.snapshot().notificationsUnreadOnly).toBe(true);
+    expect(controller.snapshot().notifications).toHaveLength(3);
+
+    // Off again: a fresh window, without the filter.
+    await controller.handle({ type: "setNotificationsUnreadOnly", on: false });
+    expect(calls[1]?.url).toBe("/api/me/notifications?limit=30");
+    expect(controller.snapshot().notificationsUnreadOnly).toBe(false);
+  });
+
+  it("re-reads the filtered view after mark-all-read, so the panel shows the empty selection", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    let allRead = false;
+    const calls = manage(controller, {
+      "GET /api/me/notifications": () => json(allRead ? { data: [], unread_count: 0 } : page(2)),
+      "POST /api/me/notifications/read-all": () => {
+        allRead = true;
+        return json({ read: 2 });
+      },
+    });
+    await controller.handle({ type: "setNotificationsUnreadOnly", on: true });
+    await controller.handle({ type: "readAllNotifications" });
+    expect(calls.find((c) => c.url === "/api/me/notifications/read-all")?.method).toBe("POST");
+    // The last read is the filtered listing, emptied by the mark-all.
+    expect(calls.at(-1)?.url).toBe("/api/me/notifications?unread=1&limit=30");
+    expect(controller.snapshot().notifications).toHaveLength(0);
+    expect(controller.snapshot().unreadNotifications).toBe(0);
   });
 });
 

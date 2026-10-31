@@ -276,10 +276,15 @@ export class MatterWaveClient {
 
   /**
    * The caller's notifications, newest first, with the unread count the bell
-   * shows. `?unread=1` lists only the unread ones; the count is the same.
+   * shows. `unreadOnly` lists only the unread ones (`?unread=1`; the count is
+   * the same); `limit` caps the page, which the API takes up to 100.
    */
-  notifications(unreadOnly = false): Promise<NotificationListing> {
-    return this.json("GET", unreadOnly ? "/api/me/notifications?unread=1" : "/api/me/notifications");
+  notifications(options: { unreadOnly?: boolean; limit?: number } = {}): Promise<NotificationListing> {
+    const params = new URLSearchParams();
+    if (options.unreadOnly) params.set("unread", "1");
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    const query = params.toString();
+    return this.json("GET", `/api/me/notifications${query ? `?${query}` : ""}`);
   }
 
   /** Mark one read; the answer carries the row and the count that remains. */

@@ -136,6 +136,7 @@ img.image-preview { display: block; max-width: 100%; max-height: 320px; margin-t
 .fb-picker .fb-reason { display: flex; gap: 4px; align-items: center; font-size: 95%; }
 .badge { font-weight: 600; text-decoration: underline; }
 .notifications .empty { margin: 2px 0; font-size: 90%; opacity: .7; }
+.notif-filters { display: flex; gap: 4px; align-items: center; font-size: 90%; opacity: .85; }
 .notif { display: flex; gap: 6px; align-items: flex-start; }
 .notif-main { flex: 1; min-width: 0; }
 .notif-title.unread { font-weight: 600; }

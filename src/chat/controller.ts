@@ -71,6 +71,11 @@ export const TEMPORARY_CHAT_NOTICE =
 export const INSTRUCTIONS_UPGRADE_NOTICE =
   "Custom instructions are not part of your plan. Upgrade the plan to use them.";
 
+/** Rows a page of the bell holds; Load more widens the window by this much. */
+export const NOTIFICATION_PAGE = 30;
+/** The API's own cap on a notifications `limit`. */
+const MAX_NOTIFICATION_LIMIT = 100;
+
 interface FailedTurn {
   content: string;
   attachmentIds: string[];
@@ -105,6 +110,12 @@ export class ChatController {
   /** The bell's rows; null once a read of them failed, so the panel says nothing rather than lies. */
   private notifications: NotificationRow[] | null = null;
   private unreadNotifications = 0;
+  /** True while the panel lists only the unread rows. */
+  private notificationsUnreadOnly = false;
+  /** True when every row the current filter selects is already on hand. */
+  private notificationsComplete = true;
+  /** The window the panel holds, widened by Load more and reset by a filter change. */
+  private notificationsLimit = NOTIFICATION_PAGE;
   private usage: UsageView | null = null;
   /** The library, read once per refresh: the rows' folder/tag badges draw from it. */
   private library: Library | null = null;
@@ -165,6 +176,10 @@ export class ChatController {
         return this.readNotification(message.id);
       case "readAllNotifications":
         return this.readAllNotifications();
+      case "loadMoreNotifications":
+        return this.loadMoreNotifications();
+      case "setNotificationsUnreadOnly":
+        return this.setNotificationsUnreadOnly(message.on);
       case "openNotification":
         return this.openNotificationLink(message.url);
       case "switchBranch":
@@ -203,6 +218,9 @@ export class ChatController {
       this.feedback = new Map();
       this.notifications = null;
       this.unreadNotifications = 0;
+      this.notificationsUnreadOnly = false;
+      this.notificationsComplete = true;
+      this.notificationsLimit = NOTIFICATION_PAGE;
       this.usage = null;
       this.library = null;
       this.emit();
@@ -482,12 +500,6 @@ export class ChatController {
 
   // --- notifications and usage -------------------------------------------------
 
-  /** The bell's rows and the count, read fresh; a failed read blanks the panel rather than showing stale rows. */
-  async refreshNotifications(): Promise<void> {
-    await this.loadNotifications();
-    this.emit();
-  }
-
   /** Mark one read; the answer carries the count that remains. */
   async readNotification(id: string): Promise<void> {
     try {
@@ -504,6 +516,13 @@ export class ChatController {
   async readAllNotifications(): Promise<void> {
     try {
       await this.deps.client.readAllNotifications();
+      if (this.notificationsUnreadOnly) {
+        // The filter's rows are all read now: re-read so the panel shows
+        // the empty selection the server holds, not read rows it excluded.
+        await this.loadNotifications();
+        this.emit();
+        return;
+      }
       this.notifications = (this.notifications ?? []).map((n) => ({ ...n, read_at: n.read_at ?? new Date().toISOString() }));
       this.unreadNotifications = 0;
     } catch (error) {
@@ -512,15 +531,70 @@ export class ChatController {
     this.emit();
   }
 
-  private async loadNotifications(): Promise<void> {
+  /**
+   * The bell's first page, or a re-read of the window the panel holds
+   * (refresh keeps its width and filter). A failed read blanks the panel
+   * rather than showing stale rows.
+   */
+  async refreshNotifications(): Promise<void> {
+    await this.loadNotifications();
+    this.emit();
+  }
+
+  /**
+   * Widen the window by a page and re-read it. The API pages by `limit`
+   * alone (newest first, no offset), so a wider window replaces what the
+   * panel holds; a short answer is the whole selection. A failure keeps
+   * what is on hand -- an older page that would not come is not worth the
+   * error banner.
+   */
+  async loadMoreNotifications(): Promise<void> {
+    if (this.notificationsComplete) return;
+    const kept = this.notifications;
+    const keptLimit = this.notificationsLimit;
+    const limit = Math.min(this.notificationsLimit + NOTIFICATION_PAGE, MAX_NOTIFICATION_LIMIT);
+    if (limit === keptLimit) {
+      this.notificationsComplete = true;
+      this.emit();
+      return;
+    }
+    this.notificationsLimit = limit;
     try {
-      const listing = await this.deps.client.notifications();
+      const listing = await this.deps.client.notifications({ unreadOnly: this.notificationsUnreadOnly, limit });
       this.notifications = listing.data;
       this.unreadNotifications = listing.unread_count;
+      this.notificationsComplete = listing.data.length < limit;
+    } catch {
+      this.notifications = kept;
+      this.notificationsLimit = keptLimit;
+    }
+    this.emit();
+  }
+
+  /** List only the unread rows, or everyone again; either way a fresh window from the top. */
+  async setNotificationsUnreadOnly(on: boolean): Promise<void> {
+    if (this.notificationsUnreadOnly === on) return;
+    this.notificationsUnreadOnly = on;
+    this.notificationsLimit = NOTIFICATION_PAGE;
+    await this.loadNotifications();
+    this.emit();
+  }
+
+  private async loadNotifications(): Promise<void> {
+    try {
+      const listing = await this.deps.client.notifications({
+        unreadOnly: this.notificationsUnreadOnly,
+        limit: this.notificationsLimit,
+      });
+      this.notifications = listing.data;
+      this.unreadNotifications = listing.unread_count;
+      // A short page is the whole selection: nothing older is coming.
+      this.notificationsComplete = listing.data.length < this.notificationsLimit;
     } catch {
       // A deployment without the route stays quiet: no rows, no badge.
       this.notifications = null;
       this.unreadNotifications = 0;
+      this.notificationsComplete = true;
     }
   }
 
@@ -990,6 +1064,8 @@ export class ChatController {
       feedback: Object.fromEntries(this.feedback),
       notifications: this.notifications?.map(notificationView) ?? null,
       unreadNotifications: this.unreadNotifications,
+      notificationsUnreadOnly: this.notificationsUnreadOnly,
+      notificationsComplete: this.notificationsComplete,
       usage: this.usage,
     };
   }

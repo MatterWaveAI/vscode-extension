@@ -38,6 +38,8 @@ function state(over: Partial<ViewState>): ViewState {
     feedback: {},
     notifications: [],
     unreadNotifications: 0,
+    notificationsUnreadOnly: false,
+    notificationsComplete: true,
     usage: null,
     ...over,
   };
@@ -559,6 +561,41 @@ describe("the chat webview", () => {
     expect(open).not.toBeNull();
     open?.click();
     expect(sent.at(-1)).toEqual({ type: "openNotification", id: "n_1", url: "/apps/chat?c=c_9" });
+  });
+
+  it("offers the unread-only filter and Load more, and sends their intents", () => {
+    post({
+      type: "state",
+      state: state({
+        notifications: [
+          { id: "n_1", kind: "budget", title: "Budget low", body: "", link: null, createdAt: "2026-10-29T10:00:00+00:00", read: false },
+        ],
+        notificationsComplete: false,
+      }),
+    });
+    Array.from(document.querySelectorAll<HTMLButtonElement>(".meta button"))
+      .find((b) => b.textContent === "Notifications")
+      ?.click();
+
+    const box = document.getElementById("notifications-unread-only") as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    box.checked = true;
+    box.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(sent.at(-1)).toEqual({ type: "setNotificationsUnreadOnly", on: true });
+
+    const more = Array.from(document.querySelectorAll<HTMLButtonElement>(".notifications button")).find(
+      (b) => b.textContent === "Load more",
+    );
+    expect(more?.hidden).toBe(false);
+    more?.click();
+    expect(sent.at(-1)).toEqual({ type: "loadMoreNotifications" });
+
+    // With the whole selection on hand the button stands down, and the box
+    // follows the host's filter state on the next render.
+    post({ type: "state", state: state({ notifications: [], notificationsUnreadOnly: true, notificationsComplete: true }) });
+    expect((document.getElementById("notifications-unread-only") as HTMLInputElement).checked).toBe(true);
+    expect(more?.hidden).toBe(true);
+    expect(document.querySelector(".notifications")?.textContent).toContain("No unread notifications.");
   });
 });
 

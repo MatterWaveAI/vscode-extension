@@ -113,6 +113,10 @@ export interface ViewState {
   feedback: Record<string, FeedbackSummary>;
   /** The bell's rows, newest first, or null when the API did not answer. */
   notifications: NotificationView[] | null;
+  /** True when the panel lists only the unread rows. */
+  notificationsUnreadOnly: boolean;
+  /** True when every row the current filter selects is already on hand: nothing left to load. */
+  notificationsComplete: boolean;
   /** The unread count the status bar badges; the same number the web app's bell shows. */
   unreadNotifications: number;
   /** The org's allowance this period, or null when the API did not say. */
@@ -156,6 +160,9 @@ export type WebviewMessage =
   | { type: "refreshNotifications" }
   | { type: "readNotification"; id: string }
   | { type: "readAllNotifications" }
+  /** Widen the bell's window by a page; a different filter reads from the top again. */
+  | { type: "loadMoreNotifications" }
+  | { type: "setNotificationsUnreadOnly"; on: boolean }
   /** Open where a notification row leads, in the chat or the browser. */
   | { type: "openNotification"; id: string; url: string }
   | { type: "switchBranch"; messageId: string; step: -1 | 1 }
@@ -170,7 +177,7 @@ const WEBVIEW_TYPES = new Set<WebviewMessage["type"]>([
   "deleteConversation", "pinConversation", "archiveConversation", "exportConversation", "shareConversation",
   "send", "stop", "retry", "edit", "regenerate", "rateMessage", "setInstructions", "switchBranch", "continue",
   "compact", "pickModel", "signIn", "copyRequestId", "refreshNotifications", "readNotification", "readAllNotifications",
-  "openNotification",
+  "openNotification", "loadMoreNotifications", "setNotificationsUnreadOnly",
 ]);
 
 const FEEDBACK_REASON_SET = new Set<string>(FEEDBACK_REASONS);
@@ -243,6 +250,8 @@ export function parseWebviewMessage(raw: unknown): WebviewMessage | null {
       return str("messageId") && (msg.step === 1 || msg.step === -1) ? (msg as WebviewMessage) : null;
     case "readNotification":
       return id() ? (msg as WebviewMessage) : null;
+    case "setNotificationsUnreadOnly":
+      return typeof msg.on === "boolean" ? (msg as WebviewMessage) : null;
     case "openNotification":
       return id() && typeof msg.url === "string" && msg.url.length > 0 && msg.url.length <= MAX_LINK_CHARS
         ? (msg as WebviewMessage)
