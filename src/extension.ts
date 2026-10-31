@@ -12,6 +12,7 @@ import { ChatViewProvider } from "./chat/viewProvider";
 import { fitsContentCap, MAX_CONTENT_CHARS, imageAttachment, imageContentType, selectionContent } from "./context";
 import { applyToFile, registerApplyContentProvider } from "./apply";
 import type { CodeBlock } from "./chat/codeBlocks";
+import { inlineEditPrompt, replacementFromAnswer } from "./inlineEdit";
 import {
   docsContext,
   fetchDocText,
@@ -179,6 +180,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
   });
   command("matterwave.askAboutSelection", () => askAboutSelection(chat, view));
   command("matterwave.askAboutFile", () => askAboutFile(chat, view));
+  command("matterwave.inlineEdit", () => inlineEdit(chat));
   command("matterwave.pickModel", () => pickModel(chat));
   command("matterwave.compactNow", async () => {
     if (!chat.hasConversation()) {
@@ -491,6 +493,61 @@ async function editPrompt(library: PromptLibrary, existing: PromptRow | null): P
       `The prompt could not be saved: the library holds at most 50 prompts of ${MAX_PROMPT_TEXT.toLocaleString()} characters each.`,
     );
   }
+}
+
+// --- inline edit (Ctrl+I) ---------------------------------------------------------
+
+/**
+ * Selection-scoped edit from the editor: one prompt over the selection, the
+ * answer applied as a workspace edit on accept -- through the same reviewed
+ * diff as Apply, with the lint hook reopening the file afterwards. The
+ * extension never edits a file any other way.
+ */
+async function inlineEdit(chat: ChatController): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.selection.isEmpty) {
+    void vscode.window.showInformationMessage("Select the code to edit first.");
+    return;
+  }
+  const { selection, document } = editor;
+  const instruction = await vscode.window.showInputBox({
+    title: "Edit selection with MatterWave",
+    prompt: "What should change? A diff opens before anything is written.",
+    placeHolder: "e.g. add error handling; make this async; extract a helper",
+    ignoreFocusOut: true,
+  });
+  if (!instruction?.trim()) return;
+  const path = relativePath(document.uri);
+  const prompt = inlineEditPrompt({
+    instruction,
+    code: document.getText(selection),
+    languageId: document.languageId,
+    path,
+    startLine: selection.start.line + 1,
+    endLine: selection.end.line + 1,
+  });
+  const answer = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: "MatterWave is editing the selection…" },
+    () => chat.ask(prompt),
+  );
+  const replacement = replacementFromAnswer(answer ?? "");
+  if (replacement === null) {
+    void vscode.window.showWarningMessage(
+      answer?.trim()
+        ? "The answer was not one block of code, so nothing was applied. Read it in the chat and apply what fits."
+        : "MatterWave did not answer with a replacement, so nothing was applied.",
+    );
+    return;
+  }
+  // The file is rewritten whole through the diff, with the selection's range
+  // swapped for the answer's code; nothing else on disk is touched.
+  const full = document.getText();
+  const start = document.offsetAt(selection.start);
+  const end = document.offsetAt(selection.end);
+  await applyToFile(document.uri, full.slice(0, start) + replacement + full.slice(end), {
+    title: `${path} — inline edit`,
+    detail: "The selection becomes exactly the code on the right.",
+  });
 }
 
 // --- applying code to a file -----------------------------------------------------

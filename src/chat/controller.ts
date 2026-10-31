@@ -820,6 +820,22 @@ export class ChatController {
     await this.runTurn(id, (signal) => this.deps.client.regenerate(id, messageId, body, signal), null);
   }
 
+  /**
+   * One prompt out, the answer's text back -- the inline editor's road in.
+   * The turn runs through the same pipeline as any send, so it shows in the
+   * conversation; what comes back is the last assistant message's words, or
+   * null when a turn was already running, the request failed, or the answer
+   * was cut short.
+   */
+  async ask(prompt: string): Promise<string | null> {
+    if (this.abort) return null;
+    await this.sendCore(prompt, [], false);
+    if (this.error) return null;
+    const last = this.path[this.path.length - 1];
+    if (last?.role !== "assistant" || last.truncated) return null;
+    return messageText(last);
+  }
+
   /** Try a failed turn again in the cheapest way that cannot double-post it. */
   async retry(): Promise<void> {
     const failed = this.failed;

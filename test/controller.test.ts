@@ -1157,6 +1157,51 @@ describe("apply code to a file", () => {
   });
 });
 
+describe("inline edit", () => {
+  it("answers with the completed turn's text", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    expect(await controller.ask("Rewrite this.")).toBe("It is 10:00 UTC.");
+  });
+
+  it("answers null while a turn is already running, without disturbing it", async () => {
+    const lines = fixture("turn.sse").split("\n");
+    const enc = new TextEncoder();
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const { controller, calls } = await setup({
+      "POST /api/conversations/c_1/messages": () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            async start(c) {
+              c.enqueue(enc.encode(lines.slice(0, 3).join("\n") + "\n"));
+              await held;
+              c.enqueue(enc.encode(lines.slice(3).join("\n")));
+              c.close();
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "text/event-stream" } },
+        ),
+    });
+    await controller.refresh();
+    const first = controller.send("A question");
+    await vi.waitFor(() => expect(controller.snapshot().streaming).toBe(true));
+    expect(await controller.ask("Too soon.")).toBeNull();
+    release();
+    await first;
+    // The first turn went out untouched: exactly one send, with its own text.
+    const messageCalls = calls.filter((c) => c.method === "POST" && c.url === "/api/conversations/c_1/messages");
+    expect(messageCalls).toHaveLength(1);
+    expect(JSON.parse(String(messageCalls[0]?.body)).content).toBe("A question");
+  });
+
+  it("answers null when the turn failed", async () => {
+    const { controller } = await setup({ "POST /api/conversations/c_1/messages": () => json({ detail: "down" }, 503) });
+    await controller.refresh();
+    expect(await controller.ask("Rewrite this.")).toBeNull();
+  });
+});
+
 describe("notifications and usage", () => {
   it("loads the bell and the allowance with the rest of the state", async () => {
     const { controller, statuses } = await setup();

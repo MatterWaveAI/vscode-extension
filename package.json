@@ -90,6 +90,11 @@
         "category": "MatterWave"
       },
       {
+        "command": "matterwave.inlineEdit",
+        "title": "Edit Selection with MatterWave",
+        "category": "MatterWave"
+      },
+      {
         "command": "matterwave.pickModel",
         "title": "Pick Model",
         "category": "MatterWave"
@@ -173,9 +178,21 @@
           "command": "matterwave.askAboutFile",
           "when": "editorTextFocus",
           "group": "matterwave@2"
+        },
+        {
+          "command": "matterwave.inlineEdit",
+          "when": "editorHasSelection",
+          "group": "matterwave@3"
         }
       ]
-    }
+    },
+    "keybindings": [
+      {
+        "command": "matterwave.inlineEdit",
+        "key": "ctrl+i",
+        "when": "editorTextFocus && editorHasSelection"
+      }
+    ]
   },
   "scripts": {
     "build": "node esbuild.mjs",
