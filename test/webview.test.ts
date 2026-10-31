@@ -139,6 +139,40 @@ describe("the chat webview", () => {
     expect(document.body.textContent).toContain("the old question");
   });
 
+  it("offers Apply under each code block of a finished answer and sends its intent", () => {
+    post({
+      type: "state",
+      state: state({
+        transcript: [
+          {
+            message: message({
+              id: "a_code",
+              role: "assistant",
+              parts: [{ type: "text", text: "Use this:\n\n```python api/jobs.py\nprint(1)\n```\n" }],
+            }),
+            siblingIndex: 1,
+            siblingCount: 1,
+          },
+        ],
+      }),
+    });
+    const apply = Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Apply → api/jobs.py");
+    expect(apply).toBeDefined();
+    apply?.click();
+    expect(sent.at(-1)).toEqual({ type: "applyCodeBlock", messageId: "a_code", blockIndex: 0 });
+  });
+
+  it("offers no Apply while the answer is still streaming", () => {
+    post({
+      type: "state",
+      state: state({
+        streaming: true,
+        live: message({ id: "", role: "assistant", parts: [{ type: "text", text: "```py x.py\n1\n```" }] }),
+      }),
+    });
+    expect(Array.from(document.querySelectorAll("button")).some((b) => b.textContent?.startsWith("Apply"))).toBe(false);
+  });
+
   it("closes the composer while offline and keeps the draft", () => {
     post({ type: "state", state: state({}) });
     // The composer's own textarea: the instructions editor holds one too.

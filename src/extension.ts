@@ -10,12 +10,32 @@ import type { HostMessage } from "./chat/protocol";
 import type { FolderRow, Library, TagRow } from "./api/types";
 import { ChatViewProvider } from "./chat/viewProvider";
 import { fitsContentCap, MAX_CONTENT_CHARS, imageAttachment, imageContentType, selectionContent } from "./context";
+import { applyToFile, registerApplyContentProvider } from "./apply";
+import { CheckpointStore } from "./checkpoints";
+import type { CodeBlock } from "./chat/codeBlocks";
+import { inlineEditPrompt, replacementFromAnswer } from "./inlineEdit";
+import {
+  docsContext,
+  fetchDocText,
+  fileContext,
+  folderContext,
+  folderTree,
+  gitContext,
+  mentionLabel,
+  terminalContext,
+} from "./contextProviders";
+import type { Mention } from "./chat/mentions";
 import { keyDetail } from "./keys";
 import { conversationToMarkdown, safeFilename } from "./chat/export";
 import type { ApiKeyListing, ImportRecord } from "./api/types";
 import { pickerRows, resolvePick, type PickerRow } from "./models";
 import { DEFAULT_BASE_URL, normalizeServerUrl, serverUrlProblem, shouldPromptForServer } from "./settings";
 import { StatusBar } from "./statusBar";
+import { normalizePromptName, PromptLibrary, MAX_PROMPT_TEXT, type PromptRow } from "./promptLibrary";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const MODEL_KEY = "matterwave.model";
 /** Set once the server prompt has been shown, whatever was answered: it is a first-run question, not a nag. */
@@ -71,6 +91,8 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
   const tokens = new TokenStore(context.secrets, baseUrl);
   const statusBar = new StatusBar();
   const view = new ChatViewProvider(context.extensionUri);
+  const prompts = new PromptLibrary(context.globalState);
+  const checkpoints = new CheckpointStore(context.globalState);
   const taps = new Set<(message: HostMessage) => void>();
 
   // The client reports request ids and reachability to the controller,
@@ -104,6 +126,11 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
     // Where a notification's link leads when it is not a conversation of
     // this deployment; only http(s) URLs the classifier accepted get here.
     openLink: (url) => void vscode.env.openExternal(vscode.Uri.parse(url)),
+    resolveMention: (mention) => resolveMention(mention),
+    prompts: { get: (name) => prompts.get(name) },
+    applyCode: async ({ block }) => {
+      await applyCodeBlockFlow(chat, checkpoints, block);
+    },
     onStatus: (status) => statusBar.update(status),
   });
   view.attach(chat);
@@ -113,6 +140,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
 
   context.subscriptions.push(
     statusBar,
+    registerApplyContentProvider(),
     vscode.window.registerWebviewViewProvider(ChatViewProvider.viewId, view, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
@@ -154,6 +182,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
   });
   command("matterwave.askAboutSelection", () => askAboutSelection(chat, view));
   command("matterwave.askAboutFile", () => askAboutFile(chat, view));
+  command("matterwave.inlineEdit", () => inlineEdit(chat, checkpoints));
   command("matterwave.pickModel", () => pickModel(chat));
   command("matterwave.compactNow", async () => {
     if (!chat.hasConversation()) {
@@ -209,6 +238,8 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
   command("matterwave.customInstructions", () => editCustomInstructions(client));
   command("matterwave.manageApiKeys", () => manageApiKeys(client));
   command("matterwave.switchAccount", () => switchAccount(tokens));
+  command("matterwave.promptLibrary", () => managePrompts(prompts));
+  command("matterwave.restoreCheckpoint", () => restoreCheckpoint(chat, checkpoints));
   command("matterwave.importHistory", async () => {
     await view.reveal();
     await importHistory(client, chat);
@@ -371,6 +402,424 @@ async function askAboutFile(chat: ChatController, view: ChatViewProvider): Promi
 }
 
 type PickItem = vscode.QuickPickItem & { row: PickerRow };
+
+// --- prompt library -----------------------------------------------------------
+
+/**
+ * The named texts `/name` expands to in the composer: create one, edit one,
+ * or take one back, looping like Manage Share Links so several can be seen
+ * to in a sitting. The library is this editor's own -- global state, not
+ * the platform -- and `/name` in a chat sends the saved text as the message.
+ */
+async function managePrompts(library: PromptLibrary): Promise<void> {
+  for (;;) {
+    const rows = await library.list();
+    const picked = await vscode.window.showQuickPick(
+      [
+        {
+          fresh: true,
+          row: null as PromptRow | null,
+          label: "$(plus) Create a prompt…",
+          description: "",
+          detail: "A named text that /name sends as a message from the chat composer",
+        },
+        ...rows.map((row) => ({
+          fresh: false,
+          row: row as PromptRow | null,
+          label: `/${row.name}`,
+          description: `${row.text.length.toLocaleString()} characters`,
+          detail: row.text.split("\n")[0],
+        })),
+      ],
+      { title: "MatterWave prompt library", placeHolder: "Create a prompt, or pick one to edit or delete" },
+    );
+    if (!picked) return;
+    if (picked.fresh) {
+      await editPrompt(library, null);
+      continue;
+    }
+    const action = await vscode.window.showQuickPick(
+      [
+        { id: "edit", label: "Edit", detail: `Change what /${picked.row?.name} sends` },
+        { id: "delete", label: "Delete", detail: "Remove it from the library" },
+      ],
+      { title: `/${picked.row?.name}`, placeHolder: "What to do with this prompt" },
+    );
+    if (action?.id === "edit") {
+      await editPrompt(library, picked.row);
+    } else if (action?.id === "delete") {
+      const answer = await vscode.window.showInformationMessage(
+        `Delete the prompt “/${picked.row?.name}”? Nothing else holds it.`,
+        { modal: true },
+        "Delete",
+      );
+      if (answer === "Delete") {
+        await library.remove(picked.row?.name ?? "");
+        void vscode.window.showInformationMessage(`The prompt “/${picked.row?.name}” was deleted.`);
+      }
+    }
+  }
+}
+
+/** Name and text for one prompt, new or edited; a renamed edit saves a new row. */
+async function editPrompt(library: PromptLibrary, existing: PromptRow | null): Promise<void> {
+  const name = await vscode.window.showInputBox({
+    title: existing ? "Rename prompt" : "New prompt",
+    prompt: "What the composer types: /name sends this prompt's text as a message.",
+    value: existing ? `/${existing.name}` : "/",
+    ignoreFocusOut: true,
+    validateInput: (value) => {
+      const normalized = normalizePromptName(value);
+      if (!/^[a-z0-9_-]{1,40}$/.test(normalized)) return "Letters, digits, - and _ (at most 40).";
+      return null;
+    },
+  });
+  if (name === undefined) return;
+  const normalized = normalizePromptName(name);
+  const text = await vscode.window.showInputBox({
+    title: `Text of /${normalized}`,
+    prompt: "Sent as the message when /name is typed. Arguments after /name are appended on a new line.",
+    value: existing?.text,
+    ignoreFocusOut: true,
+    validateInput: (value) =>
+      value.trim().length === 0
+        ? "The prompt needs some text."
+        : value.length > MAX_PROMPT_TEXT
+          ? `At most ${MAX_PROMPT_TEXT.toLocaleString()} characters (now ${value.length.toLocaleString()}).`
+          : null,
+  });
+  if (text === undefined) return;
+  if (await library.save(normalized, text)) {
+    void vscode.window.showInformationMessage(`Saved. Type /${normalized} in the composer to send it.`);
+  } else {
+    void vscode.window.showWarningMessage(
+      `The prompt could not be saved: the library holds at most 50 prompts of ${MAX_PROMPT_TEXT.toLocaleString()} characters each.`,
+    );
+  }
+}
+
+// --- inline edit (Ctrl+I) ---------------------------------------------------------
+
+/**
+ * Selection-scoped edit from the editor: one prompt over the selection, the
+ * answer applied as a workspace edit on accept -- through the same reviewed
+ * diff as Apply, with the lint hook reopening the file afterwards. The
+ * extension never edits a file any other way.
+ */
+async function inlineEdit(chat: ChatController, checkpoints: CheckpointStore): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.selection.isEmpty) {
+    void vscode.window.showInformationMessage("Select the code to edit first.");
+    return;
+  }
+  const { selection, document } = editor;
+  const instruction = await vscode.window.showInputBox({
+    title: "Edit selection with MatterWave",
+    prompt: "What should change? A diff opens before anything is written.",
+    placeHolder: "e.g. add error handling; make this async; extract a helper",
+    ignoreFocusOut: true,
+  });
+  if (!instruction?.trim()) return;
+  const path = relativePath(document.uri);
+  const prompt = inlineEditPrompt({
+    instruction,
+    code: document.getText(selection),
+    languageId: document.languageId,
+    path,
+    startLine: selection.start.line + 1,
+    endLine: selection.end.line + 1,
+  });
+  const answer = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: "MatterWave is editing the selection…" },
+    () => chat.ask(prompt),
+  );
+  const replacement = replacementFromAnswer(answer ?? "");
+  if (replacement === null) {
+    void vscode.window.showWarningMessage(
+      answer?.trim()
+        ? "The answer was not one block of code, so nothing was applied. Read it in the chat and apply what fits."
+        : "MatterWave did not answer with a replacement, so nothing was applied.",
+    );
+    return;
+  }
+  // The file is rewritten whole through the diff, with the selection's range
+  // swapped for the answer's code; nothing else on disk is touched.
+  const full = document.getText();
+  const start = document.offsetAt(selection.start);
+  const end = document.offsetAt(selection.end);
+  await applyToFile(document.uri, full.slice(0, start) + replacement + full.slice(end), {
+    title: `${path} — inline edit`,
+    detail: "The selection becomes exactly the code on the right.",
+    onSnapshot: (snapshot) => recordCheckpoint(chat, checkpoints, document.uri, snapshot, "Inline edit"),
+  });
+}
+
+// --- applying code to a file -----------------------------------------------------
+
+/**
+ * The editor side of Apply: the file the block names, or one the person
+ * picks; a missing file is offered as a new one, and the write itself only
+ * happens through the reviewed diff in `applyToFile`. The extension never
+ * edits a file any other way.
+ */
+async function applyCodeBlockFlow(chat: ChatController, checkpoints: CheckpointStore, block: CodeBlock): Promise<void> {
+  let picked: vscode.Uri | null = null;
+  if (block.filename) {
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    if (!folder) {
+      void vscode.window.showInformationMessage("Open a workspace to apply code to a file.");
+      return;
+    }
+    picked = vscode.Uri.joinPath(folder.uri, block.filename);
+  } else {
+    picked = await pickWorkspaceFile("Apply code — which file does this replace?");
+    if (!picked) return;
+  }
+  const target = picked;
+  let before: string | null = null;
+  try {
+    before = new TextDecoder().decode(await vscode.workspace.fs.readFile(target));
+  } catch {
+    before = null;
+  }
+  if (before === null) {
+    const answer = await vscode.window.showInformationMessage(
+      `${relativePath(target)} does not exist yet. Create it with this code?`,
+      { modal: true, detail: "A diff opens before anything is written." },
+      "Create",
+    );
+    if (answer !== "Create") return;
+  }
+  await applyToFile(target, block.code, {
+    title: `${relativePath(target)} — reviewed change`,
+    onSnapshot: (snapshot) => recordCheckpoint(chat, checkpoints, target, snapshot, "Apply"),
+  });
+}
+
+/**
+ * The moment before a write: what the file was, kept as the chat's
+ * checkpoint, restorable from Restore Checkpoint.
+ */
+async function recordCheckpoint(
+  chat: ChatController,
+  store: CheckpointStore,
+  target: vscode.Uri,
+  before: string | null,
+  label: string,
+): Promise<void> {
+  const row = await store.record(chat.activeConversationId(), relativePath(target), before, label);
+  if (row === null) {
+    void vscode.window.showWarningMessage(
+      `${relativePath(target)} is too large to snapshot, so this change has no checkpoint. VS Code's own undo still applies.`,
+    );
+  }
+}
+
+/**
+ * The applied edits this chat can take back, newest first, each restored
+ * through the same reviewed diff an apply goes through. A checkpoint of a
+ * file that was new restores by removing the file, with its own confirm.
+ */
+async function restoreCheckpoint(chat: ChatController, store: CheckpointStore): Promise<void> {
+  const rows = await store.list(chat.activeConversationId());
+  if (rows.length === 0) {
+    void vscode.window.showInformationMessage(
+      "No checkpoints yet. One is taken each time Apply or an inline edit writes a file.",
+    );
+    return;
+  }
+  const picked = await vscode.window.showQuickPick(
+    rows.map((row) => ({
+      row,
+      label: row.path,
+      description: row.label,
+      detail:
+        row.content === null
+          ? `${new Date(row.createdAt).toLocaleString()} · the file was new`
+          : `${new Date(row.createdAt).toLocaleString()} · ${row.content.length.toLocaleString()} characters`,
+    })),
+    { title: "MatterWave checkpoints", placeHolder: "Pick a checkpoint to restore" },
+  );
+  if (!picked) return;
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (!folder) {
+    void vscode.window.showInformationMessage("Open a workspace to restore a file into.");
+    return;
+  }
+  const uri = vscode.Uri.joinPath(folder.uri, picked.row.path);
+  if (picked.row.content === null) {
+    const answer = await vscode.window.showInformationMessage(
+      `Remove ${picked.row.path}? It did not exist when this checkpoint was taken.`,
+      { modal: true },
+      "Remove",
+    );
+    if (answer !== "Remove") return;
+    await vscode.workspace.fs.delete(uri);
+    void vscode.window.showInformationMessage(`${picked.row.path} was removed, back to before the ${picked.row.label}.`);
+    return;
+  }
+  const answer = await vscode.window.showInformationMessage(
+    `Restore ${picked.row.path} to what it was before the ${picked.row.label}?`,
+    { modal: true, detail: "A diff opens before anything is written." },
+    "Restore",
+  );
+  if (answer !== "Restore") return;
+  await applyToFile(uri, picked.row.content, {
+    title: `${picked.row.path} — restored checkpoint`,
+    detail: "The file becomes exactly what the checkpoint kept.",
+  });
+}
+
+
+// --- @-mention context providers -------------------------------------------------
+
+/**
+ * Assemble the context one @-mention in the composer names, one QuickPick
+ * (or dialog) per kind: @file a file's contents, @folder a directory tree,
+ * @terminal the output of a terminal, @git the working tree's diff or the
+ * last commit's, @docs the text of a fetched page. Null is the person
+ * backing out -- the message names context it is not going to get, so the
+ * controller sends nothing.
+ */
+async function resolveMention(mention: Mention): Promise<{ filename: string; text: string } | null> {
+  switch (mention.kind) {
+    case "file": {
+      const picked = await pickWorkspaceFile(`@file — ${mentionLabel("file")}`);
+      if (!picked) return null;
+      const bytes = await vscode.workspace.fs.readFile(picked);
+      return fileContext(relativePath(picked), new TextDecoder().decode(bytes));
+    }
+    case "folder": {
+      const picked = await vscode.window.showOpenDialog({
+        title: "@folder — pick the folder whose tree is attached",
+        canSelectFolders: true,
+        canSelectFiles: false,
+        canSelectMany: false,
+      });
+      const dir = picked?.[0];
+      if (!dir) return null;
+      const path = relativePath(dir);
+      const tree = await folderTree(path, readWorkspaceDir);
+      return folderContext(path, tree);
+    }
+    case "terminal": {
+      const terminals = vscode.window.terminals;
+      if (terminals.length === 0) {
+        void vscode.window.showInformationMessage("No terminal is open. Open one and run something to attach its output.");
+        return null;
+      }
+      const picked = await vscode.window.showQuickPick(
+        terminals.map((t) => ({ terminal: t, label: t.name })),
+        { title: "@terminal — pick the terminal whose output is attached", placeHolder: "Output since the terminal was opened" },
+      );
+      if (!picked) return null;
+      const buffer = readTerminalBuffer(picked.terminal);
+      if (buffer === null) {
+        void vscode.window.showWarningMessage(
+          `The output of “${picked.terminal.name}” could not be read. Run it again in a terminal with shell integration.`,
+        );
+        return null;
+      }
+      return terminalContext(picked.terminal.name, buffer);
+    }
+    case "git": {
+      const root = vscode.workspace.workspaceFolders?.[0];
+      if (!root) {
+        void vscode.window.showInformationMessage("Open a workspace to attach its git changes.");
+        return null;
+      }
+      const picked = await vscode.window.showQuickPick(
+        [
+          { range: "worktree" as const, label: "Working tree changes", detail: "git diff HEAD — staged and unstaged" },
+          { range: "last" as const, label: "Last commit", detail: "git diff HEAD~1" },
+        ],
+        { title: "@git — pick what is attached", placeHolder: "The diff the model is shown" },
+      );
+      if (!picked) return null;
+      const diff = await runGit(root.uri.fsPath, picked.range === "worktree" ? ["diff", "HEAD"] : ["diff", "HEAD~1"]);
+      if (diff === null) {
+        void vscode.window.showWarningMessage("git could not be run in this workspace, so its changes cannot be attached.");
+        return null;
+      }
+      return gitContext(picked.label, diff);
+    }
+    case "docs": {
+      const url = await vscode.window.showInputBox({
+        title: "@docs — fetch a page",
+        prompt: "An http(s) URL whose text is attached for this message.",
+        ignoreFocusOut: true,
+        validateInput: (value) => (/^https?:\/\/\S+$/.test(value.trim()) ? null : "An http(s) URL"),
+      });
+      if (!url) return null;
+      try {
+        const { title, text } = await fetchDocText(url.trim(), (input, init) => fetch(input, init));
+        return docsContext(url.trim(), title, text);
+      } catch (error) {
+        void vscode.window.showErrorMessage(`The page could not be fetched: ${describe(error)}`);
+        return null;
+      }
+    }
+  }
+}
+
+/** One workspace file out of a QuickPick over the whole tree. */
+async function pickWorkspaceFile(title: string): Promise<vscode.Uri | null> {
+  const files = await vscode.workspace.findFiles("**/*", "**/{.git,node_modules,dist,out,build}/**", 500);
+  if (files.length === 0) {
+    void vscode.window.showInformationMessage("This workspace has no files to attach.");
+    return null;
+  }
+  const rows = files
+    .map((uri) => ({ uri, path: relativePath(uri) }))
+    .sort((a, b) => a.path.localeCompare(b.path));
+  const picked = await vscode.window.showQuickPick(rows.map((r) => ({ ...r, label: r.path })), { title, placeHolder: "The file whose contents are attached" });
+  return picked?.uri ?? null;
+}
+
+/** A workspace-relative path, so no home path leaks into a prompt. */
+function relativePath(uri: vscode.Uri): string {
+  return vscode.workspace.asRelativePath(uri, false);
+}
+
+/** The names of one workspace directory, directories marked with a trailing `/`. */
+async function readWorkspaceDir(path: string): Promise<string[]> {
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  if (folders.length === 0) throw new Error("no workspace");
+  let last: unknown = null;
+  for (const folder of folders) {
+    try {
+      const uri = path ? vscode.Uri.joinPath(folder.uri, path) : folder.uri;
+      const rows = await vscode.workspace.fs.readDirectory(uri);
+      return rows.map(([name, type]) => (type & vscode.FileType.Directory ? `${name}/` : name));
+    } catch (error) {
+      last = error;
+    }
+  }
+  throw last instanceof Error ? last : new Error("unreadable");
+}
+
+/**
+ * A terminal's buffer through the unofficial-but-ubiquitous `buffer`
+ * property, the only read VS Code offers for output that arrived before the
+ * mention was typed; null when the host exposes none (no shell
+ * integration), which the flow above reports.
+ */
+function readTerminalBuffer(terminal: vscode.Terminal): string | null {
+  const buffer = (terminal as unknown as { buffer?: { contents?: unknown } }).buffer;
+  return typeof buffer?.contents === "string" && buffer.contents.length > 0 ? buffer.contents : null;
+}
+
+/** One git invocation in the workspace root; null rather than a throw. */
+async function runGit(cwd: string, args: string[]): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync("git", args, { cwd, maxBuffer: 16 * 1024 * 1024, timeout: 15_000 });
+    return stdout.trim() ? stdout : null;
+  } catch {
+    return null;
+  }
+}
+
+
 
 /**
  * Every link this person is holding out, one place to take one back: pick a

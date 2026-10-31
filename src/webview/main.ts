@@ -2,6 +2,7 @@ import type { FeedbackReason, Message, Part } from "../api/types";
 import { appendDelta, setPart } from "../chat/assemble";
 import type { FeedbackSummary, HostMessage, NotificationView, TranscriptEntry, UsageView, ViewState, WebviewMessage } from "../chat/protocol";
 import { trustedImageDataUri } from "../chat/images";
+import { parseCodeBlocks } from "../chat/codeBlocks";
 import { renderMarkdown } from "./markdown";
 
 /**
@@ -99,7 +100,7 @@ const banners = el("div");
 const transcript = el("div", { className: "transcript" });
 transcript.setAttribute("aria-live", "polite");
 const input = el("textarea");
-const PLACEHOLDER = "Ask MatterWave…  (Enter to send, Shift+Enter for a new line)";
+const PLACEHOLDER = "Ask MatterWave…  (@file, @folder, @terminal, @git, @docs add context — Enter to send)";
 const OFFLINE_PLACEHOLDER = "MatterWave cannot be reached. Your draft is kept.";
 input.placeholder = PLACEHOLDER;
 const temporaryBox = document.createElement("input");
@@ -521,7 +522,7 @@ function renderEntry(entry: TranscriptEntry, isLast: boolean, streaming: boolean
     return node;
   }
 
-  node.appendChild(m.role === "user" ? renderUserBody(m) : renderParts(m.parts));
+  node.appendChild(m.role === "user" ? renderUserBody(m) : renderParts(m.parts, !streaming ? m.id : null));
   if (m.truncated) {
     const cut = el("div", { className: "cut", text: "This answer was cut off before it finished." });
     if (isLast && !streaming) cut.appendChild(button("Continue", () => send({ type: "continue" })));
@@ -651,9 +652,9 @@ function renderSummary(m: Message, text: string, originals: Message[]): HTMLElem
   return wrap;
 }
 
-function renderParts(parts: Part[]): HTMLElement {
+function renderParts(parts: Part[], applyToMessageId: string | null = null): HTMLElement {
   const body = el("div", { className: "body" });
-  for (const part of parts) body.appendChild(renderPart(part));
+  for (const part of parts) body.appendChild(renderPart(part, applyToMessageId));
   return body;
 }
 
@@ -665,14 +666,43 @@ function markdown(text: string): HTMLElement {
   return node;
 }
 
+/**
+ * One text part with an Apply button under each fenced code block, for a
+ * finished assistant message. Buttons attach only when every `<pre>` the
+ * renderer made is a block the extractor counted (nested fences render
+ * inside quotes and lists, where the count disagrees and nothing attaches).
+ */
+function markdownWithApply(text: string, messageId: string): HTMLElement {
+  const node = markdown(text);
+  const blocks = parseCodeBlocks(text);
+  const pres = Array.from(node.querySelectorAll("pre"));
+  if (pres.length === 0 || pres.length !== blocks.length) return node;
+  pres.forEach((pre, at) => {
+    const block = blocks[at];
+    if (!block || !block.code.trim()) return;
+    const bar = el("div", { className: "apply-bar" });
+    bar.appendChild(
+      button(
+        block.filename ? `Apply → ${block.filename}` : "Apply…",
+        () => send({ type: "applyCodeBlock", messageId, blockIndex: block.index }),
+        { className: "link", title: "Review a diff of this code against the file, then apply it" },
+      ),
+    );
+    const wrap = el("div", { className: "apply-wrap" });
+    pre.replaceWith(wrap);
+    wrap.append(pre, bar);
+  });
+  return node;
+}
+
 function collapsed(title: string, body: string): HTMLElement {
   return el("details", {}, [el("summary", { text: title }), el("pre", { text: body })]);
 }
 
-function renderPart(part: Part): Node {
+function renderPart(part: Part, applyToMessageId: string | null = null): Node {
   switch (part.type) {
     case "text":
-      return markdown(part.text);
+      return applyToMessageId ? markdownWithApply(part.text, applyToMessageId) : markdown(part.text);
     case "reasoning":
       return collapsed("Reasoning", part.text);
     case "tool_call":

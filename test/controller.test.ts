@@ -64,7 +64,10 @@ function routes(over: Record<string, (call: Call) => Response> = {}) {
   };
 }
 
-async function setup(over: Parameters<typeof routes>[0] = {}) {
+async function setup(
+  over: Parameters<typeof routes>[0] = {},
+  extra: { resolveMention?: (mention: unknown) => Promise<unknown>; prompts?: { get(name: string): Promise<string | null> } } = {},
+) {
   const secrets = new MemorySecrets();
   const tokens = new TokenStore(secrets as unknown as vscode.SecretStorage, () => "https://mw.test");
   await tokens.set(TOKEN);
@@ -87,13 +90,16 @@ async function setup(over: Parameters<typeof routes>[0] = {}) {
   const provider = new ChatViewProvider(vscode.Uri.file("/ext"));
   const statuses: StatusInfo[] = [];
   const openLink = vi.fn();
+  const runCommands: string[] = [];
   const controller = new ChatController({
     client,
     post: (message) => provider.post(message),
     isSignedIn: async () => (await tokens.get()) !== null,
     rememberedModel: { get: () => null, set: () => undefined },
-    runCommand: () => undefined,
+    runCommand: (command) => void runCommands.push(command),
     openLink,
+    resolveMention: extra.resolveMention as never,
+    prompts: extra.prompts,
     onStatus: (s) => void statuses.push(s),
   });
   provider.attach(controller);
@@ -109,7 +115,7 @@ async function setup(over: Parameters<typeof routes>[0] = {}) {
     webview.receive(message);
     await handled.mock.results[before]?.value;
   };
-  return { controller, provider, webview, calls: fake.calls, fromWebview, statuses, network, openLink };
+  return { controller, provider, webview, calls: fake.calls, fromWebview, statuses, network, openLink, runCommands };
 }
 
 function lastState(posted: unknown[]): ViewState {
@@ -192,6 +198,83 @@ describe("ask about file", () => {
     expect(lastState(webview.posted).notice).toContain("only its start was sent");
   });
 });
+
+describe("@-mentions", () => {
+  it("uploads each mention's context as an attachment, in the order named", async () => {
+    let n = 0;
+    const parts: Record<string, { filename: string; text: string }> = {
+      file: { filename: "src/a.ts", text: "export const a = 1;\n" },
+      git: { filename: "git-diff.diff", text: "diff --git a/a.ts b/a.ts" },
+    };
+    const picked: string[] = [];
+    const { controller, calls } = await setup(
+      { "POST /api/attachments": () => json({ id: `att_${++n}`, filename: "x", content_type: "text/plain", size_bytes: 10 }, 201) },
+      {
+        resolveMention: async (mention) => {
+          const kind = (mention as { kind: string }).kind;
+          picked.push(kind);
+          return parts[kind] ?? null;
+        },
+      },
+    );
+    await controller.refresh();
+    await controller.send("Review @file against @git, ignoring @unknown");
+
+    expect(picked).toEqual(["file", "git"]);
+    const uploads = calls.filter((c) => c.method === "POST" && c.url.startsWith("/api/attachments"));
+    expect(uploads).toHaveLength(2);
+    expect(await ((uploads[0]?.body as FormData).get("file") as File).text()).toBe("export const a = 1;\n");
+
+    const send = calls.find((c) => c.url === "/api/conversations/c_1/messages");
+    expect(JSON.parse(String(send?.body))).toEqual({
+      content: "Review @file against @git, ignoring @unknown",
+      model: "grt-small",
+      attachment_ids: ["att_1", "att_2"],
+    });
+  });
+
+  it("sends nothing when the person backs out of a pick", async () => {
+    const { controller, calls, webview } = await setup({}, { resolveMention: async () => null });
+    await controller.refresh();
+    await controller.send("Explain @file");
+
+    expect(calls.some((c) => c.url === "/api/conversations/c_1/messages")).toBe(false);
+    expect(lastState(webview.posted).notice).toContain("the message was not sent");
+    expect(lastState(webview.posted).transcript).toEqual([]);
+  });
+
+  it("sends nothing when an upload fails, with the error banner", async () => {
+    const { controller, calls, webview } = await setup(
+      { "POST /api/attachments": () => json({ detail: "too big" }, 413) },
+      { resolveMention: async () => ({ filename: "src/a.ts", text: "x" }) },
+    );
+    await controller.refresh();
+    await controller.send("Explain @file");
+
+    expect(calls.some((c) => c.url === "/api/conversations/c_1/messages")).toBe(false);
+    expect(lastState(webview.posted).error).not.toBeNull();
+  });
+
+  it("does not ask for context again when a retried turn already carried the attachments", async () => {
+    let resolveCalls = 0;
+    const { controller } = await setup(
+      { "POST /api/conversations/c_1/messages": () => json({ detail: "stream broke" }, 500) },
+      {
+        resolveMention: async () => {
+          resolveCalls++;
+          return { filename: "x.txt", text: "x" };
+        },
+      },
+    );
+    await controller.refresh();
+    await controller.send("Explain @file");
+    expect(resolveCalls).toBe(1);
+    // The retry goes out with the ids the first attempt uploaded.
+    await controller.retry();
+    expect(resolveCalls).toBe(1);
+  });
+});
+
 
 describe("model selection", () => {
   it("refuses a model the plan does not include", async () => {
@@ -969,6 +1052,153 @@ describe("switching conversations mid-stream", () => {
     expect(state.live).toBeNull();
     expect(state.streaming).toBe(false);
     expect(state.notice).toBeNull();
+  });
+});
+
+describe("slash commands", () => {
+  it("runs the built-ins instead of sending a message", async () => {
+    const { controller, calls, runCommands } = await setup({
+      "POST /api/conversations/c_1/compact": () => json(USER, 200),
+    });
+    await controller.refresh();
+    await controller.openConversation("c_1");
+
+    await controller.send("/model");
+    expect(runCommands).toContain("pickModel");
+
+    await controller.send("/compact");
+    expect(calls.some((c) => c.method === "POST" && c.url === "/api/conversations/c_1/compact")).toBe(true);
+
+    await controller.send("/share");
+    await controller.send("/export");
+    expect(runCommands).toContain("shareConversation");
+    expect(runCommands).toContain("exportConversation");
+
+    expect(calls.some((c) => c.url === "/api/conversations/c_1/messages")).toBe(false);
+  });
+
+  it("clears the conversation with /clear", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    expect(controller.hasConversation()).toBe(true);
+    await controller.send("/clear");
+    expect(controller.hasConversation()).toBe(false);
+    expect(controller.snapshot().transcript).toEqual([]);
+  });
+
+  it("expands a saved prompt, appending arguments on a new line", async () => {
+    const { controller, calls } = await setup(
+      {},
+      { prompts: { get: async (name) => (name === "review" ? "Review this diff for safety." : null) } },
+    );
+    await controller.refresh();
+    await controller.send("/review focus on auth");
+
+    const send = calls.find((c) => c.url === "/api/conversations/c_1/messages");
+    expect(JSON.parse(String(send?.body)).content).toBe("Review this diff for safety.\n\nfocus on auth");
+  });
+
+  it("says so when no prompt by that name is saved, and sends nothing", async () => {
+    const { controller, calls, webview } = await setup({}, { prompts: { get: async () => null } });
+    await controller.refresh();
+    await controller.send("/nosuch");
+
+    expect(calls.some((c) => c.url === "/api/conversations/c_1/messages")).toBe(false);
+    expect(lastState(webview.posted).notice).toContain("No prompt named “/nosuch”");
+  });
+
+  it("lets //esc carry a literal slash command as the message", async () => {
+    const { controller, calls } = await setup();
+    await controller.refresh();
+    await controller.send("//clear");
+    const send = calls.find((c) => c.url === "/api/conversations/c_1/messages");
+    expect(JSON.parse(String(send?.body)).content).toBe("/clear");
+  });
+});
+
+describe("apply code to a file", () => {
+  const ANSWER = {
+    ...USER,
+    id: "a_code",
+    role: "assistant",
+    parts: [{ type: "text", text: "Use this:\n\n```python api/jobs.py\nprint(1)\n```\n" }],
+    content: "",
+  };
+
+  const answerRoutes = {
+    "GET /api/conversations/c_1": () => json({ ...CONVERSATION, messages: [USER, ANSWER] }),
+    "GET /api/conversations/c_1/tree": () => json({ ...CONVERSATION, messages: [USER, ANSWER] }),
+  };
+
+  it("hands the named block to the host's apply flow", async () => {
+    const applied: { messageId: string; block: unknown }[] = [];
+    const { controller, fromWebview } = await setup(answerRoutes);
+    controller["deps"].applyCode = async (request) => void applied.push(request);
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    await fromWebview({ type: "applyCodeBlock", messageId: "a_code", blockIndex: 0 });
+
+    expect(applied).toEqual([
+      { messageId: "a_code", block: { index: 0, language: "python", filename: "api/jobs.py", code: "print(1)" } },
+    ]);
+  });
+
+  it("says so rather than applying when the block is gone", async () => {
+    const applied: unknown[] = [];
+    const { controller, webview, fromWebview } = await setup(answerRoutes);
+    controller["deps"].applyCode = async (request) => void applied.push(request);
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    await fromWebview({ type: "applyCodeBlock", messageId: "a_code", blockIndex: 9 });
+
+    expect(applied).toEqual([]);
+    expect(lastState(webview.posted).notice).toContain("no longer in the conversation");
+  });
+});
+
+describe("inline edit", () => {
+  it("answers with the completed turn's text", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    expect(await controller.ask("Rewrite this.")).toBe("It is 10:00 UTC.");
+  });
+
+  it("answers null while a turn is already running, without disturbing it", async () => {
+    const lines = fixture("turn.sse").split("\n");
+    const enc = new TextEncoder();
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const { controller, calls } = await setup({
+      "POST /api/conversations/c_1/messages": () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            async start(c) {
+              c.enqueue(enc.encode(lines.slice(0, 3).join("\n") + "\n"));
+              await held;
+              c.enqueue(enc.encode(lines.slice(3).join("\n")));
+              c.close();
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "text/event-stream" } },
+        ),
+    });
+    await controller.refresh();
+    const first = controller.send("A question");
+    await vi.waitFor(() => expect(controller.snapshot().streaming).toBe(true));
+    expect(await controller.ask("Too soon.")).toBeNull();
+    release();
+    await first;
+    // The first turn went out untouched: exactly one send, with its own text.
+    const messageCalls = calls.filter((c) => c.method === "POST" && c.url === "/api/conversations/c_1/messages");
+    expect(messageCalls).toHaveLength(1);
+    expect(JSON.parse(String(messageCalls[0]?.body)).content).toBe("A question");
+  });
+
+  it("answers null when the turn failed", async () => {
+    const { controller } = await setup({ "POST /api/conversations/c_1/messages": () => json({ detail: "down" }, 503) });
+    await controller.refresh();
+    expect(await controller.ask("Rewrite this.")).toBeNull();
   });
 });
 

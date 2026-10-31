@@ -165,6 +165,8 @@ export type WebviewMessage =
   | { type: "setNotificationsUnreadOnly"; on: boolean }
   /** Open where a notification row leads, in the chat or the browser. */
   | { type: "openNotification"; id: string; url: string }
+  /** Review a diff of one code block and apply it to its file on accept. */
+  | { type: "applyCodeBlock"; messageId: string; blockIndex: number }
   | { type: "switchBranch"; messageId: string; step: -1 | 1 }
   | { type: "continue" }
   | { type: "compact" }
@@ -177,7 +179,7 @@ const WEBVIEW_TYPES = new Set<WebviewMessage["type"]>([
   "deleteConversation", "pinConversation", "archiveConversation", "exportConversation", "shareConversation",
   "send", "stop", "retry", "edit", "regenerate", "rateMessage", "setInstructions", "switchBranch", "continue",
   "compact", "pickModel", "signIn", "copyRequestId", "refreshNotifications", "readNotification", "readAllNotifications",
-  "openNotification", "loadMoreNotifications", "setNotificationsUnreadOnly",
+  "openNotification", "loadMoreNotifications", "setNotificationsUnreadOnly", "applyCodeBlock",
 ]);
 
 const FEEDBACK_REASON_SET = new Set<string>(FEEDBACK_REASONS);
@@ -254,6 +256,16 @@ export function parseWebviewMessage(raw: unknown): WebviewMessage | null {
       return typeof msg.on === "boolean" ? (msg as WebviewMessage) : null;
     case "openNotification":
       return id() && typeof msg.url === "string" && msg.url.length > 0 && msg.url.length <= MAX_LINK_CHARS
+        ? (msg as WebviewMessage)
+        : null;
+    case "applyCodeBlock":
+      return (
+        str("messageId") &&
+        typeof msg.blockIndex === "number" &&
+        Number.isInteger(msg.blockIndex) &&
+        msg.blockIndex >= 0 &&
+        msg.blockIndex <= 200
+      )
         ? (msg as WebviewMessage)
         : null;
     default:

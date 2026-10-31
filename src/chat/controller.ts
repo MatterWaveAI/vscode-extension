@@ -2,14 +2,17 @@ import type { ConversationFrame } from "../lib/matterwaveClient";
 import type { MatterWaveClient } from "../api/client";
 import { ApiError } from "../api/errors";
 import { isUntrustedCertificate } from "../api/transport";
-import type { Conversation, ConversationInstructions, FeedbackReason, Library, Message, ModelInfo, NotificationRow, UsageReport } from "../api/types";
+import type { Conversation, ConversationInstructions, FeedbackReason, Library, Message, ModelInfo, NotificationRow, Part, UsageReport } from "../api/types";
 import { fileAttachment } from "../context";
 import { classifyNotificationLink } from "../links";
+import { parseMentions, type Mention } from "./mentions";
+import { parseSlashCommand, type SlashCommand } from "./slash";
 import { initialModel } from "../models";
 import { classifyStreamError, STREAM_ERROR_COPY, type StreamErrorKind } from "../streamErrors";
 import { appendDelta, deltaText, emptyAssistant, partFromStart, setPart } from "./assemble";
 import { switchTarget, transcriptOf } from "./branches";
 import { imageDataUri, MAX_IMAGE_BYTES, renderableImageType } from "./images";
+import { codeBlockAt, type CodeBlock } from "./codeBlocks";
 import type {
   ConversationSummary,
   ErrorView,
@@ -57,7 +60,27 @@ export interface ChatDeps {
   ) => void;
   /** Open a URL in the browser: where a notification's link leads when it is not a conversation. */
   openLink?: (url: string) => void;
+  /**
+   * Assemble one @-mention's context (a QuickPick flow on the editor side).
+   * Null is the person backing out: the message is not sent, since it was
+   * written expecting the context it names.
+   */
+  resolveMention?: (mention: Mention) => Promise<ResolvedContext | null>;
+  /** The prompt library a `/name` expands to, when this editor keeps one. */
+  prompts?: { get(name: string): Promise<string | null> };
+  /**
+   * Apply one code block to its file through a reviewed diff (the editor
+   * side of the webview's Apply button). The controller hands over the
+   * block as the answer carries it; the editor asks what is unknown.
+   */
+  applyCode?: (request: { messageId: string; block: CodeBlock }) => Promise<void> | void;
   onStatus?: (status: StatusInfo) => void;
+}
+
+/** One @-mention's context, as the attachment upload takes it. */
+export interface ResolvedContext {
+  filename: string;
+  text: string;
 }
 
 /** What the Continue button sends after a cut answer. */
@@ -182,6 +205,8 @@ export class ChatController {
         return this.setNotificationsUnreadOnly(message.on);
       case "openNotification":
         return this.openNotificationLink(message.url);
+      case "applyCodeBlock":
+        return this.applyCodeBlock(message.messageId, message.blockIndex);
       case "switchBranch":
         return this.switchBranch(message.messageId, message.step);
       case "continue":
@@ -332,6 +357,22 @@ export class ChatController {
    * opens right here in the chat, everything else http(s) goes to the
    * browser, and anything else is refused without a window.
    */
+  /**
+   * The editor side of Apply: find the block in the message the webview
+   * pointed at and hand it to the host's apply flow. A message or block
+   * that is gone says so rather than applying the wrong code.
+   */
+  private async applyCodeBlock(messageId: string, blockIndex: number): Promise<void> {
+    const message = this.path.find((m) => m.id === messageId);
+    const block = message ? codeBlockAt(messageText(message), blockIndex) : null;
+    if (!message || !block || !block.code.trim()) {
+      this.notice = "That code block is no longer in the conversation, so it was not applied.";
+      this.emit();
+      return;
+    }
+    await this.deps.applyCode?.({ messageId, block });
+  }
+
   private openNotificationLink(url: string): void {
     const target = classifyNotificationLink(url, this.deps.client.baseUrl);
     if (!target) return;
@@ -640,9 +681,70 @@ export class ChatController {
 
   // --- turns -----------------------------------------------------------------
 
+  /**
+   * The composer's send: `//` escapes, a leading `/name` runs a built-in or
+   * expands a saved prompt, `@kind` mentions attach their context, and what
+   * is left goes out as the turn.
+   */
   async send(content: string, attachmentIds: string[] = [], temporary = false): Promise<void> {
     if (this.abort) return;
+    if (attachmentIds.length === 0) {
+      // A leading // is the literal slash: "/clear" as text, not a command.
+      if (content.startsWith("//")) return this.sendCore(content.slice(1), attachmentIds, temporary);
+      const slash = parseSlashCommand(content);
+      if (slash) return this.handleSlash(slash);
+    }
     const id = await this.ensureConversation(temporary);
+    if (!id) {
+      // The composer has already let the text go; when the conversation
+      // could not be made, Retry is the one place it is still held.
+      if (this.error) this.failed = { content, attachmentIds, userMessageId: null, temporary };
+      return;
+    }
+    // @-mentions resolve and upload before the turn, but only on a fresh
+    // send: a retry carries the attachment ids it uploaded the first time.
+    // Prompt without a mention takes the exact path it always took.
+    let mentionIds: string[] = [];
+    if (attachmentIds.length === 0 && parseMentions(content).length > 0) {
+      const resolved = await this.attachMentions(id, content);
+      if (resolved === null) return;
+      mentionIds = resolved;
+    }
+    return this.sendCore(content, [...attachmentIds, ...mentionIds], temporary, id);
+  }
+
+  /** Run a built-in, or expand a library prompt into the turn it names. */
+  private async handleSlash(slash: SlashCommand): Promise<void> {
+    if (slash.kind === "built-in") {
+      switch (slash.command) {
+        case "model":
+          this.deps.runCommand("pickModel");
+          return;
+        case "clear":
+          return this.newChat();
+        case "compact":
+          return this.compact();
+        case "share":
+          this.deps.runCommand("shareConversation");
+          return;
+        case "export":
+          this.deps.runCommand("exportConversation");
+          return;
+      }
+    }
+    const text = (await this.deps.prompts?.get(slash.name)) ?? null;
+    if (text === null) {
+      this.notice = `No prompt named “/${slash.name}”. Save one with MatterWave: Prompt Library.`;
+      this.emit();
+      return;
+    }
+    await this.ensureConversation();
+    return this.sendCore(slash.args ? `${text}\n\n${slash.args}` : text, [], false);
+  }
+
+  private async sendCore(content: string, attachmentIds: string[], temporary: boolean, knownId?: string): Promise<void> {
+    if (this.abort) return;
+    const id = knownId ?? (await this.ensureConversation(temporary));
     if (!id) {
       // The composer has already let the text go; when the conversation
       // could not be made, Retry is the one place it is still held.
@@ -661,6 +763,47 @@ export class ChatController {
     await this.runTurn(id, (signal) => this.deps.client.sendMessage(id, body, signal), { content, attachmentIds, userMessageId: null, temporary });
   }
 
+  /**
+   * Upload every @-mention's context as an attachment, in the order the
+   * prompt names it. A mention the person backs out of -- or one that fails
+   * to upload -- sends nothing: the message was written expecting the
+   * context it names, and half a context is worse than none.
+   */
+  private async attachMentions(conversationId: string, content: string): Promise<string[] | null> {
+    const mentions = parseMentions(content);
+    if (mentions.length === 0) return [];
+    const resolve = this.deps.resolveMention;
+    if (!resolve) return [];
+    const ids: string[] = [];
+    for (const mention of mentions) {
+      let part: ResolvedContext | null;
+      try {
+        part = await resolve(mention);
+      } catch (error) {
+        part = null;
+        this.fail(error);
+      }
+      if (!part) {
+        this.notice = this.error ? this.notice : `No context attached for ${mention.token}, so the message was not sent.`;
+        this.emit();
+        return null;
+      }
+      try {
+        const saved = await this.deps.client.uploadAttachment(
+          new Blob([part.text], { type: "text/plain" }),
+          part.filename,
+          conversationId,
+        );
+        ids.push(saved.id);
+      } catch (error) {
+        this.fail(error);
+        this.emit();
+        return null;
+      }
+    }
+    return ids;
+  }
+
   async edit(messageId: string, content: string): Promise<void> {
     if (this.abort || !this.activeId) return;
     const id = this.activeId;
@@ -675,6 +818,22 @@ export class ChatController {
     const at = this.path.findIndex((m) => m.id === messageId);
     if (at >= 0) this.path = this.path.slice(0, at);
     await this.runTurn(id, (signal) => this.deps.client.regenerate(id, messageId, body, signal), null);
+  }
+
+  /**
+   * One prompt out, the answer's text back -- the inline editor's road in.
+   * The turn runs through the same pipeline as any send, so it shows in the
+   * conversation; what comes back is the last assistant message's words, or
+   * null when a turn was already running, the request failed, or the answer
+   * was cut short.
+   */
+  async ask(prompt: string): Promise<string | null> {
+    if (this.abort) return null;
+    await this.sendCore(prompt, [], false);
+    if (this.error) return null;
+    const last = this.path[this.path.length - 1];
+    if (last?.role !== "assistant" || last.truncated) return null;
+    return messageText(last);
   }
 
   /** Try a failed turn again in the cheapest way that cannot double-post it. */
@@ -1140,6 +1299,15 @@ function notificationView(n: NotificationRow): NotificationView {
     createdAt: n.created_at,
     read: n.read_at !== null,
   };
+}
+
+/** A message's own words: its text parts, or its content when it carries none. */
+function messageText(m: Message): string {
+  const parts = m.parts
+    .filter((p): p is Extract<Part, { type: "text" }> => p.type === "text")
+    .map((p) => p.text)
+    .join("\n");
+  return parts || m.content || "";
 }
 
 /** The usage report as the line reads it: the three states folded into one. */
