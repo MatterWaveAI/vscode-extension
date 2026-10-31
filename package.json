@@ -155,6 +155,11 @@
         "category": "MatterWave"
       },
       {
+        "command": "matterwave.restoreCheckpoint",
+        "title": "Restore Checkpoint",
+        "category": "MatterWave"
+      },
+      {
         "command": "matterwave.importHistory",
         "title": "Import ChatGPT or Claude History",
         "category": "MatterWave"

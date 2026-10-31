@@ -11,6 +11,7 @@ import type { FolderRow, Library, TagRow } from "./api/types";
 import { ChatViewProvider } from "./chat/viewProvider";
 import { fitsContentCap, MAX_CONTENT_CHARS, imageAttachment, imageContentType, selectionContent } from "./context";
 import { applyToFile, registerApplyContentProvider } from "./apply";
+import { CheckpointStore } from "./checkpoints";
 import type { CodeBlock } from "./chat/codeBlocks";
 import { inlineEditPrompt, replacementFromAnswer } from "./inlineEdit";
 import {
@@ -91,6 +92,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
   const statusBar = new StatusBar();
   const view = new ChatViewProvider(context.extensionUri);
   const prompts = new PromptLibrary(context.globalState);
+  const checkpoints = new CheckpointStore(context.globalState);
   const taps = new Set<(message: HostMessage) => void>();
 
   // The client reports request ids and reachability to the controller,
@@ -127,7 +129,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
     resolveMention: (mention) => resolveMention(mention),
     prompts: { get: (name) => prompts.get(name) },
     applyCode: async ({ block }) => {
-      await applyCodeBlockFlow(block);
+      await applyCodeBlockFlow(chat, checkpoints, block);
     },
     onStatus: (status) => statusBar.update(status),
   });
@@ -180,7 +182,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
   });
   command("matterwave.askAboutSelection", () => askAboutSelection(chat, view));
   command("matterwave.askAboutFile", () => askAboutFile(chat, view));
-  command("matterwave.inlineEdit", () => inlineEdit(chat));
+  command("matterwave.inlineEdit", () => inlineEdit(chat, checkpoints));
   command("matterwave.pickModel", () => pickModel(chat));
   command("matterwave.compactNow", async () => {
     if (!chat.hasConversation()) {
@@ -237,6 +239,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
   command("matterwave.manageApiKeys", () => manageApiKeys(client));
   command("matterwave.switchAccount", () => switchAccount(tokens));
   command("matterwave.promptLibrary", () => managePrompts(prompts));
+  command("matterwave.restoreCheckpoint", () => restoreCheckpoint(chat, checkpoints));
   command("matterwave.importHistory", async () => {
     await view.reveal();
     await importHistory(client, chat);
@@ -503,7 +506,7 @@ async function editPrompt(library: PromptLibrary, existing: PromptRow | null): P
  * diff as Apply, with the lint hook reopening the file afterwards. The
  * extension never edits a file any other way.
  */
-async function inlineEdit(chat: ChatController): Promise<void> {
+async function inlineEdit(chat: ChatController, checkpoints: CheckpointStore): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.selection.isEmpty) {
     void vscode.window.showInformationMessage("Select the code to edit first.");
@@ -547,6 +550,7 @@ async function inlineEdit(chat: ChatController): Promise<void> {
   await applyToFile(document.uri, full.slice(0, start) + replacement + full.slice(end), {
     title: `${path} — inline edit`,
     detail: "The selection becomes exactly the code on the right.",
+    onSnapshot: (snapshot) => recordCheckpoint(chat, checkpoints, document.uri, snapshot, "Inline edit"),
   });
 }
 
@@ -558,19 +562,20 @@ async function inlineEdit(chat: ChatController): Promise<void> {
  * happens through the reviewed diff in `applyToFile`. The extension never
  * edits a file any other way.
  */
-async function applyCodeBlockFlow(block: CodeBlock): Promise<void> {
-  let target: vscode.Uri | null = null;
+async function applyCodeBlockFlow(chat: ChatController, checkpoints: CheckpointStore, block: CodeBlock): Promise<void> {
+  let picked: vscode.Uri | null = null;
   if (block.filename) {
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (!folder) {
       void vscode.window.showInformationMessage("Open a workspace to apply code to a file.");
       return;
     }
-    target = vscode.Uri.joinPath(folder.uri, block.filename);
+    picked = vscode.Uri.joinPath(folder.uri, block.filename);
   } else {
-    target = await pickWorkspaceFile("Apply code — which file does this replace?");
-    if (!target) return;
+    picked = await pickWorkspaceFile("Apply code — which file does this replace?");
+    if (!picked) return;
   }
+  const target = picked;
   let before: string | null = null;
   try {
     before = new TextDecoder().decode(await vscode.workspace.fs.readFile(target));
@@ -585,7 +590,84 @@ async function applyCodeBlockFlow(block: CodeBlock): Promise<void> {
     );
     if (answer !== "Create") return;
   }
-  await applyToFile(target, block.code, { title: `${relativePath(target)} — reviewed change` });
+  await applyToFile(target, block.code, {
+    title: `${relativePath(target)} — reviewed change`,
+    onSnapshot: (snapshot) => recordCheckpoint(chat, checkpoints, target, snapshot, "Apply"),
+  });
+}
+
+/**
+ * The moment before a write: what the file was, kept as the chat's
+ * checkpoint, restorable from Restore Checkpoint.
+ */
+async function recordCheckpoint(
+  chat: ChatController,
+  store: CheckpointStore,
+  target: vscode.Uri,
+  before: string | null,
+  label: string,
+): Promise<void> {
+  const row = await store.record(chat.activeConversationId(), relativePath(target), before, label);
+  if (row === null) {
+    void vscode.window.showWarningMessage(
+      `${relativePath(target)} is too large to snapshot, so this change has no checkpoint. VS Code's own undo still applies.`,
+    );
+  }
+}
+
+/**
+ * The applied edits this chat can take back, newest first, each restored
+ * through the same reviewed diff an apply goes through. A checkpoint of a
+ * file that was new restores by removing the file, with its own confirm.
+ */
+async function restoreCheckpoint(chat: ChatController, store: CheckpointStore): Promise<void> {
+  const rows = await store.list(chat.activeConversationId());
+  if (rows.length === 0) {
+    void vscode.window.showInformationMessage(
+      "No checkpoints yet. One is taken each time Apply or an inline edit writes a file.",
+    );
+    return;
+  }
+  const picked = await vscode.window.showQuickPick(
+    rows.map((row) => ({
+      row,
+      label: row.path,
+      description: row.label,
+      detail:
+        row.content === null
+          ? `${new Date(row.createdAt).toLocaleString()} · the file was new`
+          : `${new Date(row.createdAt).toLocaleString()} · ${row.content.length.toLocaleString()} characters`,
+    })),
+    { title: "MatterWave checkpoints", placeHolder: "Pick a checkpoint to restore" },
+  );
+  if (!picked) return;
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (!folder) {
+    void vscode.window.showInformationMessage("Open a workspace to restore a file into.");
+    return;
+  }
+  const uri = vscode.Uri.joinPath(folder.uri, picked.row.path);
+  if (picked.row.content === null) {
+    const answer = await vscode.window.showInformationMessage(
+      `Remove ${picked.row.path}? It did not exist when this checkpoint was taken.`,
+      { modal: true },
+      "Remove",
+    );
+    if (answer !== "Remove") return;
+    await vscode.workspace.fs.delete(uri);
+    void vscode.window.showInformationMessage(`${picked.row.path} was removed, back to before the ${picked.row.label}.`);
+    return;
+  }
+  const answer = await vscode.window.showInformationMessage(
+    `Restore ${picked.row.path} to what it was before the ${picked.row.label}?`,
+    { modal: true, detail: "A diff opens before anything is written." },
+    "Restore",
+  );
+  if (answer !== "Restore") return;
+  await applyToFile(uri, picked.row.content, {
+    title: `${picked.row.path} — restored checkpoint`,
+    detail: "The file becomes exactly what the checkpoint kept.",
+  });
 }
 
 
