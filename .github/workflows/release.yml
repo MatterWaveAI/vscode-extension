@@ -1,0 +1,44 @@
+name: Release
+
+# A tag cut from a green main: the same gates CI runs, then a packaged
+# .vsix attached to a GitHub release. Nothing is published to the
+# Marketplace from here; that stays a manual step with the release asset.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The packageManager field pins the version; no `version:` needed here.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      # The tag must name the version it releases: v0.3.1 tags 0.3.1, nothing else.
+      - name: Check the tag against the manifest version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$version" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match package.json's ${version}" >&2
+            exit 1
+          fi
+      # The packaging gate: a manifest problem (a missing icon, a bad
+      # activation event) fails here rather than at the release.
+      - run: pnpm exec vsce package --no-dependencies --skip-license --allow-missing-repository --out "matterwave-${GITHUB_REF_NAME#v}.vsix"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: matterwave-*.vsix
+          generate_release_notes: true
