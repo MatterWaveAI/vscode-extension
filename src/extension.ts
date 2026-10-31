@@ -10,6 +10,7 @@ import type { HostMessage } from "./chat/protocol";
 import type { FolderRow, Library, TagRow } from "./api/types";
 import { ChatViewProvider } from "./chat/viewProvider";
 import { fitsContentCap, MAX_CONTENT_CHARS, imageAttachment, imageContentType, selectionContent } from "./context";
+import { keyDetail } from "./keys";
 import { conversationToMarkdown, safeFilename } from "./chat/export";
 import type { ApiKeyListing, ImportRecord } from "./api/types";
 import { pickerRows, resolvePick, type PickerRow } from "./models";
@@ -760,9 +761,10 @@ async function editOrgInstructions(client: MatterWaveClient): Promise<void> {
 /**
  * The keys the credential in this editor may see, one place to make one,
  * rotate one, or take one back -- looping like Manage Share Links, so
- * several keys can be seen to in a sitting. A key `key` rides in the create
- * and rotate answers and nowhere else, so it is copied to the clipboard and
- * named as gone the moment the dialog closes.
+ * several keys can be seen to in a sitting. Each row shows what the key may
+ * do (its scopes) and what remains of its life; a key `key` rides in the
+ * create and rotate answers and nowhere else, so it is copied to the
+ * clipboard and named as gone the moment the dialog closes.
  */
 async function manageApiKeys(client: MatterWaveClient): Promise<void> {
   for (;;) {
@@ -849,15 +851,6 @@ async function createKeyFlow(client: MatterWaveClient): Promise<void> {
       void vscode.window.showErrorMessage(`The key could not be created: ${describe(error)}`);
     }
   }
-}
-
-/** One line per key in the picker: made, last used, and what remains of its life. */
-function keyDetail(k: ApiKeyListing): string {
-  const pieces = [`created ${new Date(k.created_at).toLocaleDateString()}`];
-  if (k.last_used_at) pieces.push(`last used ${new Date(k.last_used_at).toLocaleDateString()}`);
-  else pieces.push("never used");
-  if (k.expires_at) pieces.push(`expires ${new Date(k.expires_at).toLocaleDateString()}`);
-  return pieces.join(" · ");
 }
 
 /** The one moment a key's value is ever shown: pause on it having been copied, then it is gone. */
