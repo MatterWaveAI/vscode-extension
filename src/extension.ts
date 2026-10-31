@@ -10,6 +10,8 @@ import type { HostMessage } from "./chat/protocol";
 import type { FolderRow, Library, TagRow } from "./api/types";
 import { ChatViewProvider } from "./chat/viewProvider";
 import { fitsContentCap, MAX_CONTENT_CHARS, imageAttachment, imageContentType, selectionContent } from "./context";
+import { applyToFile, registerApplyContentProvider } from "./apply";
+import type { CodeBlock } from "./chat/codeBlocks";
 import {
   docsContext,
   fetchDocText,
@@ -123,6 +125,9 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
     openLink: (url) => void vscode.env.openExternal(vscode.Uri.parse(url)),
     resolveMention: (mention) => resolveMention(mention),
     prompts: { get: (name) => prompts.get(name) },
+    applyCode: async ({ block }) => {
+      await applyCodeBlockFlow(block);
+    },
     onStatus: (status) => statusBar.update(status),
   });
   view.attach(chat);
@@ -132,6 +137,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
 
   context.subscriptions.push(
     statusBar,
+    registerApplyContentProvider(),
     vscode.window.registerWebviewViewProvider(ChatViewProvider.viewId, view, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
@@ -485,6 +491,44 @@ async function editPrompt(library: PromptLibrary, existing: PromptRow | null): P
       `The prompt could not be saved: the library holds at most 50 prompts of ${MAX_PROMPT_TEXT.toLocaleString()} characters each.`,
     );
   }
+}
+
+// --- applying code to a file -----------------------------------------------------
+
+/**
+ * The editor side of Apply: the file the block names, or one the person
+ * picks; a missing file is offered as a new one, and the write itself only
+ * happens through the reviewed diff in `applyToFile`. The extension never
+ * edits a file any other way.
+ */
+async function applyCodeBlockFlow(block: CodeBlock): Promise<void> {
+  let target: vscode.Uri | null = null;
+  if (block.filename) {
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    if (!folder) {
+      void vscode.window.showInformationMessage("Open a workspace to apply code to a file.");
+      return;
+    }
+    target = vscode.Uri.joinPath(folder.uri, block.filename);
+  } else {
+    target = await pickWorkspaceFile("Apply code — which file does this replace?");
+    if (!target) return;
+  }
+  let before: string | null = null;
+  try {
+    before = new TextDecoder().decode(await vscode.workspace.fs.readFile(target));
+  } catch {
+    before = null;
+  }
+  if (before === null) {
+    const answer = await vscode.window.showInformationMessage(
+      `${relativePath(target)} does not exist yet. Create it with this code?`,
+      { modal: true, detail: "A diff opens before anything is written." },
+      "Create",
+    );
+    if (answer !== "Create") return;
+  }
+  await applyToFile(target, block.code, { title: `${relativePath(target)} — reviewed change` });
 }
 
 

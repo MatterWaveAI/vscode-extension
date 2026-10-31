@@ -1117,6 +1117,46 @@ describe("slash commands", () => {
   });
 });
 
+describe("apply code to a file", () => {
+  const ANSWER = {
+    ...USER,
+    id: "a_code",
+    role: "assistant",
+    parts: [{ type: "text", text: "Use this:\n\n```python api/jobs.py\nprint(1)\n```\n" }],
+    content: "",
+  };
+
+  const answerRoutes = {
+    "GET /api/conversations/c_1": () => json({ ...CONVERSATION, messages: [USER, ANSWER] }),
+    "GET /api/conversations/c_1/tree": () => json({ ...CONVERSATION, messages: [USER, ANSWER] }),
+  };
+
+  it("hands the named block to the host's apply flow", async () => {
+    const applied: { messageId: string; block: unknown }[] = [];
+    const { controller, fromWebview } = await setup(answerRoutes);
+    controller["deps"].applyCode = async (request) => void applied.push(request);
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    await fromWebview({ type: "applyCodeBlock", messageId: "a_code", blockIndex: 0 });
+
+    expect(applied).toEqual([
+      { messageId: "a_code", block: { index: 0, language: "python", filename: "api/jobs.py", code: "print(1)" } },
+    ]);
+  });
+
+  it("says so rather than applying when the block is gone", async () => {
+    const applied: unknown[] = [];
+    const { controller, webview, fromWebview } = await setup(answerRoutes);
+    controller["deps"].applyCode = async (request) => void applied.push(request);
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    await fromWebview({ type: "applyCodeBlock", messageId: "a_code", blockIndex: 9 });
+
+    expect(applied).toEqual([]);
+    expect(lastState(webview.posted).notice).toContain("no longer in the conversation");
+  });
+});
+
 describe("notifications and usage", () => {
   it("loads the bell and the allowance with the rest of the state", async () => {
     const { controller, statuses } = await setup();

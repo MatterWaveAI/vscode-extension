@@ -112,6 +112,8 @@ button:disabled { opacity: .5; cursor: default; }
 .msg.user .body { background: var(--vscode-input-background); padding: 6px 8px; border-radius: 4px; white-space: pre-wrap; }
 .msg .body pre { background: var(--vscode-textCodeBlock-background); padding: 6px; overflow-x: auto; }
 .msg .body code { font-family: var(--vscode-editor-font-family); }
+.apply-wrap pre { margin-bottom: 0; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.apply-bar { display: flex; gap: 6px; padding: 1px 2px 6px; background: var(--vscode-textCodeBlock-background); border-bottom-left-radius: 4px; border-bottom-right-radius: 4px; margin-bottom: 6px; }
 .msg .actions { display: flex; gap: 4px; margin-top: 2px; }
 details { border-left: 2px solid var(--vscode-panel-border); padding-left: 6px; margin: 4px 0; }
 details summary { cursor: pointer; opacity: .8; }

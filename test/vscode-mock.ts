@@ -16,6 +16,10 @@ export class Uri {
   static joinPath(base: Uri, ...segments: string[]): Uri {
     return new Uri([base.path.replace(/\/+$/, ""), ...segments].join("/"));
   }
+  /** The scheme of the URI: what names the document's source. */
+  get scheme(): string {
+    return /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(this.path)?.[1] ?? "file";
+  }
   toString(): string {
     return this.path;
   }
@@ -33,13 +37,96 @@ export enum QuickPickItemKind {
 
 export const window = {
   createStatusBarItem: () => ({ text: "", tooltip: "", command: "", show() {}, dispose() {} }),
+  /** Answers a test queues; a dialog with none queued answers undefined. */
+  informationAnswers: [] as unknown[],
+  shown: [] as { kind: string; message: string; options: unknown }[],
+  showInformationMessage(message: string, ...rest: unknown[]): Promise<unknown> {
+    this.shown.push({ kind: "information", message, options: rest });
+    return Promise.resolve(this.informationAnswers.shift());
+  },
+  showWarningMessage(message: string, ...rest: unknown[]): Promise<unknown> {
+    this.shown.push({ kind: "warning", message, options: rest });
+    return Promise.resolve(this.informationAnswers.shift());
+  },
+  showErrorMessage(message: string, ...rest: unknown[]): Promise<unknown> {
+    this.shown.push({ kind: "error", message, options: rest });
+    return Promise.resolve(this.informationAnswers.shift());
+  },
+  showInputBox: () => Promise.resolve(undefined),
+  showQuickPick: () => Promise.resolve(undefined),
+  showOpenDialog: () => Promise.resolve(undefined),
+  showSaveDialog: () => Promise.resolve(undefined),
+  /** Documents a test opened through the apply path's lint hook. */
+  shownDocuments: [] as unknown[],
+  showTextDocument(document: unknown, options?: unknown): Promise<unknown> {
+    void options;
+    this.shownDocuments.push(document);
+    return Promise.resolve(document);
+  },
+  terminals: [] as unknown[],
 };
 
 export const commands = {
   executed: [] as string[],
-  executeCommand(id: string): Promise<void> {
+  /** The arguments of each executeCommand, parallel to `executed`. */
+  commandArgs: [] as unknown[][],
+  executeCommand(id: string, ...rest: unknown[]): Promise<void> {
     commands.executed.push(id);
+    commands.commandArgs.push(rest);
     return Promise.resolve();
+  },
+};
+
+/**
+ * An in-memory workspace: a folder list, a file map standing in for
+ * `workspace.fs`, and the content providers registered on it. Only what a
+ * test needs is modelled; the rest throws by being undefined.
+ */
+export const workspace = {
+  workspaceFolders: [] as { uri: Uri; name: string; index: number }[],
+  files: new Map<string, Uint8Array>(),
+  contentProviders: {} as Record<string, unknown>,
+  registerTextDocumentContentProvider(scheme: string, provider: unknown): { dispose(): void } {
+    workspace.contentProviders[scheme] = provider;
+    return { dispose() {} };
+  },
+  asRelativePath(uri: Uri): string {
+    const value = uri.toString();
+    for (const folder of workspace.workspaceFolders) {
+      const base = folder.uri.toString().replace(/\/+$/, "");
+      if (value.startsWith(`${base}/`)) return value.slice(base.length + 1);
+    }
+    return value.replace(/^file:\/\//, "").replace(/^\//, "");
+  },
+  openTextDocument(uri: Uri): Promise<{ uri: Uri }> {
+    if (!workspace.files.has(uri.toString())) return Promise.reject(new Error(`no document ${uri.toString()}`));
+    return Promise.resolve({ uri });
+  },
+  fs: {
+    async readFile(uri: Uri): Promise<Uint8Array> {
+      const bytes = workspace.files.get(uri.toString());
+      if (!bytes) throw new Error(`file not found: ${uri.toString()}`);
+      return bytes;
+    },
+    async writeFile(uri: Uri, content: Uint8Array): Promise<void> {
+      workspace.files.set(uri.toString(), new Uint8Array(content));
+    },
+    async createDirectory(uri: Uri): Promise<void> {
+      void uri;
+      return undefined;
+    },
+    async readDirectory(uri: Uri): Promise<[string, number][]> {
+      const base = uri.toString().replace(/\/+$/, "");
+      const found = new Map<string, number>();
+      for (const path of workspace.files.keys()) {
+        if (!path.startsWith(`${base}/`)) continue;
+        const rest = path.slice(base.length + 1);
+        const slash = rest.indexOf("/");
+        if (slash < 0) found.set(rest, 0);
+        else found.set(rest.slice(0, slash), 2);
+      }
+      return Array.from(found, ([name, type]) => [name, type] as [string, number]);
+    },
   },
 };
 

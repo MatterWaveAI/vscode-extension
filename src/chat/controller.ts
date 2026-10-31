@@ -2,7 +2,7 @@ import type { ConversationFrame } from "../lib/matterwaveClient";
 import type { MatterWaveClient } from "../api/client";
 import { ApiError } from "../api/errors";
 import { isUntrustedCertificate } from "../api/transport";
-import type { Conversation, ConversationInstructions, FeedbackReason, Library, Message, ModelInfo, NotificationRow, UsageReport } from "../api/types";
+import type { Conversation, ConversationInstructions, FeedbackReason, Library, Message, ModelInfo, NotificationRow, Part, UsageReport } from "../api/types";
 import { fileAttachment } from "../context";
 import { classifyNotificationLink } from "../links";
 import { parseMentions, type Mention } from "./mentions";
@@ -12,6 +12,7 @@ import { classifyStreamError, STREAM_ERROR_COPY, type StreamErrorKind } from "..
 import { appendDelta, deltaText, emptyAssistant, partFromStart, setPart } from "./assemble";
 import { switchTarget, transcriptOf } from "./branches";
 import { imageDataUri, MAX_IMAGE_BYTES, renderableImageType } from "./images";
+import { codeBlockAt, type CodeBlock } from "./codeBlocks";
 import type {
   ConversationSummary,
   ErrorView,
@@ -67,6 +68,12 @@ export interface ChatDeps {
   resolveMention?: (mention: Mention) => Promise<ResolvedContext | null>;
   /** The prompt library a `/name` expands to, when this editor keeps one. */
   prompts?: { get(name: string): Promise<string | null> };
+  /**
+   * Apply one code block to its file through a reviewed diff (the editor
+   * side of the webview's Apply button). The controller hands over the
+   * block as the answer carries it; the editor asks what is unknown.
+   */
+  applyCode?: (request: { messageId: string; block: CodeBlock }) => Promise<void> | void;
   onStatus?: (status: StatusInfo) => void;
 }
 
@@ -198,6 +205,8 @@ export class ChatController {
         return this.setNotificationsUnreadOnly(message.on);
       case "openNotification":
         return this.openNotificationLink(message.url);
+      case "applyCodeBlock":
+        return this.applyCodeBlock(message.messageId, message.blockIndex);
       case "switchBranch":
         return this.switchBranch(message.messageId, message.step);
       case "continue":
@@ -348,6 +357,22 @@ export class ChatController {
    * opens right here in the chat, everything else http(s) goes to the
    * browser, and anything else is refused without a window.
    */
+  /**
+   * The editor side of Apply: find the block in the message the webview
+   * pointed at and hand it to the host's apply flow. A message or block
+   * that is gone says so rather than applying the wrong code.
+   */
+  private async applyCodeBlock(messageId: string, blockIndex: number): Promise<void> {
+    const message = this.path.find((m) => m.id === messageId);
+    const block = message ? codeBlockAt(messageText(message), blockIndex) : null;
+    if (!message || !block || !block.code.trim()) {
+      this.notice = "That code block is no longer in the conversation, so it was not applied.";
+      this.emit();
+      return;
+    }
+    await this.deps.applyCode?.({ messageId, block });
+  }
+
   private openNotificationLink(url: string): void {
     const target = classifyNotificationLink(url, this.deps.client.baseUrl);
     if (!target) return;
@@ -1258,6 +1283,15 @@ function notificationView(n: NotificationRow): NotificationView {
     createdAt: n.created_at,
     read: n.read_at !== null,
   };
+}
+
+/** A message's own words: its text parts, or its content when it carries none. */
+function messageText(m: Message): string {
+  const parts = m.parts
+    .filter((p): p is Extract<Part, { type: "text" }> => p.type === "text")
+    .map((p) => p.text)
+    .join("\n");
+  return parts || m.content || "";
 }
 
 /** The usage report as the line reads it: the three states folded into one. */
