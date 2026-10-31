@@ -64,7 +64,10 @@ function routes(over: Record<string, (call: Call) => Response> = {}) {
   };
 }
 
-async function setup(over: Parameters<typeof routes>[0] = {}, extra: { resolveMention?: (mention: unknown) => Promise<unknown> } = {}) {
+async function setup(
+  over: Parameters<typeof routes>[0] = {},
+  extra: { resolveMention?: (mention: unknown) => Promise<unknown>; prompts?: { get(name: string): Promise<string | null> } } = {},
+) {
   const secrets = new MemorySecrets();
   const tokens = new TokenStore(secrets as unknown as vscode.SecretStorage, () => "https://mw.test");
   await tokens.set(TOKEN);
@@ -87,14 +90,16 @@ async function setup(over: Parameters<typeof routes>[0] = {}, extra: { resolveMe
   const provider = new ChatViewProvider(vscode.Uri.file("/ext"));
   const statuses: StatusInfo[] = [];
   const openLink = vi.fn();
+  const runCommands: string[] = [];
   const controller = new ChatController({
     client,
     post: (message) => provider.post(message),
     isSignedIn: async () => (await tokens.get()) !== null,
     rememberedModel: { get: () => null, set: () => undefined },
-    runCommand: () => undefined,
+    runCommand: (command) => void runCommands.push(command),
     openLink,
     resolveMention: extra.resolveMention as never,
+    prompts: extra.prompts,
     onStatus: (s) => void statuses.push(s),
   });
   provider.attach(controller);
@@ -110,7 +115,7 @@ async function setup(over: Parameters<typeof routes>[0] = {}, extra: { resolveMe
     webview.receive(message);
     await handled.mock.results[before]?.value;
   };
-  return { controller, provider, webview, calls: fake.calls, fromWebview, statuses, network, openLink };
+  return { controller, provider, webview, calls: fake.calls, fromWebview, statuses, network, openLink, runCommands };
 }
 
 function lastState(posted: unknown[]): ViewState {
@@ -1047,6 +1052,68 @@ describe("switching conversations mid-stream", () => {
     expect(state.live).toBeNull();
     expect(state.streaming).toBe(false);
     expect(state.notice).toBeNull();
+  });
+});
+
+describe("slash commands", () => {
+  it("runs the built-ins instead of sending a message", async () => {
+    const { controller, calls, runCommands } = await setup({
+      "POST /api/conversations/c_1/compact": () => json(USER, 200),
+    });
+    await controller.refresh();
+    await controller.openConversation("c_1");
+
+    await controller.send("/model");
+    expect(runCommands).toContain("pickModel");
+
+    await controller.send("/compact");
+    expect(calls.some((c) => c.method === "POST" && c.url === "/api/conversations/c_1/compact")).toBe(true);
+
+    await controller.send("/share");
+    await controller.send("/export");
+    expect(runCommands).toContain("shareConversation");
+    expect(runCommands).toContain("exportConversation");
+
+    expect(calls.some((c) => c.url === "/api/conversations/c_1/messages")).toBe(false);
+  });
+
+  it("clears the conversation with /clear", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    expect(controller.hasConversation()).toBe(true);
+    await controller.send("/clear");
+    expect(controller.hasConversation()).toBe(false);
+    expect(controller.snapshot().transcript).toEqual([]);
+  });
+
+  it("expands a saved prompt, appending arguments on a new line", async () => {
+    const { controller, calls } = await setup(
+      {},
+      { prompts: { get: async (name) => (name === "review" ? "Review this diff for safety." : null) } },
+    );
+    await controller.refresh();
+    await controller.send("/review focus on auth");
+
+    const send = calls.find((c) => c.url === "/api/conversations/c_1/messages");
+    expect(JSON.parse(String(send?.body)).content).toBe("Review this diff for safety.\n\nfocus on auth");
+  });
+
+  it("says so when no prompt by that name is saved, and sends nothing", async () => {
+    const { controller, calls, webview } = await setup({}, { prompts: { get: async () => null } });
+    await controller.refresh();
+    await controller.send("/nosuch");
+
+    expect(calls.some((c) => c.url === "/api/conversations/c_1/messages")).toBe(false);
+    expect(lastState(webview.posted).notice).toContain("No prompt named “/nosuch”");
+  });
+
+  it("lets //esc carry a literal slash command as the message", async () => {
+    const { controller, calls } = await setup();
+    await controller.refresh();
+    await controller.send("//clear");
+    const send = calls.find((c) => c.url === "/api/conversations/c_1/messages");
+    expect(JSON.parse(String(send?.body)).content).toBe("/clear");
   });
 });
 

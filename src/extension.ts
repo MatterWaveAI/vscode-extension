@@ -27,6 +27,7 @@ import type { ApiKeyListing, ImportRecord } from "./api/types";
 import { pickerRows, resolvePick, type PickerRow } from "./models";
 import { DEFAULT_BASE_URL, normalizeServerUrl, serverUrlProblem, shouldPromptForServer } from "./settings";
 import { StatusBar } from "./statusBar";
+import { normalizePromptName, PromptLibrary, MAX_PROMPT_TEXT, type PromptRow } from "./promptLibrary";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -86,6 +87,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
   const tokens = new TokenStore(context.secrets, baseUrl);
   const statusBar = new StatusBar();
   const view = new ChatViewProvider(context.extensionUri);
+  const prompts = new PromptLibrary(context.globalState);
   const taps = new Set<(message: HostMessage) => void>();
 
   // The client reports request ids and reachability to the controller,
@@ -120,6 +122,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
     // this deployment; only http(s) URLs the classifier accepted get here.
     openLink: (url) => void vscode.env.openExternal(vscode.Uri.parse(url)),
     resolveMention: (mention) => resolveMention(mention),
+    prompts: { get: (name) => prompts.get(name) },
     onStatus: (status) => statusBar.update(status),
   });
   view.attach(chat);
@@ -225,6 +228,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
   command("matterwave.customInstructions", () => editCustomInstructions(client));
   command("matterwave.manageApiKeys", () => manageApiKeys(client));
   command("matterwave.switchAccount", () => switchAccount(tokens));
+  command("matterwave.promptLibrary", () => managePrompts(prompts));
   command("matterwave.importHistory", async () => {
     await view.reveal();
     await importHistory(client, chat);
@@ -387,6 +391,102 @@ async function askAboutFile(chat: ChatController, view: ChatViewProvider): Promi
 }
 
 type PickItem = vscode.QuickPickItem & { row: PickerRow };
+
+// --- prompt library -----------------------------------------------------------
+
+/**
+ * The named texts `/name` expands to in the composer: create one, edit one,
+ * or take one back, looping like Manage Share Links so several can be seen
+ * to in a sitting. The library is this editor's own -- global state, not
+ * the platform -- and `/name` in a chat sends the saved text as the message.
+ */
+async function managePrompts(library: PromptLibrary): Promise<void> {
+  for (;;) {
+    const rows = await library.list();
+    const picked = await vscode.window.showQuickPick(
+      [
+        {
+          fresh: true,
+          row: null as PromptRow | null,
+          label: "$(plus) Create a prompt…",
+          description: "",
+          detail: "A named text that /name sends as a message from the chat composer",
+        },
+        ...rows.map((row) => ({
+          fresh: false,
+          row: row as PromptRow | null,
+          label: `/${row.name}`,
+          description: `${row.text.length.toLocaleString()} characters`,
+          detail: row.text.split("\n")[0],
+        })),
+      ],
+      { title: "MatterWave prompt library", placeHolder: "Create a prompt, or pick one to edit or delete" },
+    );
+    if (!picked) return;
+    if (picked.fresh) {
+      await editPrompt(library, null);
+      continue;
+    }
+    const action = await vscode.window.showQuickPick(
+      [
+        { id: "edit", label: "Edit", detail: `Change what /${picked.row?.name} sends` },
+        { id: "delete", label: "Delete", detail: "Remove it from the library" },
+      ],
+      { title: `/${picked.row?.name}`, placeHolder: "What to do with this prompt" },
+    );
+    if (action?.id === "edit") {
+      await editPrompt(library, picked.row);
+    } else if (action?.id === "delete") {
+      const answer = await vscode.window.showInformationMessage(
+        `Delete the prompt “/${picked.row?.name}”? Nothing else holds it.`,
+        { modal: true },
+        "Delete",
+      );
+      if (answer === "Delete") {
+        await library.remove(picked.row?.name ?? "");
+        void vscode.window.showInformationMessage(`The prompt “/${picked.row?.name}” was deleted.`);
+      }
+    }
+  }
+}
+
+/** Name and text for one prompt, new or edited; a renamed edit saves a new row. */
+async function editPrompt(library: PromptLibrary, existing: PromptRow | null): Promise<void> {
+  const name = await vscode.window.showInputBox({
+    title: existing ? "Rename prompt" : "New prompt",
+    prompt: "What the composer types: /name sends this prompt's text as a message.",
+    value: existing ? `/${existing.name}` : "/",
+    ignoreFocusOut: true,
+    validateInput: (value) => {
+      const normalized = normalizePromptName(value);
+      if (!/^[a-z0-9_-]{1,40}$/.test(normalized)) return "Letters, digits, - and _ (at most 40).";
+      return null;
+    },
+  });
+  if (name === undefined) return;
+  const normalized = normalizePromptName(name);
+  const text = await vscode.window.showInputBox({
+    title: `Text of /${normalized}`,
+    prompt: "Sent as the message when /name is typed. Arguments after /name are appended on a new line.",
+    value: existing?.text,
+    ignoreFocusOut: true,
+    validateInput: (value) =>
+      value.trim().length === 0
+        ? "The prompt needs some text."
+        : value.length > MAX_PROMPT_TEXT
+          ? `At most ${MAX_PROMPT_TEXT.toLocaleString()} characters (now ${value.length.toLocaleString()}).`
+          : null,
+  });
+  if (text === undefined) return;
+  if (await library.save(normalized, text)) {
+    void vscode.window.showInformationMessage(`Saved. Type /${normalized} in the composer to send it.`);
+  } else {
+    void vscode.window.showWarningMessage(
+      `The prompt could not be saved: the library holds at most 50 prompts of ${MAX_PROMPT_TEXT.toLocaleString()} characters each.`,
+    );
+  }
+}
+
 
 // --- @-mention context providers -------------------------------------------------
 

@@ -145,6 +145,11 @@
         "category": "MatterWave"
       },
       {
+        "command": "matterwave.promptLibrary",
+        "title": "Prompt Library",
+        "category": "MatterWave"
+      },
+      {
         "command": "matterwave.importHistory",
         "title": "Import ChatGPT or Claude History",
         "category": "MatterWave"

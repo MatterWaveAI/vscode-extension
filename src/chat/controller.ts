@@ -6,6 +6,7 @@ import type { Conversation, ConversationInstructions, FeedbackReason, Library, M
 import { fileAttachment } from "../context";
 import { classifyNotificationLink } from "../links";
 import { parseMentions, type Mention } from "./mentions";
+import { parseSlashCommand, type SlashCommand } from "./slash";
 import { initialModel } from "../models";
 import { classifyStreamError, STREAM_ERROR_COPY, type StreamErrorKind } from "../streamErrors";
 import { appendDelta, deltaText, emptyAssistant, partFromStart, setPart } from "./assemble";
@@ -64,6 +65,8 @@ export interface ChatDeps {
    * written expecting the context it names.
    */
   resolveMention?: (mention: Mention) => Promise<ResolvedContext | null>;
+  /** The prompt library a `/name` expands to, when this editor keeps one. */
+  prompts?: { get(name: string): Promise<string | null> };
   onStatus?: (status: StatusInfo) => void;
 }
 
@@ -653,8 +656,19 @@ export class ChatController {
 
   // --- turns -----------------------------------------------------------------
 
+  /**
+   * The composer's send: `//` escapes, a leading `/name` runs a built-in or
+   * expands a saved prompt, `@kind` mentions attach their context, and what
+   * is left goes out as the turn.
+   */
   async send(content: string, attachmentIds: string[] = [], temporary = false): Promise<void> {
     if (this.abort) return;
+    if (attachmentIds.length === 0) {
+      // A leading // is the literal slash: "/clear" as text, not a command.
+      if (content.startsWith("//")) return this.sendCore(content.slice(1), attachmentIds, temporary);
+      const slash = parseSlashCommand(content);
+      if (slash) return this.handleSlash(slash);
+    }
     const id = await this.ensureConversation(temporary);
     if (!id) {
       // The composer has already let the text go; when the conversation
@@ -671,7 +685,47 @@ export class ChatController {
       if (resolved === null) return;
       mentionIds = resolved;
     }
-    const ids = [...attachmentIds, ...mentionIds];
+    return this.sendCore(content, [...attachmentIds, ...mentionIds], temporary, id);
+  }
+
+  /** Run a built-in, or expand a library prompt into the turn it names. */
+  private async handleSlash(slash: SlashCommand): Promise<void> {
+    if (slash.kind === "built-in") {
+      switch (slash.command) {
+        case "model":
+          this.deps.runCommand("pickModel");
+          return;
+        case "clear":
+          return this.newChat();
+        case "compact":
+          return this.compact();
+        case "share":
+          this.deps.runCommand("shareConversation");
+          return;
+        case "export":
+          this.deps.runCommand("exportConversation");
+          return;
+      }
+    }
+    const text = (await this.deps.prompts?.get(slash.name)) ?? null;
+    if (text === null) {
+      this.notice = `No prompt named “/${slash.name}”. Save one with MatterWave: Prompt Library.`;
+      this.emit();
+      return;
+    }
+    await this.ensureConversation();
+    return this.sendCore(slash.args ? `${text}\n\n${slash.args}` : text, [], false);
+  }
+
+  private async sendCore(content: string, attachmentIds: string[], temporary: boolean, knownId?: string): Promise<void> {
+    if (this.abort) return;
+    const id = knownId ?? (await this.ensureConversation(temporary));
+    if (!id) {
+      // The composer has already let the text go; when the conversation
+      // could not be made, Retry is the one place it is still held.
+      if (this.error) this.failed = { content, attachmentIds, userMessageId: null, temporary };
+      return;
+    }
     const parent = this.path[this.path.length - 1] ?? null;
     const optimistic: Message = {
       ...emptyAssistant(id, parent?.id ?? null),
@@ -680,8 +734,8 @@ export class ChatController {
       content,
     };
     this.path = [...this.path, optimistic];
-    const body = { content, ...(this.model ? { model: this.model.id } : {}), ...(ids.length ? { attachment_ids: ids } : {}) };
-    await this.runTurn(id, (signal) => this.deps.client.sendMessage(id, body, signal), { content, attachmentIds: ids, userMessageId: null, temporary });
+    const body = { content, ...(this.model ? { model: this.model.id } : {}), ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}) };
+    await this.runTurn(id, (signal) => this.deps.client.sendMessage(id, body, signal), { content, attachmentIds, userMessageId: null, temporary });
   }
 
   /**
