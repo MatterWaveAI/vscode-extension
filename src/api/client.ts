@@ -37,6 +37,8 @@ import type {
   NotificationListing,
   NotificationRow,
   OrgInstructions,
+  Preset,
+  PresetListing,
   SearchHit,
   SendBody,
   ShareRow,
@@ -150,6 +152,16 @@ export class MatterWaveClient {
 
   models(): Promise<ModelList> {
     return this.json("GET", "/api/models");
+  }
+
+  /** `GET /api/org/presets`: the org's live presets, the tools a preset may name, and the limits. */
+  presets(): Promise<PresetListing> {
+    return this.call(({ reads }) => reads.presets.list());
+  }
+
+  /** `GET /api/org/presets/{id}`: one preset by id, including a deleted one (`deleted_at` set). */
+  preset(id: string): Promise<Preset> {
+    return this.call(({ reads }) => reads.presets.get(id));
   }
 
   // --- device login (no bearer yet, by definition) ------------------------
@@ -322,16 +334,22 @@ export class MatterWaveClient {
    * rides only when the chat is temporary: off, it is omitted entirely, so
    * the server's default (a kept conversation) governs.
    */
-  createConversation(body: { title?: string; model?: string; temporary?: boolean } = {}): Promise<Conversation> {
-    const params: { title?: string; model?: string; temporary?: boolean } = {};
+  createConversation(
+    body: { title?: string; model?: string; temporary?: boolean; preset_id?: string | null } = {},
+  ): Promise<Conversation> {
+    const params: { title?: string; model?: string; temporary?: boolean; preset_id?: string | null } = {};
     if (body.title !== undefined) params.title = body.title;
     if (body.model !== undefined) params.model = body.model;
     if (body.temporary === true) params.temporary = true;
+    if (body.preset_id !== undefined) params.preset_id = body.preset_id;
     return this.call(({ writes }) => writes.conversations.create(params));
   }
 
-  /** Rename, or set (or clear) the model the conversation's turns default to. */
-  updateConversation(id: string, params: { title?: string; default_model?: string | null }): Promise<Conversation> {
+  /** Rename, set (or clear) the model, or set (or clear) the preset for the conversation. */
+  updateConversation(
+    id: string,
+    params: { title?: string; default_model?: string | null; preset_id?: string | null },
+  ): Promise<Conversation> {
     return this.call(({ reads }) => reads.conversations.update(id, params));
   }
 

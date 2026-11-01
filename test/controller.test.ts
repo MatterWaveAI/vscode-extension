@@ -61,6 +61,7 @@ function routes(over: Record<string, (call: Call) => Response> = {}) {
     "POST /api/me/notifications/read-all": () => json({ read: 1 }),
     "GET /api/me/usage": () => json(USAGE),
     "GET /api/library": () => json({ folders: [], tags: [], assignments: {} }),
+    "GET /api/org/presets": () => json({ data: [] }),
     ...over,
   };
 }
@@ -1817,6 +1818,165 @@ describe("notification pagination and the unread filter", () => {
     expect(calls.at(-1)?.url).toBe("/api/me/notifications?unread=1&limit=30");
     expect(controller.snapshot().notifications).toHaveLength(0);
     expect(controller.snapshot().unreadNotifications).toBe(0);
+  });
+});
+
+describe("presets", () => {
+  const PRESET_REVIEW = {
+    id: "preset_review",
+    name: "Code Review",
+    description: "Careful diff review.",
+    model: "grt-large",
+    system_prompt: "Check edge cases.",
+    temperature: 0.2,
+    tools: [],
+    knowledge_source_ids: [],
+    welcome_message: "Paste a diff or name a file to review.",
+    limits: {},
+    created_at: "2026-10-18T10:00:00+00:00",
+    updated_at: "2026-10-18T10:00:00+00:00",
+  };
+
+  it("picks and clears a preset on an open conversation, fixes the model, and exposes the welcome message", async () => {
+    let activePresetId: string | null = null;
+    const { controller, calls, fromWebview, runCommands } = await setup({
+      "GET /api/org/presets": () => json({ data: [PRESET_REVIEW] }),
+      "GET /api/conversations": () => json({ data: [{ ...CONVERSATION, default_model: "grt-small" }], filter: "default" }),
+      "GET /api/conversations/c_1": () =>
+        json({
+          ...CONVERSATION,
+          default_model: "grt-small",
+          preset_id: activePresetId,
+          preset: activePresetId ? { id: PRESET_REVIEW.id, name: PRESET_REVIEW.name } : null,
+          messages: [],
+        }),
+      "GET /api/conversations/c_1/tree": () =>
+        json({
+          ...CONVERSATION,
+          default_model: "grt-small",
+          preset_id: activePresetId,
+          preset: activePresetId ? { id: PRESET_REVIEW.id, name: PRESET_REVIEW.name } : null,
+          messages: [],
+        }),
+      "PATCH /api/conversations/c_1": (call) => {
+        const body = JSON.parse(String(call.body));
+        if ("preset_id" in body) activePresetId = body.preset_id;
+        return json({
+          ...CONVERSATION,
+          default_model: "grt-small",
+          preset_id: activePresetId,
+          preset: activePresetId ? { id: PRESET_REVIEW.id, name: PRESET_REVIEW.name } : null,
+        });
+      },
+    });
+    await fromWebview({ type: "ready" });
+    await fromWebview({ type: "openConversation", id: "c_1" });
+    expect(controller.snapshot().hasPresets).toBe(true);
+    expect(controller.snapshot().preset).toBeNull();
+    expect(controller.snapshot().model?.id).toBe("grt-small");
+
+    await fromWebview({ type: "pickPreset" });
+    expect(runCommands).toContain("choosePreset");
+
+    await controller.setPreset("preset_review");
+    const patchPick = calls.find((c) => c.method === "PATCH" && c.url === "/api/conversations/c_1");
+    expect(JSON.parse(String(patchPick?.body))).toEqual({ preset_id: "preset_review" });
+    expect(controller.snapshot().preset).toEqual({
+      id: "preset_review",
+      name: "Code Review",
+      welcomeMessage: "Paste a diff or name a file to review.",
+    });
+    expect(controller.snapshot().model?.id).toBe("grt-large");
+
+    // Attempting to change the model while a preset is active is refused with a one-line notice.
+    const smallModel = MODELS.data.find((m) => m.id === "grt-small") as ModelInfo;
+    controller.setModel(smallModel);
+    expect(controller.snapshot().model?.id).toBe("grt-large");
+    expect(controller.snapshot().notice).toBe("Model is fixed to GRT Large by the Code Review preset; choose No preset to change it.");
+
+    // Clearing back to "No preset" sends preset_id: null and restores the conversation's own model.
+    await controller.setPreset(null);
+    const patches = calls.filter((c) => c.method === "PATCH" && c.url === "/api/conversations/c_1");
+    expect(JSON.parse(String(patches.at(-1)?.body))).toEqual({ preset_id: null });
+    expect(controller.snapshot().preset).toBeNull();
+    expect(controller.snapshot().model?.id).toBe("grt-small");
+  });
+
+  it("passes preset_id on POST /api/conversations when picked before the first message", async () => {
+    const { controller, calls, fromWebview } = await setup({
+      "GET /api/org/presets": () => json({ data: [PRESET_REVIEW] }),
+      "POST /api/conversations": () =>
+        json(
+          {
+            ...CONVERSATION,
+            preset_id: "preset_review",
+            preset: { id: "preset_review", name: "Code Review" },
+          },
+          201,
+        ),
+    });
+    await fromWebview({ type: "ready" });
+    await controller.setPreset("preset_review");
+    expect(controller.snapshot().preset).toEqual({
+      id: "preset_review",
+      name: "Code Review",
+      welcomeMessage: "Paste a diff or name a file to review.",
+    });
+    expect(controller.snapshot().model?.id).toBe("grt-large");
+
+    await fromWebview({ type: "send", content: "Review this." });
+    const createCall = calls.find((c) => c.method === "POST" && c.url === "/api/conversations");
+    expect(JSON.parse(String(createCall?.body))).toEqual({ model: "grt-small", preset_id: "preset_review" });
+  });
+
+  it("names a deleted preset on a conversation that uses it and never offers it to a new conversation", async () => {
+    const retired = {
+      ...PRESET_REVIEW,
+      id: "preset_retired",
+      name: "Retired Reviewer",
+      welcome_message: "Legacy welcome.",
+    };
+    const { controller, calls, fromWebview } = await setup({
+      "GET /api/org/presets": () => json({ data: [] }),
+      "GET /api/org/presets/preset_retired": () => json(retired),
+      "GET /api/conversations": () =>
+        json({
+          data: [{ ...CONVERSATION, preset_id: "preset_retired", preset: { id: "preset_retired", name: "Retired Reviewer" } }],
+          filter: "default",
+        }),
+      "GET /api/conversations/c_1": () =>
+        json({
+          ...CONVERSATION,
+          preset_id: "preset_retired",
+          preset: { id: "preset_retired", name: "Retired Reviewer" },
+          messages: [],
+        }),
+      "GET /api/conversations/c_1/tree": () =>
+        json({
+          ...CONVERSATION,
+          preset_id: "preset_retired",
+          preset: { id: "preset_retired", name: "Retired Reviewer" },
+          messages: [],
+        }),
+    });
+    await fromWebview({ type: "ready" });
+    expect(controller.snapshot().hasPresets).toBe(false);
+    expect(controller.snapshot().preset).toBeNull();
+
+    await fromWebview({ type: "openConversation", id: "c_1" });
+    expect(calls.some((c) => c.method === "GET" && c.url === "/api/org/presets/preset_retired")).toBe(true);
+    expect(controller.snapshot().preset).toEqual({
+      id: "preset_retired",
+      name: "Retired Reviewer",
+      welcomeMessage: "Legacy welcome.",
+    });
+    expect(controller.snapshot().model?.id).toBe("grt-large");
+
+    // Starting a new chat clears the retired preset and never offers it in availablePresets().
+    controller.newChat();
+    expect(controller.snapshot().preset).toBeNull();
+    expect(controller.availablePresets()).toEqual([]);
+    expect(controller.retiredConversationPreset()).toBeNull();
   });
 });
 

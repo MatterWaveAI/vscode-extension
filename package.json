@@ -175,6 +175,11 @@
         "category": "%command.category%"
       },
       {
+        "command": "matterwave.choosePreset",
+        "title": "%command.choosePreset.title%",
+        "category": "%command.category%"
+      },
+      {
         "command": "matterwave.compactNow",
         "title": "%command.compactNow.title%",
         "category": "%command.category%"

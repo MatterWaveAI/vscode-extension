@@ -64,6 +64,7 @@ describe("activation", () => {
   it("has a command to open the chat and one to show the request log", () => {
     activate(contextIn(ExtensionMode.Production));
     expect(commands.registered.has("matterwave.openChat")).toBe(true);
+    expect(commands.registered.has("matterwave.choosePreset")).toBe(true);
     expect(commands.registered.has("matterwave.showLog")).toBe(true);
     expect(window.channels.at(-1)?.name).toBe("MatterWave");
   });

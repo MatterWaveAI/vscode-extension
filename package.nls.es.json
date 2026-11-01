@@ -25,6 +25,7 @@
   "command.fixTerminalCommand.title": "Corregir el último comando del terminal",
   "command.generateCommitMessage.title": "Generar mensaje de commit",
   "command.pickModel.title": "Elegir modelo",
+  "command.choosePreset.title": "Elegir preajuste",
   "command.compactNow.title": "Compactar la conversación ahora",
   "command.copyRequestId.title": "Copiar el ID de la última solicitud",
   "command.exportConversation.title": "Exportar la conversación como Markdown",

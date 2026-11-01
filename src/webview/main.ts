@@ -357,10 +357,23 @@ function renderConnector(s: ViewState): void {
 
 function renderHeader(s: ViewState): void {
   const buttons = [
-    button(s.model?.label ?? "Pick model", () => send({ type: "pickModel" }), { className: "link", title: "Pick model" }),
+    button(s.model?.label ?? "Pick model", () => send({ type: "pickModel" }), {
+      className: "link",
+      title: s.preset ? `Set by the ${s.preset.name} preset` : "Pick model",
+    }),
+  ];
+  if (s.hasPresets || s.preset !== null) {
+    buttons.push(
+      button(s.preset ? s.preset.name : "No preset", () => send({ type: "pickPreset" }), {
+        className: "link preset",
+        title: "Choose preset",
+      }),
+    );
+  }
+  buttons.push(
     button("+", () => send({ type: "newChat" }), { className: "link", title: "New chat" }),
     button("Export", () => send({ type: "exportConversation" }), { className: "link", disabled: !s.activeId, title: "Save this conversation as Markdown" }),
-  ];
+  );
   // A temporary conversation cannot be shared: the button has nothing to do.
   if (!s.temporary) {
     buttons.push(button("Share", () => send({ type: "shareConversation" }), { className: "link", disabled: !s.activeId, title: "Copy a read-only link to this conversation" }));
@@ -646,7 +659,15 @@ function renderTranscript(s: ViewState): void {  const nearBottom = transcript.s
   const nodes: Node[] = [];
   s.transcript.forEach((entry, i) => nodes.push(renderEntry(entry, i === s.transcript.length - 1 && !s.live, s.streaming)));
   if (s.live) nodes.push(renderLive(s.live));
-  if (nodes.length === 0) nodes.push(el("p", { text: "Ask about your code, a selection, or a file. Your conversations are the same ones the web app shows." }));
+  if (nodes.length === 0) {
+    const welcome = s.preset?.welcomeMessage?.trim();
+    nodes.push(
+      el("p", {
+        className: welcome ? "welcome" : undefined,
+        text: welcome || "Ask about your code, a selection, or a file. Your conversations are the same ones the web app shows.",
+      }),
+    );
+  }
   transcript.replaceChildren(...nodes);
   if (nearBottom) transcript.scrollTop = transcript.scrollHeight;
 }

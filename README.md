@@ -89,7 +89,7 @@ changes no file and runs no git until you trust it.
 | Edit Selection with MatterWave, Fix Problem, Explain Code, Generate Tests, Add Docs | The editor actions above, also from the palette for the active selection. |
 | Explain Last Terminal Command, Fix Last Terminal Command | The terminal actions above. |
 | Generate Commit Message | The Source Control action above. |
-| Pick Model | The models your organisation allows, grouped; a model your plan does not include names the plan that has it, with **See Plans**. |
+| Pick Model, Choose Preset | The models your organisation allows, grouped (a model your plan does not include names the plan that has it, with **See Plans**); or one of your organisation's presets, which sets its model, instructions and welcome message for the conversation. |
 | Compact Conversation Now | Summarise earlier turns to free context; **Show originals** brings them back into view. |
 | Copy Last Request ID, Show Log | The reference to quote when you report a problem, and the request log (method, path, status, time, request id; never content). |
 | Export Conversation as Markdown, Create Share Link, Manage Share Links | Save or share the open conversation; revoke links. |
