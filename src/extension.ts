@@ -32,7 +32,7 @@ import type { ApiKeyListing, ImportRecord } from "./api/types";
 import { pickerRows, resolvePick, type PickerRow } from "./models";
 import { DEFAULT_BASE_URL, normalizeServerUrl, serverUrlProblem, shouldPromptForServer } from "./settings";
 import { StatusBar } from "./statusBar";
-import { normalizePromptName, PromptLibrary, MAX_PROMPT_TEXT, type PromptRow } from "./promptLibrary";
+import { normalizePromptName, PromptLibrary, MAX_PROMPTS, MAX_PROMPT_TEXT, type PromptRow, type PromptScope } from "./promptLibrary";
 import { currentFolder, editorFolders, resolveNamedFile, whereItLands } from "./targets";
 import { pickWorkspaceFile as pickFile } from "./fileSearch";
 import { execFile } from "node:child_process";
@@ -100,7 +100,8 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
   const tokens = new TokenStore(context.secrets, baseUrl);
   const statusBar = new StatusBar();
   const view = new ChatViewProvider(context.extensionUri);
-  const prompts = new PromptLibrary(context.globalState);
+  // A window with no folder open has no workspace of its own to keep prompts for.
+  const prompts = new PromptLibrary(context.globalState, vscode.workspace.workspaceFolders?.length ? context.workspaceState : null);
   const checkpoints = new CheckpointStore(context.globalState);
   // Listening from the start, so @terminal has the commands that ran since.
   const terminals = new TerminalHistory();
@@ -420,12 +421,14 @@ type PickItem = vscode.QuickPickItem & { row: PickerRow };
 /**
  * The named texts `/name` expands to in the composer: create one, edit one,
  * or take one back, looping like Manage Share Links so several can be seen
- * to in a sitting. The library is this editor's own -- global state, not
- * the platform -- and `/name` in a chat sends the saved text as the message.
+ * to in a sitting. The library is this editor's own -- not the platform's
+ * -- with each prompt kept for every workspace or for this one alone, and
+ * `/name` in a chat sends the saved text as the message.
  */
 async function managePrompts(library: PromptLibrary): Promise<void> {
   for (;;) {
     const rows = await library.list();
+    const workspaceNames = new Set(rows.filter((r) => r.scope === "workspace").map((r) => r.name));
     const picked = await vscode.window.showQuickPick(
       [
         {
@@ -439,7 +442,13 @@ async function managePrompts(library: PromptLibrary): Promise<void> {
           fresh: false,
           row: row as PromptRow | null,
           label: `/${row.name}`,
-          description: `${row.text.length.toLocaleString()} characters`,
+          description: [
+            row.scope === "workspace" ? "this workspace" : "every workspace",
+            row.scope === "global" && workspaceNames.has(row.name) ? "hidden here by this workspace's" : null,
+            `${row.text.length.toLocaleString()} characters`,
+          ]
+            .filter(Boolean)
+            .join(" · "),
           detail: row.text.split("\n")[0],
         })),
       ],
@@ -466,7 +475,7 @@ async function managePrompts(library: PromptLibrary): Promise<void> {
         "Delete",
       );
       if (answer === "Delete") {
-        await library.remove(picked.row?.name ?? "");
+        await library.remove(picked.row?.name ?? "", picked.row?.scope);
         void vscode.window.showInformationMessage(`The prompt “/${picked.row?.name}” was deleted.`);
       }
     }
@@ -501,11 +510,24 @@ async function editPrompt(library: PromptLibrary, existing: PromptRow | null): P
           : null,
   });
   if (text === undefined) return;
-  if (await library.save(normalized, text)) {
+  // An edit stays where it was kept; a new prompt is kept where the person says.
+  let scope: PromptScope = existing?.scope ?? "global";
+  if (!existing && library.hasWorkspace) {
+    const where = await vscode.window.showQuickPick(
+      [
+        { scope: "global" as PromptScope, label: "Every workspace", detail: `/${normalized} works in every window` },
+        { scope: "workspace" as PromptScope, label: "This workspace only", detail: `/${normalized} works only while this workspace is open` },
+      ],
+      { title: `Keep /${normalized} for…`, placeHolder: "Where the prompt is kept" },
+    );
+    if (!where) return;
+    scope = where.scope;
+  }
+  if (await library.save(normalized, text, scope)) {
     void vscode.window.showInformationMessage(`Saved. Type /${normalized} in the composer to send it.`);
   } else {
     void vscode.window.showWarningMessage(
-      `The prompt could not be saved: the library holds at most 50 prompts of ${MAX_PROMPT_TEXT.toLocaleString()} characters each.`,
+      `The prompt could not be saved: each scope holds at most ${MAX_PROMPTS} prompts of ${MAX_PROMPT_TEXT.toLocaleString()} characters each.`,
     );
   }
 }
