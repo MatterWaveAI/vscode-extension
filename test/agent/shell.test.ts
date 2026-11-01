@@ -47,7 +47,8 @@ describe("runShell", () => {
     expect(result.truncated).toBe(true);
     expect(result.output).toContain("line 1");
     expect(result.output).toContain("line 4000");
-    expect(result.output).toMatch(/\[\.\.\. [\d,]+ bytes of output cut \.\.\.\]/);
+    expect(result.output).toMatch(/\n\[\.\.\. \d+ bytes of output cut from the middle \.\.\.\]\n/);
+    expect(result.omitted).toBeGreaterThan(0);
   }, 60_000);
 
   it("stops a command at its timeout", async () => {

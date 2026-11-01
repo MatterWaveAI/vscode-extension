@@ -1,10 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { sseEvents } from "../lib/matterwaveClient";
-import type { Decision, ModeName } from "../lib/sdk/agent/types";
 import { childEnv } from "./env";
 import { killTree } from "./shell";
-import { failure, type ToolOutcome, type ToolSpec } from "./tools";
+import { failure, rejectedOutcome, toolSpec, type ToolOutcome, type ToolSpec } from "./tools";
 
 /**
  * The agent as an MCP client: servers from the person's and the
@@ -14,13 +13,14 @@ import { failure, type ToolOutcome, type ToolSpec } from "./tools";
  *
  * Each server's tools reach the model as `mcp__<server>__<tool>` (made
  * unique where two would collide), only those its `tools` allow-list names
- * when it has one. They go through the same approvals as the local tools: a
- * tool marked read-only runs like `read_file`; any other asks in `ask` and
- * `auto-edit` (it can reach anything, like a command), is not offered in
- * `plan`, and runs unasked only in `yolo` -- or always, for a server the
- * person marked `trust`. A server's read-only mark is its own claim, so it
- * counts only for a server whose hints are trusted (one marked `trust`, and
- * MatterWave's own); any other server's tools all ask.
+ * when it has one. Each is an `mcp` tool to the SDK's `allowed`: it asks in
+ * `plan` (when marked read-only; otherwise it is not offered there), `ask`
+ * and `auto-edit` -- a server can reach anything, like a command -- and runs
+ * unasked only in `yolo`. A server's read-only mark is its own claim, so it
+ * counts only for a server whose hints are trusted (one the person marked
+ * `trust`, and MatterWave's own). `trust` is the person's standing approval
+ * of a server: where its tool would ask, it runs without asking, but it
+ * never offers a tool the mode leaves out.
  *
  * What a server sends is capped: one message at MAX_MESSAGE_BYTES, its tool
  * list at MAX_TOOLS_PER_SERVER tools with schemas under MAX_SCHEMA_CHARS, a
@@ -370,19 +370,6 @@ export function uniqueToolName(server: string, tool: string, taken: ReadonlySet<
   }
 }
 
-/**
- * What a mode decides about an MCP tool. `hintsTrusted` says whether the
- * server's read-only mark is believed: a server's annotations are its own
- * claim, so an untrusted server's "read-only" tool asks like any other and
- * is not offered in plan mode.
- */
-export function mcpDecision(tool: McpToolInfo, config: McpServerConfig, mode: ModeName, hintsTrusted = config.trust === true): Decision {
-  const readOnly = tool.readOnly && hintsTrusted;
-  if (mode === "plan") return readOnly ? "allow" : "deny";
-  if (mode === "yolo" || config.trust === true || readOnly) return "allow";
-  return "ask";
-}
-
 export interface McpServerStatus {
   name: string;
   state: "connected" | "failed" | "starting";
@@ -486,30 +473,33 @@ export class McpManager {
       for (const tool of entry.tools) {
         const name = uniqueToolName(server, tool.name, taken);
         taken.add(name);
-        specs.push({
-          name,
-          definition: {
-            type: "function",
-            function: { name, description: `[MCP ${server}] ${tool.description}`.slice(0, 1024), parameters: tool.inputSchema },
-          },
-          decide: (mode) => mcpDecision(tool, entry.config, mode, hintsTrusted),
-          label: () => `${server} › ${tool.name}`,
-          run: async (args, decision, ctx) => {
-            if (decision === "ask") {
-              const answer = await ctx.approvals.confirm(
-                { kind: "mcp", tool: name, title: `Call ${tool.name} on the MCP server "${server}"`, detail: JSON.stringify(args, null, 2) },
-                ctx.signal,
-              );
-              if (!answer.approved) return { content: "The person declined the call; it did not run.", isError: false, rejected: true };
-            }
-            try {
-              return await client.callTool(tool.name, args, ctx.signal);
-            } catch (error) {
-              if (ctx.signal.aborted) throw error;
-              return failure(`The MCP server "${server}" failed: ${error instanceof Error ? error.message : String(error)}`);
-            }
-          },
-        });
+        specs.push(
+          toolSpec({
+            name,
+            kind: "mcp",
+            // A server's annotation is its own claim: believed only where its hints are.
+            readOnly: tool.readOnly && hintsTrusted,
+            description: `[MCP ${server}] ${tool.description}`.slice(0, 1024),
+            parameters: tool.inputSchema,
+            label: () => `${server} › ${tool.name}`,
+            run: async (args, decision, ctx) => {
+              // `trust` is the person's standing approval of the server.
+              if (decision === "ask" && entry.config.trust !== true) {
+                const answer = await ctx.approvals.confirm(
+                  { kind: "mcp", tool: name, title: `Call ${tool.name} on the MCP server "${server}"`, detail: JSON.stringify(args, null, 2) },
+                  ctx.signal,
+                );
+                if (!answer.approved) return rejectedOutcome(name, answer.reason);
+              }
+              try {
+                return await client.callTool(tool.name, args, ctx.signal);
+              } catch (error) {
+                if (ctx.signal.aborted) throw error;
+                return failure(`The MCP server "${server}" failed: ${error instanceof Error ? error.message : String(error)}`);
+              }
+            },
+          }),
+        );
       }
     }
     return specs;

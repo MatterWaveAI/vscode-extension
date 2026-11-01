@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import * as nodePath from "node:path";
+import type { ContextFile } from "../lib/sdk/agent/types";
 import { readConfined, readHead } from "./readConfined";
 
 /**
@@ -7,7 +8,10 @@ import { readConfined, readHead } from "./readConfined";
  * root (and `AGENTS.md`, the cross-tool name, when it is there), a personal
  * `MATTERWAVE.local.md` beside them that the person keeps out of git, and
  * `~/.matterwave/MATTERWAVE.md` for every project. They go into the system
- * prompt after the contract's rules.
+ * prompt through the SDK's `systemPrompt(..., { contextFiles })`, which
+ * fences each one, cuts it at the contract's length and puts them after the
+ * contract's rules, the later winning where two disagree: the person's own
+ * notes first, then the project's, then the personal override.
  *
  * A cloned repository's notes are whatever its author wrote, so they load
  * only in a folder the person has trusted; in an untrusted one they are
@@ -18,12 +22,12 @@ import { readConfined, readHead } from "./readConfined";
 
 export const PROJECT_CONTEXT_FILES = ["MATTERWAVE.md", "AGENTS.md"] as const;
 export const PERSONAL_CONTEXT_FILE = "MATTERWAVE.local.md";
-/** Each file is cut here: notes past it cost every step of every run. */
-export const MAX_CONTEXT_FILE_CHARS = 32_000;
+/** How the person's own notes are named in the prompt and the view. */
+export const USER_CONTEXT_NAME = "~/.matterwave/MATTERWAVE.md";
 
 export interface ProjectContext {
-  /** What goes into the system prompt; null when nothing loaded. */
-  text: string | null;
+  /** The files for `systemPrompt`, in the order they apply; empty when nothing loaded. */
+  contextFiles: ContextFile[];
   /** The files that loaded, as the view names them. */
   files: string[];
   /** A sentence for the view: why notes that exist were not loaded. */
@@ -44,19 +48,15 @@ export function defaultUserContextFile(): string {
   return nodePath.join(homedir(), ".matterwave", "MATTERWAVE.md");
 }
 
-function clipped(text: string): string {
-  return text.length > MAX_CONTEXT_FILE_CHARS ? `${text.slice(0, MAX_CONTEXT_FILE_CHARS)}\n[cut: the file is longer than ${MAX_CONTEXT_FILE_CHARS.toLocaleString("en-US")} characters]` : text;
-}
-
 export async function loadProjectContext(root: string, options: ContextFileOptions): Promise<ProjectContext> {
-  const sections: string[] = [];
+  const contextFiles: ContextFile[] = [];
   const files: string[] = [];
   const userFile = options.userFile === undefined ? defaultUserContextFile() : options.userFile;
   if (userFile) {
     const text = await readOrNull(userFile);
     if (text?.trim()) {
-      sections.push(`Your notes for every project (${userFile}):\n\n${clipped(text.trim())}`);
-      files.push("~/.matterwave/MATTERWAVE.md");
+      contextFiles.push({ path: USER_CONTEXT_NAME, content: text, trusted: true });
+      files.push(USER_CONTEXT_NAME);
     }
   }
   const projectNames = [...PROJECT_CONTEXT_FILES, PERSONAL_CONTEXT_FILE];
@@ -64,7 +64,7 @@ export async function loadProjectContext(root: string, options: ContextFileOptio
     const present: string[] = [];
     for (const name of projectNames) if ((await readConfined(root, name)) !== null) present.push(name);
     return {
-      text: sections.length > 0 ? sections.join("\n\n---\n\n") : null,
+      contextFiles,
       files,
       notice:
         present.length > 0
@@ -81,20 +81,14 @@ export async function loadProjectContext(root: string, options: ContextFileOptio
     }
     const text = read?.text;
     if (!text?.trim()) continue;
-    const role = name === PERSONAL_CONTEXT_FILE ? "your personal notes for this project, which take precedence over the project's" : "the project's notes";
-    sections.push(`${name} (${role}):\n\n${clipped(text.trim())}`);
+    contextFiles.push({ path: name, content: text, trusted: true });
     files.push(name);
   }
   const notice =
     refused.length > 0
       ? `${refused.join(" and ")} ${refused.length === 1 ? "was" : "were"} not loaded: a link out of the workspace, or a path the deny list covers.`
       : null;
-  if (sections.length === 0) return { text: null, files, notice };
-  return {
-    text: `Notes for this workspace follow. Follow them where they do not conflict with the rules above.\n\n${sections.join("\n\n---\n\n")}`,
-    files,
-    notice,
-  };
+  return { contextFiles, files, notice };
 }
 
 /** What `/init` asks the agent to do: look at the repository and draft its MATTERWAVE.md. */

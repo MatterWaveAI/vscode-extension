@@ -7,8 +7,10 @@
  * its links (symbolic links, and junctions on Windows) and returns where it
  * really leads, or throws `PathRefusedError` before anything is read or
  * written: for a `..` segment, an absolute path outside the root, a link
- * that leads out of it, a path on the deny list (by its own name or its
- * target's), or, for a write, a protected path.
+ * that leads out of it, a name Windows would read as another file or a
+ * device (a `:` stream, a trailing dot or space, `NUL` and the other reserved
+ * names, a verbatim or UNC path), a path on the deny list (by its own name or
+ * its target's), or, for a write, a protected path the user has not approved.
  *
  * Confinement is not a sandbox. It keeps the file tools inside the root;
  * `run_shell` can reach anything the user can, which is why commands ask.
@@ -16,7 +18,7 @@
 
 import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import * as nodePath from "node:path";
-import { DenyList, PROTECTED_LIST, PathRefusedError, isAbsolute } from "./deny.js";
+import { DenyList, PROTECTED_LIST, PathRefusedError, isAbsolute, windowsAlias } from "./deny.js";
 import { DENY_FILE } from "./types.js";
 
 const MAX_LINK_HOPS = 40;
@@ -95,13 +97,15 @@ function normcase(path: string): string {
   return process.platform === "win32" ? normal.toLowerCase() : normal;
 }
 
-function within(child: string, parent: string): boolean {
+/** @internal Whether `child` is `parent` or under it, with the platform's case rules. */
+export function within(child: string, parent: string): boolean {
   const c = normcase(child);
   const p = normcase(parent);
   return c === p || c.startsWith(p.replace(/[\\/]+$/, "") + nodePath.sep);
 }
 
-function relativeTo(child: string, parent: string): string {
+/** @internal `child` relative to `parent` with `/` separators, `""` for `parent` itself. */
+export function relativeTo(child: string, parent: string): string {
   const rel = nodePath.relative(parent, child);
   return rel === "" || rel === "." ? "" : rel.split(nodePath.sep).join("/");
 }
@@ -127,13 +131,20 @@ export function loadDenyList(root: string): DenyList {
 
 /**
  * Where `path` leads inside `root`, or `PathRefusedError`. `deny` defaults to
- * the root's `loadDenyList`; `write: true` also refuses the protected paths,
- * which can be read but not changed.
+ * the root's `loadDenyList`; `write: true` also refuses the protected paths
+ * unless `approved: true` says the user approved this write, since a change
+ * to one always asks first.
  */
-export function confine(root: string, path: string, options: { deny?: DenyList; write?: boolean } = {}): ConfinedPath {
+export function confine(
+  root: string,
+  path: string,
+  options: { deny?: DenyList; write?: boolean; approved?: boolean } = {},
+): ConfinedPath {
   if (!path || path.trim() === "") throw new PathRefusedError("empty", path ?? "");
   if (path.includes("\0")) throw new PathRefusedError("outside", path.split("\0").join(""));
   if (path.split(/[\\/]/).includes("..")) throw new PathRefusedError("parent", path);
+  const alias = windowsAlias(path);
+  if (alias !== null) throw new PathRefusedError(alias, path);
 
   const givenRoot = nodePath.resolve(root);
   const realRoot = resolveLinks(givenRoot);
@@ -158,7 +169,7 @@ export function confine(root: string, path: string, options: { deny?: DenyList; 
   for (const rel of [lexicalRel, realRel]) {
     if (rel && deny.matches(rel, { isDir })) throw new PathRefusedError("denied", path);
   }
-  if (options.write) {
+  if (options.write && !options.approved) {
     for (const rel of [lexicalRel, realRel]) {
       if (rel && PROTECTED_LIST.matches(rel, { isDir })) throw new PathRefusedError("protected", path);
     }

@@ -1,11 +1,13 @@
-import type { Decision, ModeName } from "../lib/sdk/agent/types";
+import { allowed, refusal, toolsForMode } from "../lib/sdk/agent/modes";
+import { TOOLS_BY_NAME, type AnyToolKind, type Decision, type JsonSchema, type ModeName } from "../lib/sdk/agent/types";
 import type { Tool, ToolCall } from "./wire";
 
 /**
- * One tool the agent can offer the model, local or not: its `/v1`
- * definition, what each approval mode decides about it, and how it runs.
- * The seven contract tools decide through the SDK's `allowed()`; the
- * extension's own (todo, web fetch, subagents, MCP) decide by their kind.
+ * One tool the agent can offer the model, local or not: its kind, its `/v1`
+ * definition, and how it runs. Every decision is the SDK's `allowed()`: the
+ * seven contract tools by the mode's own lists, the extension's (todo_write
+ * and task are `meta`, web_fetch is `network`, an MCP server's tool is `mcp`)
+ * by their kind; and the `tools` a step offers are the SDK's `toolsForMode`.
  */
 
 export interface ToolOutcome {
@@ -75,11 +77,55 @@ export interface ToolContext {
 
 export interface ToolSpec {
   name: string;
-  definition: Tool;
+  /** What the contract decides it by: a contract tool's own kind, or `network`, `mcp` or `meta`. */
+  kind: AnyToolKind;
+  /** The tool's claim to change nothing, which in plan mode turns a `network` or `mcp` deny into ask. */
+  readOnly?: boolean;
+  /** For the extension's own tools: what the model reads in the tool's definition and the prompt. */
+  description: string;
+  parameters?: JsonSchema;
+  /** `allowed(name, mode, kind, { readOnly })`: what the mode decides before the call's arguments are known. */
   decide(mode: ModeName): Decision;
   run(args: Record<string, unknown>, decision: Decision, ctx: ToolContext): Promise<ToolOutcome>;
   /** One line for the view: what this call does, from its arguments. */
   label?(args: Record<string, unknown>): string;
+}
+
+/** A spec whose `decide` is the SDK's `allowed` for its name and kind. */
+export function toolSpec(spec: Omit<ToolSpec, "decide">): ToolSpec {
+  return { ...spec, decide: (mode) => allowed(spec.name, mode, spec.kind, { readOnly: spec.readOnly ?? false }) };
+}
+
+/** Whether `name` is one of the contract's seven tools. */
+export function isContractTool(name: string): boolean {
+  return Object.prototype.hasOwnProperty.call(TOOLS_BY_NAME, name);
+}
+
+/**
+ * The `tools` a step offers in `mode`, through the SDK's `toolsForMode`: the
+ * contract's that `specs` has and the mode does not deny, in contract order,
+ * then the extension's own that their kind lets through.
+ */
+export function offeredTools(specs: readonly ToolSpec[], mode: ModeName): Tool[] {
+  const names = new Set(specs.map((s) => s.name));
+  const extra = specs
+    .filter((s) => !isContractTool(s.name))
+    .map((s) => ({ name: s.name, kind: s.kind, description: s.description, read_only: s.readOnly ?? false, ...(s.parameters ? { parameters: s.parameters } : {}) }));
+  return toolsForMode(mode, extra).filter((t) => names.has(t.function.name));
+}
+
+/** The extension's own tools `mode` offers, for the prompt's "More tools" section. */
+export function promptTools(specs: readonly ToolSpec[], mode: ModeName): { name: string; description: string }[] {
+  return specs.filter((s) => !isContractTool(s.name) && s.decide(mode) !== "deny").map((s) => ({ name: s.name, description: s.description }));
+}
+
+/**
+ * The person said no: the contract's `rejected` sentence, an ordinary result
+ * rather than an error, with what they said after it.
+ */
+export function rejectedOutcome(tool: string, reason?: string): ToolOutcome {
+  const said = reason?.trim() ? ` They said: ${reason.trim()}` : "";
+  return { content: `${refusal("rejected", { tool })}${said}`, isError: false, rejected: true };
 }
 
 export function ok(content: string): ToolOutcome {

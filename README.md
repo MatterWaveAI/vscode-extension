@@ -57,8 +57,9 @@ signed in as, and whether MatterWave can be reached.
 
 Tick **Agent** under the composer and what you type goes to the coding agent instead of the chat.
 The agent works in one workspace folder (the root, named beside the toggle; with several folders
-open, click it to pick another) through the shared MatterWave tool contract: `read_file`,
-`list_dir`, `glob`, `grep`, `edit`, `write_file` and `run_shell`. The tools run here, in the
+open, click it to pick another) through the shared MatterWave tool contract (agent contract
+1.1.0): `read_file`, `list_dir`, `glob`, `grep`, `edit`, `write_file` and `run_shell`, which
+return the same text here as in every other MatterWave client. The tools run here, in the
 extension host; the server only relays the model's calls (`/v1/chat/completions`) and never sees
 your files except what the tools return. A run is stored in the conversation
 (`metadata.conversation_id`), so it shows in the web app too.
@@ -78,10 +79,13 @@ click it or press **Shift+Tab** in the composer to cycle, or use `/approval-mode
 make it stricter, never looser. Picking a stricter mode during a run applies from the next tool
 call, including the rest of the calls the model made in that step.
 
-Even in `auto-edit`, a change to what steers the agent or the editor asks first: `.vscode/`, a
-`*.code-workspace` file, `.matterwave/`, `MATTERWAVE.md`, `MATTERWAVE.local.md` and `AGENTS.md`.
-Otherwise a file the agent read could turn itself into standing instructions, or into an MCP
-server the editor starts.
+In every mode that changes files, `auto-edit` and `yolo` included, a change to what steers the
+agent or the editor asks first: `.vscode/`, a `*.code-workspace` file, `.matterwave/`,
+`MATTERWAVE.md`, `MATTERWAVE.local.md`, `AGENTS.md` and `.matterwaveignore`, and, for a root at or
+above your home folder, `.bashrc`, `.bash_profile`, `.profile`, `.zshrc`, `.zprofile`, `.ssh/`,
+`.aws/` and any `.config/matterwave`. Otherwise a file the agent read could turn itself into
+standing instructions, a shell start-up line, or an MCP server the editor starts. The same goes
+for a path that reaches one of them through a link.
 
 **Reviewing a change.** In `ask` every `edit` and `write_file` opens VS Code's diff editor: the
 file on the left, the proposal on the right. The proposal is editable: change it, then **Accept**
@@ -93,7 +97,8 @@ typed in it, a formatter ran), or a folder on its path became a link, nothing is
 model is told to read it again.
 
 **Commands.** `run_shell` runs in the root (PowerShell on Windows, `sh` elsewhere) as a child
-process with a time limit (120 s by default, 600 s at most) and a 64 KB output cap; the card shows
+process with a time limit (120 s by default, 600 s at most) and a 64 KB output cap (its head and
+tail are kept, the middle cut); the card shows
 the whole command before it runs, and its output streams into the view and the "MatterWave Agent"
 output channel. **Stop** ends the model's stream, an approval that is waiting, and the command's
 whole process tree. A process that detaches itself from that tree (`cmd /c start /b ...` on
@@ -109,9 +114,13 @@ model's window, old tool output is folded to a stub first, and then older steps 
 
 **What it may touch.** Every path is resolved and must stay under the root after links are
 followed: `..`, an absolute path elsewhere and a link out of the root are refused before anything
-happens. A deny list applies to reads too, so secrets are not sent: `.env*`, `*.pem`, `id_*`,
-`.git/`, plus anything in a `.matterwaveignore` at the root (gitignore syntax). Searches also skip
-what `.gitignore` ignores. The project's notes, commands and subagents and `@path` mentions are
+happens, and so is a name Windows would read as something else (a `:` stream, a trailing dot or
+space, `NUL`, `CON` and the other device names, a `\\?\` or network path), on every platform. A
+deny list applies to reads too, so secrets are not sent: `.env*`, `*.pem`, `id_*`, `.git/`, in any
+case, plus anything in a `.matterwaveignore` at the root (gitignore syntax). `glob`, `grep` and
+`list_dir` also skip what the `.gitignore` and `.matterwaveignore` files from the root down ignore
+(`!` re-includes, case ignored); `list_dir` still lists the protected files above, which can be
+read. The project's notes, commands and subagents and `@path` mentions are
 read through the same rules, so a `MATTERWAVE.md` that links to a key outside the root is refused,
 not sent. `grep` runs the model's pattern off the editor's thread and gives up on one that takes
 more than 5 s. This is confinement, not a sandbox: an approved command runs as you and can reach
@@ -125,7 +134,9 @@ local agent tools off.
 
 **Context.** In a trusted folder the agent reads `MATTERWAVE.md` (and `AGENTS.md`) at the root,
 your personal `MATTERWAVE.local.md` beside them (keep it out of git), and `~/.matterwave/MATTERWAVE.md`,
-plus your account's custom instructions. `/init` has the agent draft a `MATTERWAVE.md` (the write
+plus your account's custom instructions. Each file goes into the prompt fenced, up to 32,768
+characters, and where two disagree the later wins: yours for every project, then the project's,
+then your personal one. `/init` has the agent draft a `MATTERWAVE.md` (the write
 is reviewed like any other). `@src/app.ts` in a prompt attaches that file; the active file, the
 selection (up to 8,000 characters) and the recently opened files ride along unless
 `matterwave.agent.editorContext` is off, and none of them from a denied path. The `@file`,
@@ -144,7 +155,8 @@ touched. `/resume` picks up an earlier agent run in this workspace with its
 tool rounds in context.
 
 **More tools.** `todo_write` keeps the run's plan as a checklist in the view. `web_fetch` reads a
-page, asking first except in yolo (`matterwave.agent.webFetch` turns it off); it follows a redirect
+page, asking first except in yolo and not offered in plan (`matterwave.agent.webFetch` turns it
+off); it follows a redirect
 only on the approved site, hands any other back to the model as a URL to fetch (which asks again),
 and reads at most 4 MB. Subagents are Markdown
 files in `~/.matterwave/agents/` or `.matterwave/agents/`, with a `description` and a `tools`
@@ -160,12 +172,15 @@ allow-list in front matter and their instructions as the body; the agent hands t
 }
 ```
 
-Only the tools a server's `tools` allow-list names reach the model. A tool marked read-only runs
-like `read_file`; any other asks in `ask` and `auto-edit`, is not offered in `plan`, and runs
-unasked only in `yolo` or for a server with `"trust": true`. A read-only mark is the server's own
-claim, so it counts only for a server you trust and for MatterWave's own `/mcp` (your conversations
-and models), which is there by default (`matterwave.agent.matterwaveMcp`). Your MatterWave
-credential is sent only to a server at exactly `<matterwave.baseUrl>/mcp`.
+Only the tools a server's `tools` allow-list names reach the model. Every MCP tool asks before
+each call in `ask` and `auto-edit`, read-only or not, and runs unasked only in `yolo`; `plan`
+offers only the tools marked read-only, and asks before those too. A read-only mark is the
+server's own claim, so it counts only for a server you trust and for MatterWave's own `/mcp` (your
+conversations and models), which is there by default (`matterwave.agent.matterwaveMcp`).
+`"trust": true` in your user settings is your standing approval of a server: its tools run without
+asking wherever they would ask, though `plan` still leaves out the ones not marked read-only. Your
+MatterWave credential is sent only to a server at exactly `<matterwave.baseUrl>/mcp`; to trust
+MatterWave's own, name it `matterwave` with that URL and `"trust": true`.
 
 A server a workspace's settings add (`.vscode/settings.json`, a `.code-workspace` file) starts only
 after you approve it, in a dialog that shows its command or URL; the answer is kept for that
@@ -234,7 +249,14 @@ The MatterWave SDK is vendored at `src/lib/matterwaveClient.ts` (trimmed from
 is not published to npm, so the extension carries the client it needs. The agent's tool contract
 and helpers (generated from the Python SDK's `contract.json`, with confinement, the deny list,
 edit, diff and the modes) are the SDK's `src/agent`, copied byte for byte into `src/lib/sdk/agent`
-and bundled into the .vsix. `pnpm sdk:sync` re-copies them from a `typescript-sdk` checkout
-(`MATTERWAVE_SDK_DIR`, or one beside this repository; ref `MATTERWAVE_SDK_REF`, default `develop`)
-and `pnpm sdk:check` compares; `test/sdkVendor.test.ts` fails on a hand edit of the copy. Without a connection the
+and bundled into the .vsix: confinement, the deny list and the search rules, the read tools and
+their output, the approval decisions, the refusals and the system prompt. `pnpm sdk:sync`
+re-copies every `src/agent/*.ts` from a `typescript-sdk` checkout or worktree (`--sdk <dir>` or
+`MATTERWAVE_SDK_DIR`, by default one beside this repository) at a git ref (`--ref` or
+`MATTERWAVE_SDK_REF`, default `develop`) and records it in `src/lib/sdk/VENDORED.json`; `pnpm
+sdk:check` compares the copy with the ref it was taken from. The copy is agent contract 1.1.0,
+from the SDK's `agent-contract-1.1` (`pnpm sdk:sync --sdk <checkout> --ref agent-contract-1.1`).
+`test/sdkVendor.test.ts` fails on a hand edit of the copy, and
+`test/agent/conformance.test.ts` runs the contract's conformance cases through the extension's own
+tools. Without a connection the
 composer is disabled and the draft is kept; **Reconnect** in the view tries the API again.

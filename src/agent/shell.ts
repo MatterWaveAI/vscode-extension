@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { shellFor } from "../lib/sdk/agent/modes";
+import { fill } from "../lib/sdk/agent/fill";
+import { OUTPUTS, shellFor, utf8Head, utf8Tail } from "../lib/sdk/agent/node";
 import { childEnv } from "./env";
 
 /**
@@ -18,10 +19,16 @@ import { childEnv } from "./env";
 export interface ShellResult {
   /** The exit code, or null when the process was killed (by Stop or the timeout). */
   exitCode: number | null;
+  /**
+   * What the command wrote, whole; or, past what is kept, its head and tail
+   * with the contract's cut marker between them (`omitted` > 0).
+   */
   output: string;
+  /** Bytes of output dropped from the middle and named by the marker in `output`; 0 when nothing was. */
+  omitted: number;
   timedOut: boolean;
   stopped: boolean;
-  /** True when the output passed the cap and its middle was cut. */
+  /** True when the output passed the cap, so its middle is cut from what the model sees. */
   truncated: boolean;
   durationMs: number;
 }
@@ -29,7 +36,7 @@ export interface ShellResult {
 export interface ShellOptions {
   cwd: string;
   timeoutMs: number;
-  /** The cap on what is kept: the first and last halves of it, the middle cut. */
+  /** The cap on what the model sees: the first and last halves of it, the middle cut. */
   maxBytes: number;
   signal?: AbortSignal;
   /** Each piece of output as it arrives, for a live view; capped output is still what the result returns. */
@@ -96,19 +103,34 @@ export function killTree(child: ChildProcess, platform: NodeJS.Platform = proces
   }
 }
 
-class CappedOutput {
-  private head: Buffer[] = [];
+/**
+ * A command's output as it streams, kept to what the model can be shown: the
+ * first half of the cap and the last half, plus a few bytes either side so a
+ * character cut at the edge decodes as it would whole, and a count of the
+ * rest. The cut itself is the SDK's (`utf8Head`, `utf8Tail` and the
+ * contract's marker), made here because the middle is never held.
+ */
+export class CappedOutput {
+  private readonly head: Buffer[] = [];
   private headBytes = 0;
   private tail: Buffer[] = [];
   private tailBytes = 0;
-  private cut = 0;
+  private dropped = 0;
+  private total = 0;
+  private readonly half: number;
+  private readonly headRoom: number;
+  private readonly tailRoom: number;
 
-  constructor(private readonly maxBytes: number) {}
+  constructor(private readonly maxBytes: number) {
+    this.half = Math.floor(maxBytes / 2);
+    this.headRoom = this.half + 3;
+    this.tailRoom = maxBytes - this.half + 3;
+  }
 
   push(chunk: Buffer): void {
-    const half = Math.floor(this.maxBytes / 2);
-    if (this.headBytes < half) {
-      const take = chunk.subarray(0, half - this.headBytes);
+    this.total += chunk.length;
+    if (this.headBytes < this.headRoom) {
+      const take = chunk.subarray(0, this.headRoom - this.headBytes);
       this.head.push(take);
       this.headBytes += take.length;
       chunk = chunk.subarray(take.length);
@@ -116,30 +138,34 @@ class CappedOutput {
     if (chunk.length === 0) return;
     this.tail.push(chunk);
     this.tailBytes += chunk.length;
-    const room = this.maxBytes - half;
-    while (this.tailBytes > room && this.tail.length > 0) {
+    while (this.tailBytes > this.tailRoom && this.tail.length > 0) {
       const first = this.tail[0]!;
-      const excess = this.tailBytes - room;
+      const excess = this.tailBytes - this.tailRoom;
       if (first.length <= excess) {
         this.tail.shift();
         this.tailBytes -= first.length;
-        this.cut += first.length;
+        this.dropped += first.length;
       } else {
         this.tail[0] = first.subarray(excess);
         this.tailBytes -= excess;
-        this.cut += excess;
+        this.dropped += excess;
       }
     }
   }
 
+  /** Past the cap, the model sees the head and tail only. */
   get truncated(): boolean {
-    return this.cut > 0;
+    return this.total > this.maxBytes;
   }
 
-  text(): string {
+  /** The output whole when all of it is still held; otherwise the head, the marker and the tail. */
+  result(): { output: string; omitted: number } {
+    if (this.dropped === 0) return { output: Buffer.concat([...this.head, ...this.tail]).toString("utf8"), omitted: 0 };
     const head = Buffer.concat(this.head).toString("utf8");
     const tail = Buffer.concat(this.tail).toString("utf8");
-    return this.cut > 0 ? `${head}\n[... ${this.cut.toLocaleString("en-US")} bytes of output cut ...]\n${tail}` : head + tail;
+    const kept = { head: utf8Head(head, this.half), tail: utf8Tail(tail, this.maxBytes - this.half) };
+    const omitted = this.total - Buffer.byteLength(kept.head) - Buffer.byteLength(kept.tail);
+    return { output: `${kept.head}\n${fill(OUTPUTS.shell.cut, { omitted: String(omitted) })}\n${kept.tail}`, omitted };
   }
 }
 
@@ -172,7 +198,7 @@ export function runShell(command: string, options: ShellOptions): Promise<ShellR
       options.signal?.removeEventListener("abort", onAbort);
       resolve({
         exitCode: timedOut || stopped ? null : exitCode,
-        output: output.text(),
+        ...output.result(),
         timedOut,
         stopped,
         truncated: output.truncated,

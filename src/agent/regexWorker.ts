@@ -1,4 +1,5 @@
 import { Worker } from "node:worker_threads";
+import { OUTPUTS } from "../lib/sdk/agent/node";
 
 /**
  * `grep`'s matching, off the extension host's thread. The pattern is the
@@ -7,20 +8,32 @@ import { Worker } from "node:worker_threads";
  * otherwise freeze the extension host -- every extension, Stop included --
  * for as long as the regular expression engine runs. In a worker it is
  * given a deadline per batch of files and terminated when it passes it.
+ *
+ * The worker only tests lines: the files' lines come split by the SDK's
+ * `textLines`, and what it hands back is shown through the SDK's `grepLine`.
+ * So that a huge line is not copied back whole, a match comes back cut to
+ * TEXT_BOUND characters after its trailing whitespace is dropped (as
+ * `grepLine` drops it), with `more` set when there was more: twice
+ * `line_max_chars` plus two always holds the code points `grepLine` keeps,
+ * and `more` says it must cut there.
  */
 
 /** One batch's matches past this is a pattern to simplify, not a search to wait for. */
 export const MATCH_DEADLINE_MS = 5_000;
 
-export interface FileText {
+const TEXT_BOUND = 2 * OUTPUTS.grep.line_max_chars + 2;
+
+export interface FileLines {
   relative: string;
-  text: string;
+  lines: string[];
 }
 
 export interface LineMatch {
   relative: string;
   line: number;
   text: string;
+  /** The line went on past `text` (after its trailing whitespace was dropped). */
+  more: boolean;
 }
 
 export class PatternTooSlow extends Error {
@@ -30,16 +43,22 @@ export class PatternTooSlow extends Error {
 }
 
 // Plain CommonJS, evaluated in the worker: the extension ships as one bundle.
+// The trailing whitespace is grepLine's: space, tab, CR, FF and VT.
 const SOURCE = `
 const { parentPort, workerData } = require("node:worker_threads");
 const regex = new RegExp(workerData.source, workerData.flags);
-parentPort.on("message", ({ files, limit, maxChars }) => {
+const bound = workerData.bound;
+const space = (c) => c === 32 || c === 9 || c === 13 || c === 12 || c === 11;
+parentPort.on("message", ({ files, limit }) => {
   const out = [];
   for (const file of files) {
-    const lines = file.text.split("\\n");
+    const lines = file.lines;
     for (let i = 0; i < lines.length && out.length < limit; i++) {
-      const line = lines[i].endsWith("\\r") ? lines[i].slice(0, -1) : lines[i];
-      if (regex.test(line)) out.push({ relative: file.relative, line: i + 1, text: line.length > maxChars ? line.slice(0, maxChars) + "\\u2026" : line });
+      const line = lines[i];
+      if (!regex.test(line)) continue;
+      let end = line.length;
+      while (end > 0 && space(line.charCodeAt(end - 1))) end--;
+      out.push({ relative: file.relative, line: i + 1, text: line.slice(0, Math.min(end, bound)), more: end > bound });
     }
     if (out.length >= limit) break;
   }
@@ -53,7 +72,7 @@ export class RegexWorker {
   private failure: Error | null = null;
 
   constructor(source: string, flags: string) {
-    this.worker = new Worker(SOURCE, { eval: true, workerData: { source, flags } });
+    this.worker = new Worker(SOURCE, { eval: true, workerData: { source, flags, bound: TEXT_BOUND } });
     this.worker.on("error", (error) => {
       this.failure = error;
     });
@@ -61,7 +80,7 @@ export class RegexWorker {
   }
 
   /** The matching lines of `files`, at most `limit`; PatternTooSlow past the deadline, an AbortError on `signal`. */
-  match(files: FileText[], limit: number, maxChars: number, signal: AbortSignal): Promise<LineMatch[]> {
+  match(files: FileLines[], limit: number, signal: AbortSignal): Promise<LineMatch[]> {
     if (this.failure) return Promise.reject(this.failure);
     return new Promise<LineMatch[]>((resolve, reject) => {
       const done = () => {
@@ -94,7 +113,7 @@ export class RegexWorker {
       this.worker.on("error", onError);
       if (signal.aborted) return onAbort();
       signal.addEventListener("abort", onAbort, { once: true });
-      this.worker.postMessage({ files, limit, maxChars });
+      this.worker.postMessage({ files, limit });
     });
   }
 

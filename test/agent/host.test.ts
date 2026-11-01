@@ -96,7 +96,7 @@ describe("read_file", () => {
     writeFileSync(join(ws.root, "long.txt"), Array.from({ length: 2500 }, (_, i) => `line ${i + 1}`).join("\n"));
     const result = await run("read_file", { path: "long.txt" });
     expect(result.content.split("\n")).toHaveLength(2001);
-    expect(result.content).toContain("[cut at line 2000 of 2500: the read limit; pass start_line=2001 to read on]");
+    expect(result.content.split("\n").at(-1)).toBe("[Cut off at the read limit: showing lines 1-2000 of 2500. Pass start_line=2001 to read on.]");
   });
 
   it("names a missing file, a folder and a binary one rather than reading them", async () => {
@@ -149,24 +149,45 @@ describe("confinement: refused before anything happens", () => {
     expect((await run("read_file", { path: ".env" })).content).not.toContain("hunter2");
   });
 
-  it("refuses an edit or a write to a denied or protected path without asking", async () => {
+  it("refuses an edit or a write to a denied path without asking", async () => {
     const approvals = new ScriptedApprovals();
     expect((await run("edit", { path: ".env", old_string: "hunter2", new_string: "x" }, { approvals })).content).toContain("is protected");
-    expect((await run("write_file", { path: ".matterwaveignore", content: "" }, { approvals })).content).toContain(
-      "can be read but not changed",
-    );
     expect((await run("write_file", { path: "../escaped.txt", content: "x" }, { approvals })).content).toContain("'..'");
     expect(approvals.changes).toHaveLength(0);
     expect(bytes(".env").toString()).toBe(FILES[".env"]);
   });
+
+  it("asks before a write to a protected path in every mode, yolo included, and writes nothing when rejected", async () => {
+    for (const mode of ["ask", "auto-edit", "yolo"] as const) {
+      const approvals = new ScriptedApprovals({ change: false });
+      const result = await run("write_file", { path: ".matterwaveignore", content: "" }, { mode, approvals });
+      expect(approvals.changes.map((c) => c.ask)).toEqual([true]);
+      expect(result).toMatchObject({ rejected: true, isError: false });
+      expect(result.content).toBe("The user rejected this write_file call, so nothing was done. Do not send it again: change course, or ask the user what they want.");
+    }
+    expect(bytes(".matterwaveignore").toString()).toBe(FILES[".matterwaveignore"]);
+    // Approved, it is written.
+    await run("write_file", { path: ".matterwaveignore", content: "private/\nsecrets/\n" }, { mode: "yolo" });
+    expect(bytes(".matterwaveignore").toString()).toBe("private/\nsecrets/\n");
+  });
+
+  it("refuses a name Windows would read as another file or a device, on every platform", async () => {
+    for (const [path, code] of [["README.md:Zone.Identifier", "':' in a name"], ["notes.", "ends in a dot or a space"], ["NUL.txt", "reserved device name"], ["\\\\server\\share\\x", "network path"]] as const) {
+      const read = await run("read_file", { path });
+      expect([path, read.isError, read.content]).toEqual([path, true, expect.stringContaining(code)]);
+    }
+    const approvals = new ScriptedApprovals();
+    expect((await run("write_file", { path: "CON.txt", content: "x" }, { approvals, mode: "yolo" })).content).toContain("reserved device name");
+    expect(approvals.changes).toHaveLength(0);
+  });
 });
 
 describe("list_dir, glob and grep", () => {
-  it("lists folders first, leaving out ignored, denied and protected entries", async () => {
+  it("lists folders first, leaving out ignored and denied entries; protected ones are listed", async () => {
     const result = await run("list_dir", {});
-    expect(result.content.split("\n")).toEqual(["certs/", "src/", ".gitignore", "README.md", "keep.log"]);
+    expect(result.content.split("\n")).toEqual(["certs/", "src/", ".gitignore", ".matterwaveignore", "README.md", "keep.log"]);
     // certs/ itself is listed; the key inside it is not.
-    expect((await run("list_dir", { path: "certs" })).content).toBe("(certs is empty)");
+    expect((await run("list_dir", { path: "certs" })).content).toBe("(certs has nothing to list: it is empty or holds only ignored entries.)");
   });
 
   it("globs under .gitignore (negation included) and the deny list", async () => {
@@ -207,7 +228,7 @@ describe("edit and write_file", () => {
     const before = bytes("src/app.ts");
     const result = await run("edit", { path: "src/app.ts", old_string: "b = 2", new_string: "b = 3" }, { approvals: new ScriptedApprovals({ change: false }) });
     expect(result).toMatchObject({ rejected: true, isError: false });
-    expect(result.content).toContain("rejected the change to src/app.ts");
+    expect(result.content).toBe("The user rejected this edit call, so nothing was done. Do not send it again: change course, or ask the user what they want.");
     expect(bytes("src/app.ts").equals(before)).toBe(true);
   });
 
@@ -243,7 +264,7 @@ describe("run_shell", () => {
   function fakeShell(record: string[]): (command: string, options: ShellOptions) => Promise<ShellResult> {
     return async (command, options) => {
       record.push(`${command} @ ${options.cwd} ${options.timeoutMs} ${options.maxBytes}`);
-      return { exitCode: 0, output: "ok\n", timedOut: false, stopped: false, truncated: false, durationMs: 1 };
+      return { exitCode: 0, output: "ok\n", omitted: 0, timedOut: false, stopped: false, truncated: false, durationMs: 1 };
     };
   }
 
@@ -256,7 +277,7 @@ describe("run_shell", () => {
       expect(approvals.confirms).toHaveLength(1);
       expect(approvals.confirms[0]!.detail).toBe(command);
       expect(ran).toEqual([`${command} @ ${ws.root} 30000 65536`]);
-      expect(result.content).toBe("Exit code 0\nok");
+      expect(result.content).toBe("Exit code 0\nok\n");
     }
   });
 
@@ -274,7 +295,7 @@ describe("run_shell", () => {
   it("is refused outright in plan mode", async () => {
     const ran: string[] = [];
     const result = await run("run_shell", { command: "echo hi" }, { mode: "plan", options: { runShell: fakeShell(ran) } });
-    expect(result).toMatchObject({ isError: true, content: "run_shell is not available in plan mode." });
+    expect(result).toMatchObject({ isError: true, content: "Refused: run_shell is not available in plan mode." });
     expect(ran).toHaveLength(0);
   });
 });

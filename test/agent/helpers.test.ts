@@ -4,9 +4,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { FOLDED_PREFIX, SUMMARY_LEAD, compactHistory, foldToolOutput, tailStart } from "../../src/agent/compaction";
 import { loadProjectContext } from "../../src/agent/contextFiles";
 import { definitionDirs, expandCommand, loadCustomCommands, parseFrontMatter } from "../../src/agent/definitions";
-import { webFetchDecision } from "../../src/agent/extraTools";
-import { IgnoreRules, globMatcher } from "../../src/agent/ignore";
-import { mcpDecision, mcpToolName } from "../../src/agent/mcp";
+import { taskTool, todoTool, webFetchTool } from "../../src/agent/extraTools";
+import { mcpToolName } from "../../src/agent/mcp";
+import { offeredTools, promptTools, toolSpec } from "../../src/agent/tools";
+import { contractTools } from "../../src/agent/host";
+import { MODE_NAMES } from "../../src/lib/sdk/agent/types";
 import { buildPromptContext, parsePathMentions } from "../../src/agent/promptContext";
 import { StepAccumulator, type ChatMessage } from "../../src/agent/wire";
 import { restorePlan, type Checkpoint } from "../../src/checkpoints";
@@ -100,18 +102,26 @@ describe("compaction", () => {
 });
 
 describe("the project's notes", () => {
-  it("load in a trusted folder: MATTERWAVE.md, AGENTS.md and the personal override", async () => {
-    const context = await loadProjectContext(ws.root, { trusted: true, userFile: null });
-    expect(context.files).toEqual(["MATTERWAVE.md", "AGENTS.md", "MATTERWAVE.local.md"]);
-    expect(context.text).toContain("Use pnpm.");
-    expect(context.text).toContain("Write tests first.");
-    expect(context.text).toContain("your personal notes for this project, which take precedence");
-    expect(context.notice).toBeNull();
+  it("load in a trusted folder: the person's own, MATTERWAVE.md, AGENTS.md and the personal override last", async () => {
+    const home = workspace({ ".matterwave/MATTERWAVE.md": "Answer in English.\n" });
+    try {
+      const context = await loadProjectContext(ws.root, { trusted: true, userFile: join(home.root, ".matterwave", "MATTERWAVE.md") });
+      expect(context.files).toEqual(["~/.matterwave/MATTERWAVE.md", "MATTERWAVE.md", "AGENTS.md", "MATTERWAVE.local.md"]);
+      expect(context.contextFiles).toEqual([
+        { path: "~/.matterwave/MATTERWAVE.md", content: "Answer in English.\n", trusted: true },
+        { path: "MATTERWAVE.md", content: "Use pnpm.\n", trusted: true },
+        { path: "AGENTS.md", content: "Write tests first.\n", trusted: true },
+        { path: "MATTERWAVE.local.md", content: "I like short answers.\n", trusted: true },
+      ]);
+      expect(context.notice).toBeNull();
+    } finally {
+      await home.cleanup();
+    }
   });
 
   it("are ignored, with a notice, in an untrusted folder", async () => {
     const context = await loadProjectContext(ws.root, { trusted: false, userFile: null });
-    expect(context.text).toBeNull();
+    expect(context.contextFiles).toEqual([]);
     expect(context.files).toEqual([]);
     expect(context.notice).toBe(
       "MATTERWAVE.md and AGENTS.md and MATTERWAVE.local.md were not loaded: this folder is not trusted. Trust it (Workspaces: Manage Workspace Trust) to use the project's notes.",
@@ -175,51 +185,35 @@ describe("custom commands and front matter", () => {
   });
 });
 
-describe("search ignore rules", () => {
-  it("reads .gitignore: negation, folders only, anchoring, nested files", () => {
-    const rules = IgnoreRules.empty(false).with("*.log\n!keep.log\nbuild/\n/root-only.txt\n", "").with("local.txt\n", "pkg");
-    expect(rules.ignored("a.log", false)).toBe(true);
-    expect(rules.ignored("keep.log", false)).toBe(false);
-    expect(rules.ignored("build", true)).toBe(true);
-    expect(rules.ignored("build", false)).toBe(false);
-    expect(rules.ignored("root-only.txt", false)).toBe(true);
-    expect(rules.ignored("sub/root-only.txt", false)).toBe(false);
-    expect(rules.ignored("pkg/local.txt", false)).toBe(true);
-    expect(rules.ignored("local.txt", false)).toBe(false);
+describe("the extension's own tools, decided by their kind", () => {
+  const byMode = (decide: (mode: (typeof MODE_NAMES)[number]) => string) => MODE_NAMES.map((m) => decide(m));
+  const mcp = (readOnly: boolean) => toolSpec({ name: "mcp__s__t", kind: "mcp", readOnly, description: "", run: async () => ({ content: "", isError: false }) });
+
+  it("web_fetch (network) asks in ask and auto-edit, is off in plan, runs in yolo", () => {
+    expect(byMode((m) => webFetchTool(fetch).decide(m))).toEqual(["deny", "ask", "ask", "allow"]);
   });
 
-  it("matches a search glob by path, or by name when it has no slash", () => {
-    expect(globMatcher("src/**/*.ts", false)("src/a/b.ts")).toBe(true);
-    expect(globMatcher("*.ts", false)("deep/x.ts")).toBe(true);
-    expect(globMatcher("src/*.ts", false)("src/a/b.ts")).toBe(false);
-  });
-});
-
-describe("decisions outside the contract", () => {
-  it("web fetch asks in ask and auto-edit, is off in plan, runs in yolo", () => {
-    expect(["plan", "ask", "auto-edit", "yolo"].map((m) => webFetchDecision(m as "plan"))).toEqual(["deny", "ask", "ask", "allow"]);
+  it("todo_write and task (meta) run in every mode", () => {
+    const task = taskTool([{ name: "helper", description: "Helps.", tools: null, prompt: "Help.", scope: "user" }], async () => ({ content: "", isError: false }))!;
+    expect(byMode((m) => todoTool(() => undefined).decide(m))).toEqual(["allow", "allow", "allow", "allow"]);
+    expect(byMode((m) => task.decide(m))).toEqual(["allow", "allow", "allow", "allow"]);
   });
 
-  it("an MCP tool that writes asks unless the server is trusted; a read-only one runs; plan offers reads only", () => {
-    const write = { name: "w", description: "", inputSchema: {}, readOnly: false };
-    const read = { ...write, readOnly: true };
-    expect(mcpDecision(write, {}, "ask")).toBe("ask");
-    expect(mcpDecision(write, {}, "auto-edit")).toBe("ask");
-    expect(mcpDecision(write, { trust: true }, "ask")).toBe("allow");
-    expect(mcpDecision(write, { trust: true }, "plan")).toBe("deny");
-    expect(mcpDecision(read, { trust: true }, "plan")).toBe("allow");
-    expect(mcpDecision(read, {}, "plan", true)).toBe("allow");
-    expect(mcpDecision(read, {}, "ask", true)).toBe("allow");
-    expect(mcpDecision(write, {}, "yolo")).toBe("allow");
+  it("an MCP tool asks everywhere but yolo; plan offers it only when it is marked read-only", () => {
+    expect(byMode((m) => mcp(false).decide(m))).toEqual(["deny", "ask", "ask", "allow"]);
+    expect(byMode((m) => mcp(true).decide(m))).toEqual(["ask", "ask", "ask", "allow"]);
     expect(mcpToolName("my server", "do.thing")).toBe("mcp__my_server__do_thing");
   });
 
-  it("a read-only mark from a server whose hints are not trusted is not believed: it asks, and plan leaves it out", () => {
-    const read = { name: "r", description: "", inputSchema: {}, readOnly: true };
-    expect(mcpDecision(read, {}, "plan")).toBe("deny");
-    expect(mcpDecision(read, {}, "ask")).toBe("ask");
-    expect(mcpDecision(read, {}, "auto-edit")).toBe("ask");
-    expect(mcpDecision(read, {}, "plan", false)).toBe("deny");
+  it("are offered through the SDK's toolsForMode after the contract's, and named in the prompt's More tools", () => {
+    const specs = [...contractTools(), todoTool(() => undefined), webFetchTool(fetch), mcp(true), mcp(false)];
+    const names = (mode: (typeof MODE_NAMES)[number]) => offeredTools(specs, mode).map((t) => t.function.name);
+    expect(names("plan")).toEqual(["read_file", "list_dir", "glob", "grep", "todo_write", "mcp__s__t"]);
+    expect(names("ask")).toEqual(["read_file", "list_dir", "glob", "grep", "edit", "write_file", "run_shell", "todo_write", "web_fetch", "mcp__s__t", "mcp__s__t"]);
+    expect(offeredTools(specs, "ask").find((t) => t.function.name === "web_fetch")!.function.parameters).toMatchObject({ required: ["url"] });
+    expect(promptTools(specs, "plan").map((t) => t.name)).toEqual(["todo_write", "mcp__s__t"]);
+    // A subagent's allow-list without a contract tool: it is not offered.
+    expect(offeredTools(specs.filter((s) => s.name !== "grep"), "plan").map((t) => t.function.name)).not.toContain("grep");
   });
 });
 

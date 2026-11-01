@@ -8,8 +8,9 @@ import { DEFAULT_DENY, PROTECTED, REFUSALS, type Refusal } from "./types.js";
 
 /**
  * The path is not one the agent may use. `reason` is the contract's code
- * (`empty`, `parent`, `outside`, `symlink`, `denied`, `protected`); `message`
- * is the sentence to return to the model as the tool's result.
+ * (`empty`, `parent`, `outside`, `symlink`, `denied`, `protected`, and the
+ * Windows aliases `stream`, `trailing`, `device`, `unc`); `message` is the
+ * sentence to return to the model as the tool's result.
  */
 export class PathRefusedError extends Error {
   readonly reason: Refusal;
@@ -23,7 +24,8 @@ export class PathRefusedError extends Error {
   }
 }
 
-function escapeRegex(c: string): string {
+/** `c` escaped for a regular expression's source. */
+export function escapeRegex(c: string): string {
   return c.replace(/[.*+?^${}()|[\]\\/-]/g, "\\$&");
 }
 
@@ -132,8 +134,41 @@ export class DenyList {
   }
 }
 
-/** The paths the agent can read but never write. */
+/**
+ * The protected paths as a matcher: the deny file, the agent's settings
+ * folder and the context files. They can be read; a write to one always asks
+ * the user first (`allowed(..., { path })` says `ask`), and `confine` refuses
+ * it unless `approved: true`.
+ */
 export const PROTECTED_LIST = new DenyList(PROTECTED);
+
+/** Whether `relative` (to the root, `/`-separated) is protected, so a write to it needs the user's approval in every mode. */
+export function isProtected(relative: string, options: { isDir?: boolean } = {}): boolean {
+  return PROTECTED_LIST.matches(relative, options);
+}
+
+const DEVICE = /^(?:con|prn|aux|nul|com[1-9\u00b9\u00b2\u00b3]|lpt[1-9\u00b9\u00b2\u00b3]|conin\$|conout\$)$/i;
+
+/**
+ * The refusal for a path Windows could read as something other than the file
+ * it seems to name, or null: `unc` for a `\\?\`, `\\.\`, `\??\` or network
+ * path, then, name by name, `stream` for a `:` (an alternate data stream, or a
+ * drive-relative `C:x`), `trailing` for a name that ends in a dot or a space,
+ * and `device` for CON, PRN, AUX, NUL, COM1-9, LPT1-9, CONIN$ or CONOUT$, in
+ * any case and with or without an extension. `confine` applies it on every
+ * platform, so the clients agree on what they refuse.
+ */
+export function windowsAlias(path: string): Refusal | null {
+  if (path.length >= 2 && "\\/".includes(path[0]!) && "\\/".includes(path[1]!)) return "unc";
+  if (["\\??\\", "/??/"].includes(path.slice(0, 4))) return "unc";
+  for (const name of path.replace(/^[A-Za-z]:(?=[\\/]|$)/, "").split(/[\\/]/)) {
+    if (name === "" || name === ".") continue;
+    if (name.includes(":")) return "stream";
+    if (name.endsWith(".") || name.endsWith(" ")) return "trailing";
+    if (DEVICE.test(name.split(".")[0]!.replace(/ +$/, ""))) return "device";
+  }
+  return null;
+}
 
 /**
  * Absolute on any platform: a leading `/` or `\`, or a drive letter (`C:`

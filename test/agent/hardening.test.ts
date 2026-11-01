@@ -172,7 +172,7 @@ describe("grep with a pattern that backtracks without end", () => {
   }, 30_000);
 });
 
-describe("auto-edit and the agent's own configuration", () => {
+describe("auto-edit, yolo and the agent's own configuration", () => {
   async function write(path: string, mode: ModeName) {
     const spec = contractTools().find((t) => t.name === "write_file")!;
     const approvals = new ScriptedApprovals();
@@ -186,12 +186,30 @@ describe("auto-edit and the agent's own configuration", () => {
     return approvals.changes[0]!.ask;
   }
 
-  it("still asks before writing the editor's settings, the agent's notes, commands or subagents", async () => {
-    for (const path of [".vscode/settings.json", ".vscode/tasks.json", "MATTERWAVE.md", "MATTERWAVE.local.md", "AGENTS.md", ".matterwave/agents/helper.md", ".matterwave/commands/ship.md", "proj.code-workspace"]) {
-      expect([path, await write(path, "auto-edit")]).toEqual([path, true]);
+  it("still asks before writing the editor's settings, the agent's notes, commands or subagents, yolo included", async () => {
+    const guarded = [
+      ".vscode/settings.json",
+      ".VSCode/tasks.json",
+      "MATTERWAVE.md",
+      "MATTERWAVE.local.md",
+      "AGENTS.md",
+      ".matterwave/agents/helper.md",
+      ".matterwave/commands/ship.md",
+      "proj.code-workspace",
+      ".matterwaveignore",
+      ".bashrc",
+      ".ssh/config",
+    ];
+    for (const mode of ["auto-edit", "yolo"] as const) {
+      for (const path of guarded) expect([mode, path, await write(path, mode)]).toEqual([mode, path, true]);
+      expect(await write("src/new.ts", mode)).toBe(false);
     }
-    expect(await write("src/new.ts", "auto-edit")).toBe(false);
-    expect(await write(".vscode/settings.json", "yolo")).toBe(false);
+  });
+
+  it("asks for a write that reaches a protected file through a link, by where the link leads", async () => {
+    mkdirSync(join(ws.root, ".matterwave"));
+    symlinkSync(join(ws.root, ".matterwave"), join(ws.root, "notes"), "junction");
+    expect(await write("notes/agents/spy.md", "yolo")).toBe(true);
   });
 });
 
@@ -207,7 +225,7 @@ describe("the approval mode during a run", () => {
       commands.push(command);
       // The person sees the first command run unasked and tightens the mode.
       await agentRef!.setMode("ask");
-      return { exitCode: 0, output: command, timedOut: false, stopped: false, truncated: false, durationMs: 1 };
+      return { exitCode: 0, output: command, omitted: 0, timedOut: false, stopped: false, truncated: false, durationMs: 1 };
     };
     const { agent, allowYolo } = session(model, { runShell: runShellStub });
     agentRef = agent;
@@ -237,7 +255,7 @@ describe("the approval mode during a run", () => {
     await agent.setMode("plan");
     await run(agent, "Look.");
     expect(existsSync(join(ws.root, "planted.txt"))).toBe(false);
-    expect(lastToolResult(model, 1)).toBe("write_file is not available in plan mode.");
+    expect(lastToolResult(model, 1)).toBe("Refused: write_file is not available in plan mode.");
   });
 
   it("orders the modes from the strictest", () => {
@@ -250,7 +268,7 @@ describe("the approval mode during a run", () => {
 describe("the editor's Accept and Reject", () => {
   it("answer only a change under review, never a command waiting in the view", async () => {
     const model = new FakeModel([[callChunk("s1", "run_shell", { command: "echo hi" })], [textChunk("ok")]]);
-    const runShellStub = async (): Promise<ShellResult> => ({ exitCode: 0, output: "", timedOut: false, stopped: false, truncated: false, durationMs: 1 });
+    const runShellStub = async (): Promise<ShellResult> => ({ exitCode: 0, output: "", omitted: 0, timedOut: false, stopped: false, truncated: false, durationMs: 1 });
     const { agent } = session(model, { runShell: runShellStub });
     const running = run(agent, "Run it.");
     await until(() => agent.pendingId() !== null);

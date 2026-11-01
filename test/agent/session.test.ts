@@ -106,7 +106,7 @@ describe("approval modes", () => {
     expect(review.closed).toEqual([view.id]);
     // The model was told, and the run went on.
     const toolMessage = model.requests[1]!.messages.find((m) => m.role === "tool")!;
-    expect(toolMessage.content).toContain("rejected the change to src/app.ts");
+    expect(toolMessage.content).toBe("The user rejected this edit call, so nothing was done. Do not send it again: change course, or ask the user what they want.");
   });
 
   it("an edited proposal, accepted, writes the person's version and tells the model so", async () => {
@@ -126,7 +126,7 @@ describe("approval modes", () => {
     const ran: string[] = [];
     const runShell = async (command: string): Promise<ShellResult> => {
       ran.push(command);
-      return { exitCode: 0, output: "1 passed", timedOut: false, stopped: false, truncated: false, durationMs: 5 };
+      return { exitCode: 0, output: "1 passed", omitted: 0, timedOut: false, stopped: false, truncated: false, durationMs: 5 };
     };
     const model = new FakeModel([[callChunk("call_1", "edit", EDIT)], [callChunk("call_2", "run_shell", { command: "npm test" })], [textChunk("Done.")]]);
     const { agent, review } = session(model, { runShell });
@@ -274,7 +274,7 @@ describe("subagents", () => {
     expect(model.toolNames(1).sort()).toEqual(["grep", "read_file"]);
     expect(model.requests[1]!.messages[0]!.content).toContain('You are the "reader" subagent');
     // Its write was refused as a tool it does not have, and nothing was written.
-    expect(model.requests[2]!.messages.at(-1)!.content).toContain('There is no tool named "write_file"');
+    expect(model.requests[2]!.messages.at(-1)!.content).toContain('Refused: there is no tool named write_file. Use one of the tools you were given.');
     expect(() => read("x.txt")).toThrow();
     // Five model calls in all, the subagent's three among them.
     expect(summary.usage.steps).toBe(5);
@@ -293,8 +293,8 @@ describe("subagents", () => {
 describe("MCP servers", () => {
   const server = fileURLToPath(new URL("../fixtures/mcp-server.mjs", import.meta.url));
 
-  it("lists a stdio server's tools, keeps the allow-list's others from the model, and asks before a tool that writes", async () => {
-    // Hints trusted, as for MatterWave's own server: its read-only tool runs unasked.
+  it("lists a stdio server's tools, keeps the allow-list's others from the model, and asks before each call, read-only or not", async () => {
+    // Hints trusted, as for MatterWave's own server: the read-only mark is believed, and still asks outside yolo.
     const mcp = new McpManager({ version: "test", fetch: () => Promise.reject(new Error("no http")), hintsTrusted: () => true });
     const model = new FakeModel([
       [callChunk("m1", "mcp__fx__read_thing", { id: "1" })],
@@ -307,19 +307,38 @@ describe("MCP servers", () => {
     });
     try {
       const running = run(agent, "Use the server.");
-      await until(() => agent.pendingId() !== null, 15_000);
+      for (const [tool, result] of [
+        ["mcp__fx__read_thing", 'read_thing({"id":"1"})'],
+        ["mcp__fx__write_thing", 'write_thing({"id":"2"})'],
+      ] as const) {
+        await until(() => agent.pendingId() !== null, 15_000);
+        const pending = agent.snapshot({ available: true, reason: null }).pending!;
+        expect(pending).toMatchObject({ kind: "mcp", tool });
+        agent.decide(pending.id, true);
+        await until(() => model.requests.at(-1)!.messages.at(-1)!.content === result, 15_000);
+      }
+      await running;
       const offered = model.toolNames(0);
       expect(offered).toContain("mcp__fx__read_thing");
       expect(offered).toContain("mcp__fx__write_thing");
       expect(offered).not.toContain("mcp__fx__secret_tool");
-      // The read-only tool ran without asking; the write waits.
-      expect(model.requests[1]!.messages.at(-1)!.content).toBe('read_thing({"id":"1"})');
-      const pending = agent.snapshot({ available: true, reason: null }).pending!;
-      expect(pending).toMatchObject({ kind: "mcp", tool: "mcp__fx__write_thing" });
-      agent.decide(pending.id, true);
-      await running;
-      expect(model.requests[2]!.messages.at(-1)!.content).toBe('write_thing({"id":"2"})');
       expect(mcp.status()).toEqual([{ name: "fx", state: "connected", tools: 2, hidden: 1, error: null }]);
+    } finally {
+      mcp.dispose();
+    }
+  }, 30_000);
+
+  it("runs a trusted server's tools without asking -- the person's standing approval -- but plan still leaves out the ones that write", async () => {
+    const mcp = new McpManager({ version: "test", fetch: () => Promise.reject(new Error("no http")) });
+    const model = new FakeModel([[callChunk("m1", "mcp__fx__write_thing", { id: "1" })], [textChunk("done")], [textChunk("planned")]]);
+    const { agent } = session(model, { mcp, mcpConfigs: () => ({ fx: { command: process.execPath, args: [server], trust: true } }) });
+    try {
+      await run(agent, "Use the server.");
+      expect(agent.pendingId()).toBeNull();
+      expect(model.requests[1]!.messages.at(-1)!.content).toBe('write_thing({"id":"1"})');
+      await agent.setMode("plan");
+      await run(agent, "Plan.");
+      expect(model.toolNames(2).filter((n) => n.startsWith("mcp__"))).toEqual(["mcp__fx__read_thing"]);
     } finally {
       mcp.dispose();
     }
@@ -355,7 +374,9 @@ describe("MCP servers", () => {
       expect(agent.snapshot({ available: true, reason: null }).pending).toMatchObject({ kind: "mcp", tool: "mcp__fx__read_thing" });
       agent.decide(agent.pendingId()!, false);
       await running;
-      expect(model.requests[1]!.messages.at(-1)!.content).toBe("The person declined the call; it did not run.");
+      expect(model.requests[1]!.messages.at(-1)!.content).toBe(
+        "The user rejected this mcp__fx__read_thing call, so nothing was done. Do not send it again: change course, or ask the user what they want.",
+      );
     } finally {
       mcp.dispose();
     }
@@ -373,15 +394,15 @@ describe("context, availability, resume and restore", () => {
 
   it("is greyed out with a reason: untrusted, no tools on the model, the org's switch", () => {
     const untrusted = session(new FakeModel([]), { workspace: () => ({ roots: [{ name: "ws", path: ws.root }], trusted: false }) }).agent;
-    expect(untrusted.availability({ signedIn: true, model: null, localAgentTools: true }).reason).toContain("untrusted workspace");
+    expect(untrusted.availability({ signedIn: true, model: null, localAgentTools: "yes" }).reason).toContain("untrusted workspace");
     const { agent } = session(new FakeModel([]));
-    expect(agent.availability({ signedIn: true, model: { label: "GRT Tiny", supports_tools: false }, localAgentTools: true })).toEqual({
+    expect(agent.availability({ signedIn: true, model: { label: "GRT Tiny", tools: "no" }, localAgentTools: "yes" })).toEqual({
       available: false,
       reason: "GRT Tiny cannot call tools. Pick a model that can to use the agent.",
     });
-    expect(agent.availability({ signedIn: true, model: null, localAgentTools: false }).reason).toBe("Your organisation has turned off local agent tools.");
-    // A missing field is allowed.
-    expect(agent.availability({ signedIn: true, model: { label: "GRT", supports_tools: null }, localAgentTools: null }).available).toBe(true);
+    expect(agent.availability({ signedIn: true, model: null, localAgentTools: "no" }).reason).toBe("Your organisation has turned off local agent tools.");
+    // A deployment that does not say is allowed.
+    expect(agent.availability({ signedIn: true, model: { label: "GRT", tools: "unknown" }, localAgentTools: "unknown" }).available).toBe(true);
   });
 
   it("keeps the run's history for /resume, so a new session continues with the earlier tool rounds in context", async () => {

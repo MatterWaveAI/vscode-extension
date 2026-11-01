@@ -1,4 +1,4 @@
-import type { ConversationFrame } from "../lib/matterwaveClient";
+import { localAgentToolsOf, toolsOf, type ConversationFrame, type ToolsVerdict } from "../lib/matterwaveClient";
 import type { MatterWaveClient } from "../api/client";
 import { ApiError } from "../api/errors";
 import { isUntrustedCertificate } from "../api/transport";
@@ -164,8 +164,8 @@ export class ChatController {
   private usage: UsageView | null = null;
   /** The library, read once per refresh: the rows' folder/tag badges draw from it. */
   private library: Library | null = null;
-  /** The org switch for local agent tools, from `/api/me`; null until read, and a missing field reads as allowed. */
-  private localAgentTools: boolean | null = null;
+  /** The org switch for local agent tools, from `/api/me` (the SDK's verdict): only "no" turns the agent off. */
+  private localAgentTools: ToolsVerdict = "unknown";
   private budget: BudgetView | null = null;
   /** True while the failure on screen belongs to an agent run: Retry continues the run rather than resending. */
   private agentFailed = false;
@@ -305,8 +305,8 @@ export class ChatController {
         this.deps.client.listArchivedConversations(),
       ]);
       this.identity = me.name || me.email || me.subject;
-      // A deployment that predates the switch does not send it: allowed.
-      this.localAgentTools = me.local_agent_tools !== false;
+      // A deployment that predates the switch does not send it: "unknown", which is allowed.
+      this.localAgentTools = localAgentToolsOf(me);
       this.models = models.data;
       this.model = initialModel(models.data, this.deps.rememberedModel.get(), models.default_model);
       // A temporary conversation is in no list, whatever a deployment's rows
@@ -832,7 +832,7 @@ export class ChatController {
     if (!agent) return { available: false, reason: "The agent is not available in this editor." };
     return agent.availability({
       signedIn: this.signedIn,
-      model: this.model ? { label: this.model.label || this.model.id, supports_tools: this.model.supports_tools ?? null } : null,
+      model: this.model ? { label: this.model.label || this.model.id, tools: toolsOf(this.models, this.model.id) } : null,
       localAgentTools: this.localAgentTools,
     });
   }

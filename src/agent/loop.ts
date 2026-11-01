@@ -1,8 +1,7 @@
 import { ApiError } from "../api/errors";
-import { toolsForMode } from "../lib/sdk/agent/modes";
+import { refusal } from "../lib/sdk/agent/modes";
 import type { ModeName } from "../lib/sdk/agent/types";
-import { CONTRACT_TOOL_NAMES } from "./host";
-import { failure, parseArguments, type Approvals, type ToolOutcome, type ToolSpec } from "./tools";
+import { failure, offeredTools, parseArguments, type Approvals, type ToolOutcome, type ToolSpec } from "./tools";
 import { StepAccumulator, type ChatCompletionChunk, type ChatCompletionRequest, type ChatMessage, type StepResult, type Tool, type ToolCall } from "./wire";
 
 /**
@@ -75,14 +74,6 @@ export interface LoopResult {
   error?: unknown;
   /** The sentence to show for a cap. */
   message?: string;
-}
-
-/** The `tools` a step offers in `mode`: the contract's through the SDK's `toolsForMode`, then the extension's own that the mode does not deny. */
-export function offeredTools(specs: readonly ToolSpec[], mode: ModeName): Tool[] {
-  const local = new Set(specs.map((s) => s.name));
-  const contract = toolsForMode(mode).filter((tool) => local.has(tool.function.name));
-  const extra = specs.filter((s) => !CONTRACT_TOOL_NAMES.has(s.name) && s.decide(mode) !== "deny").map((s) => s.definition);
-  return [...contract, ...extra];
 }
 
 /** The modes from the strictest to the loosest: each allows everything the one before it does. */
@@ -188,10 +179,10 @@ async function runTool(options: LoopOptions, byName: Map<string, ToolSpec>, call
   const args = parseArguments(call.function.arguments);
   const label = spec?.label && typeof args !== "string" ? spec.label(args) : "";
   options.events?.onToolCall?.(call, label);
-  if (!spec) return failure(`There is no tool named "${call.function.name}". Use one of the tools you were given.`);
+  if (!spec) return failure(refusal("unknown_tool", { tool: call.function.name }));
   if (typeof args === "string") return failure(args);
   const decision = spec.decide(mode);
-  if (decision === "deny") return failure(`${spec.name} is not available in ${mode} mode.`);
+  if (decision === "deny") return failure(refusal("mode", { tool: spec.name, mode }));
   try {
     return await spec.run(args, decision, {
       root: options.root,

@@ -183,7 +183,7 @@ describe("agent mode in a real editor, against a scripted /v1", function () {
     assert.deepEqual(readFileSync(target), Buffer.from(ORIGINAL), "Reject leaves the file byte-identical");
     assert.equal(proposalTabs().length, 0, "the diff is closed");
     const result = api.chat.snapshot().transcript.at(-1)!.message.parts.find((p) => p.type === "tool_result");
-    assert.ok(result && result.type === "tool_result" && result.output.includes("rejected the change"));
+    assert.ok(result && result.type === "tool_result" && result.output.includes("The user rejected this edit call"));
   });
 
   it("applies an accepted change through a WorkspaceEdit, and Ctrl+Z (undo) restores the file", async function () {

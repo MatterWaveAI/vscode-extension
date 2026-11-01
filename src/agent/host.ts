@@ -1,40 +1,59 @@
-import type { Dirent } from "node:fs";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import * as nodePath from "node:path";
-import { DenyList, PROTECTED_LIST, PathRefusedError } from "../lib/sdk/agent/deny";
-import { EditError, applyEdit } from "../lib/sdk/agent/edit";
-import { unifiedDiff } from "../lib/sdk/agent/diff";
-import { allowed } from "../lib/sdk/agent/modes";
-import { confine, loadDenyList } from "../lib/sdk/agent/confine";
-import { LIMITS, TOOL_NAMES, type ModeName } from "../lib/sdk/agent/types";
-import { IgnoreRules, globMatcher } from "./ignore";
-import { PatternTooSlow, RegexWorker, type FileText } from "./regexWorker";
-import { runShell as spawnShell, type ShellOptions, type ShellResult } from "./shell";
 import {
-  failure,
-  intArg,
-  isOutcome,
-  ok,
-  stringArg,
-  type ToolContext,
-  type ToolOutcome,
-  type ToolSpec,
-} from "./tools";
+  DenyList,
+  EditError,
+  LIMITS,
+  PathRefusedError,
+  TOOLS_BY_NAME,
+  ToolError,
+  allowed,
+  applyEdit,
+  confine,
+  decodeText,
+  formatGlob,
+  formatGrep,
+  formatReadFile,
+  formatShell,
+  globMatches,
+  grepLine,
+  isAbsolute,
+  isBinary,
+  loadDenyList,
+  loadSearchIgnore,
+  refusal,
+  runListDir,
+  runReadFile,
+  textLines,
+  unifiedDiff,
+  walk,
+  type LimitName,
+  type Limits,
+  type SearchIgnore,
+  type ToolName,
+} from "../lib/sdk/agent/node";
+import { PatternTooSlow, RegexWorker, type FileLines, type LineMatch } from "./regexWorker";
+import { runShell as spawnShell, type ShellOptions, type ShellResult } from "./shell";
+import { failure, intArg, isOutcome, ok, rejectedOutcome, stringArg, toolSpec, type ToolContext, type ToolOutcome, type ToolSpec } from "./tools";
 
 /**
  * The seven contract tools, run in the extension host against the
  * workspace root: `read_file`, `list_dir`, `glob`, `grep`, `edit`,
  * `write_file` and `run_shell`.
  *
- * Every path goes through the SDK's `confine` before anything is read or
- * written (`..`, an absolute path outside the root, a link out of it, the
- * deny list, protected paths for a write). Searches also skip what
- * `.gitignore` ignores. A write never touches the disk here: the change goes
- * to `approvals.change`, which shows the diff, waits for the person in `ask`
- * mode, and applies it through the editor -- after `stale()` confirms that
- * the path still leads where it did and the file still holds what the diff
- * was made from. A command runs as a child process in the root, with the
- * contract's timeout and output cap.
+ * What they return is the SDK's: `runReadFile` and `runListDir`, and for the
+ * searches its walker (`walk`, with the .gitignore and .matterwaveignore
+ * rules of `SearchIgnore`), `globMatches` and the `format*` functions, so the
+ * text matches every other client's. Every path goes through the SDK's
+ * `confine` before anything is read or written. Three things are the
+ * extension's own: the searches let the editor breathe while they walk (and
+ * stop at MAX_WALKED files), grep runs the model's pattern in a worker
+ * against a deadline (regexWorker.ts), and a write never touches the disk
+ * here -- the change goes to `approvals.change`, which shows the diff, waits
+ * for the person when it asks, and applies it through the editor after
+ * `stale()` confirms that the path still leads where it did and the file
+ * still holds what the diff was made from. A command runs as a child process
+ * in the root (shell.ts), its text the SDK's `formatShell`.
  */
 
 export interface HostOptions {
@@ -46,14 +65,14 @@ export interface HostOptions {
   readText?: (absolute: string) => Promise<string | null>;
   /** The command runner; the real one spawns a process, a test can stand in. */
   runShell?: (command: string, options: ShellOptions) => Promise<ShellResult>;
+  /** Overrides for the contract's limits, by name (the conformance cases set some). */
+  limits?: Limits;
 }
 
-/** Past this a file is not read at all: a line range deep in it is not worth the memory. */
-const MAX_FILE_BYTES = 16 * 1024 * 1024;
-/** grep skips files larger than this, and stops walking after this many files. */
-const MAX_GREP_FILE_BYTES = 2 * 1024 * 1024;
+/** A search stops walking after this many files: the extension's own limit, beside the contract's. */
 const MAX_WALKED = 100_000;
-const MAX_MATCH_LINE_CHARS = 400;
+/** A walk lets the extension host's event loop run, and checks for Stop, every this many files. */
+const WALK_YIELD_EVERY = 200;
 /** grep hands files to its matcher in batches of about this much text, or this many files. */
 const GREP_BATCH_BYTES = 1024 * 1024;
 const GREP_BATCH_FILES = 200;
@@ -62,25 +81,30 @@ const GREP_BATCH_FILES = 200;
 const decoder = new TextDecoder("utf-8");
 
 /**
- * Paths that steer the agent or the editor rather than hold the project's
- * code: VS Code's workspace settings (MCP servers, tasks, the executables
- * other extensions run), the agent's own notes, commands and subagents. A
- * change to one asks in every mode but yolo, auto-edit included, so text the
- * agent read cannot quietly turn itself into standing instructions or a
- * process the editor starts.
+ * What steers the editor rather than holds the project's code, on top of the
+ * contract's protected paths (`.matterwave/`, the context files, the deny
+ * file, the home folder's shell and credential files): VS Code's workspace
+ * settings (MCP servers, tasks, the executables other extensions run) and
+ * workspace files. A write to one asks in every mode, yolo included, as a
+ * write to a protected path does, so text the agent read cannot turn itself
+ * into a process the editor starts.
  */
-export const AGENT_CONFIG = new DenyList([
-  ".vscode/",
-  "*.code-workspace",
-  ".matterwave/",
-  "MATTERWAVE.md",
-  "MATTERWAVE.local.md",
-  "AGENTS.md",
-]);
+export const EDITOR_CONFIG = new DenyList([".vscode/", "*.code-workspace"]);
 
-/** Whether a change to `relative` asks in this mode whatever the mode's own rule says. */
-function asksAnyway(relative: string, mode: ModeName): boolean {
-  return mode !== "yolo" && AGENT_CONFIG.matches(relative);
+function limit(name: LimitName, options: HostOptions): number {
+  return options.limits?.[name] ?? LIMITS[name];
+}
+
+/** The contract's sentence for a refused path or a tool that cannot answer, as the tool's error result. */
+function failed(error: unknown): ToolOutcome {
+  if (error instanceof PathRefusedError || error instanceof ToolError || error instanceof EditError) return failure(error.message);
+  throw error;
+}
+
+function aborted(): Error {
+  const error = new Error("aborted");
+  error.name = "AbortError";
+  return error;
 }
 
 /** For comparing what the diff was made from with the file now: the editor and the disk differ in a BOM and line endings, not content. */
@@ -93,42 +117,6 @@ function samePath(a: string, b: string): boolean {
   return norm(a) === norm(b);
 }
 
-/**
- * What would make applying a change proposed earlier wrong now, or null: the
- * path refused or leading elsewhere (a folder swapped for a link meanwhile),
- * or the file not what the diff was made from (the person, a formatter or a
- * command changed it while the change waited). Writing anyway would clobber
- * that change or follow the new link.
- */
-function staleCheck(root: string, relative: string, absolute: string, before: string | null, options: HostOptions): () => Promise<string | null> {
-  return async () => {
-    let now;
-    try {
-      now = confine(root, relative, { write: true });
-    } catch (error) {
-      return error instanceof PathRefusedError ? error.message : `${relative} can no longer be checked.`;
-    }
-    if (!samePath(now.absolute, absolute)) return `${relative} now leads somewhere else: a folder or link on its path changed while the change waited.`;
-    const kind = await kindOf(absolute);
-    if (before === null) return kind === null ? null : `${relative} was created by something else while the change waited.`;
-    if (kind !== "file") return `${relative} was removed while the change waited.`;
-    const current = await readText(absolute, relative, options);
-    if (isOutcome(current)) return current.content;
-    return comparable(current) === comparable(before) ? null : `${relative} changed while the change waited.`;
-  };
-}
-
-function isBinary(bytes: Uint8Array): boolean {
-  const end = Math.min(bytes.length, 8000);
-  for (let i = 0; i < end; i++) if (bytes[i] === 0) return true;
-  return false;
-}
-
-function refused(error: unknown): ToolOutcome {
-  if (error instanceof PathRefusedError) return failure(error.message);
-  throw error;
-}
-
 async function kindOf(path: string): Promise<"file" | "dir" | null> {
   try {
     const info = await stat(path);
@@ -138,106 +126,116 @@ async function kindOf(path: string): Promise<"file" | "dir" | null> {
   }
 }
 
-/** A file's text (the editor's copy when it has one), or the sentence to return when it is not text. */
-async function readText(absolute: string, relative: string, options: HostOptions): Promise<string | ToolOutcome> {
+/** A file's text for a change (the editor's copy when it has one); `ToolError` when it is too large or not text. */
+async function readForChange(absolute: string, relative: string, options: HostOptions): Promise<string> {
   const open = await options.readText?.(absolute);
   if (typeof open === "string") return open;
   const info = await stat(absolute);
-  if (info.size > MAX_FILE_BYTES) {
-    return failure(`${relative} is ${info.size.toLocaleString("en-US")} bytes, too large to read.`);
-  }
+  const cap = limit("read_max_file_bytes", options);
+  if (info.size > cap) throw new ToolError("too_large", { path: relative, size: info.size, limit: cap });
   const bytes = await readFile(absolute);
-  if (isBinary(bytes)) return failure(`${relative} is a binary file; only text files are read.`);
+  if (isBinary(bytes, options.limits)) throw new ToolError("binary", { path: relative });
   return decoder.decode(bytes);
 }
 
-/** The `.gitignore` rules in force at `dirRelative`: the root's and every directory's on the way down. */
-async function rulesAt(root: string, dirRelative: string): Promise<IgnoreRules> {
-  let rules = IgnoreRules.empty();
-  const segments = dirRelative === "." || dirRelative === "" ? [] : dirRelative.split("/");
-  for (let depth = 0; depth <= segments.length; depth++) {
-    const base = segments.slice(0, depth).join("/");
-    rules = await withGitignore(rules, nodePath.join(root, ...segments.slice(0, depth)), base);
-  }
-  return rules;
-}
-
-async function withGitignore(rules: IgnoreRules, dir: string, base: string): Promise<IgnoreRules> {
-  try {
-    return rules.with(await readFile(nodePath.join(dir, ".gitignore"), "utf8"), base);
-  } catch {
-    return rules;
-  }
-}
-
-function join(base: string, name: string): string {
-  return base === "" || base === "." ? name : `${base}/${name}`;
-}
-
-/** What a directory entry is, following a link only when it stays inside the root. */
-async function entryKind(root: string, relative: string, entry: Dirent, deny: DenyList): Promise<"file" | "dir" | null> {
-  if (entry.isDirectory()) return "dir";
-  if (entry.isFile()) return "file";
-  if (!entry.isSymbolicLink()) return null;
-  try {
-    const target = confine(root, relative, { deny });
-    // A linked file inside the root is searched; a linked directory is not
-    // walked into, so a link loop cannot trap a search.
-    return (await kindOf(target.absolute)) === "file" ? "file" : null;
-  } catch {
-    return null;
-  }
-}
-
-interface WalkOptions {
-  root: string;
-  start: string;
-  deny: DenyList;
-  signal: AbortSignal;
-  visit: (relative: string, absolute: string) => Promise<boolean> | boolean;
+/** Where a write leads, and whether it asks the person whatever the mode says. */
+interface WriteTarget {
+  absolute: string;
+  relative: string;
+  /** A path the contract protects or the editor's configuration, by its own name or where its links lead. */
+  guarded: boolean;
 }
 
 /**
- * Every file under `start` that is neither denied nor ignored, depth first in
- * name order; `visit` returns false to stop. Linked directories are not
- * entered, so everything walked is physically under the root.
+ * Where a write to `path` leads. A protected path is one `confine` refuses
+ * until the write is approved; it is resolved as approved here because the
+ * change will be put to the person before anything is written.
  */
-async function walk(options: WalkOptions): Promise<{ visited: number; complete: boolean }> {
-  const { root, deny, signal, visit } = options;
-  let visited = 0;
-  const stack: { relative: string; rules: IgnoreRules }[] = [
-    { relative: options.start, rules: await rulesAt(root, options.start) },
-  ];
-  while (stack.length > 0) {
-    if (signal.aborted) return { visited, complete: false };
-    const { relative, rules } = stack.pop()!;
-    const absolute = relative === "." || relative === "" ? root : nodePath.join(root, ...relative.split("/"));
-    let entries: Dirent[];
-    try {
-      entries = await readdir(absolute, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    const here = relative === "." || relative === "" ? rules : await withGitignore(rules, absolute, relative);
-    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-    const dirs: string[] = [];
-    for (const entry of entries) {
-      const rel = join(relative === "." ? "" : relative, entry.name);
-      const kind = await entryKind(root, rel, entry, deny);
-      if (kind === null) continue;
-      const isDir = kind === "dir";
-      if (deny.matches(rel, { isDir }) || here.ignored(rel, isDir)) continue;
-      if (isDir) {
-        dirs.push(rel);
-        continue;
-      }
-      visited += 1;
-      if (visited > MAX_WALKED) return { visited, complete: false };
-      if (!(await visit(rel, nodePath.join(root, ...rel.split("/"))))) return { visited, complete: false };
-    }
-    for (const dir of dirs.reverse()) stack.push({ relative: dir, rules: here });
+function writeTarget(root: string, path: string): WriteTarget {
+  let target;
+  let guarded = false;
+  try {
+    target = confine(root, path, { write: true });
+  } catch (error) {
+    if (!(error instanceof PathRefusedError) || error.reason !== "protected") throw error;
+    target = confine(root, path, { write: true, approved: true });
+    guarded = true;
   }
-  return { visited, complete: true };
+  const given = isAbsolute(path) ? nodePath.relative(root, path) : path;
+  guarded ||= EDITOR_CONFIG.matches(given) || EDITOR_CONFIG.matches(target.relative);
+  return { ...target, guarded };
+}
+
+/**
+ * What would make applying a change proposed earlier wrong now, or null: the
+ * path refused or leading elsewhere (a folder swapped for a link meanwhile),
+ * or the file not what the diff was made from (the person, a formatter or a
+ * command changed it while the change waited). Writing anyway would clobber
+ * that change or follow the new link.
+ */
+function staleCheck(root: string, target: WriteTarget, before: string | null, options: HostOptions): () => Promise<string | null> {
+  const { relative, absolute } = target;
+  return async () => {
+    let now;
+    try {
+      now = confine(root, relative, { write: true, approved: target.guarded });
+    } catch (error) {
+      return error instanceof PathRefusedError ? error.message : `${relative} can no longer be checked.`;
+    }
+    if (!samePath(now.absolute, absolute)) return `${relative} now leads somewhere else: a folder or link on its path changed while the change waited.`;
+    const kind = await kindOf(absolute);
+    if (before === null) return kind === null ? null : `${relative} was created by something else while the change waited.`;
+    if (kind !== "file") return `${relative} was removed while the change waited.`;
+    let current: string;
+    try {
+      current = await readForChange(absolute, relative, options);
+    } catch (error) {
+      if (error instanceof ToolError) return error.message;
+      throw error;
+    }
+    return comparable(current) === comparable(before) ? null : `${relative} changed while the change waited.`;
+  };
+}
+
+// --- the searches ---------------------------------------------------------------
+
+interface SearchStart {
+  /** The confined path, relative to the root (`.` for the root). */
+  relative: string;
+  isFile: boolean;
+  rules: SearchIgnore;
+}
+
+/** The path a search starts from: confined, and a file or a folder (`not_found` otherwise). */
+async function searchStart(root: string, path: string): Promise<SearchStart> {
+  const deny = loadDenyList(root);
+  const target = confine(root, path, { deny });
+  const kind = await kindOf(target.absolute);
+  if (kind === null) throw new ToolError("not_found", { path: target.relative });
+  return { relative: target.relative, isFile: kind === "file", rules: loadSearchIgnore(root, { deny }) };
+}
+
+/**
+ * The SDK's walk, in its order, with the editor let through every
+ * WALK_YIELD_EVERY files (Stop takes effect there) and no further than
+ * MAX_WALKED files.
+ */
+async function* walkFiles(root: string, start: SearchStart, signal: AbortSignal): AsyncGenerator<string> {
+  let walked = 0;
+  for (const relative of walk(root, start.relative, { deny: start.rules.deny, ignore: start.rules })) {
+    yield relative;
+    walked += 1;
+    if (walked >= MAX_WALKED) return;
+    if (walked % WALK_YIELD_EVERY === 0) {
+      await new Promise((resolve) => setImmediate(resolve));
+      if (signal.aborted) throw aborted();
+    }
+  }
+}
+
+/** `relative` below the search's base folder, which glob patterns are matched against. */
+function under(relative: string, base: string): string {
+  return base ? relative.slice(base.length + 1) : relative;
 }
 
 // --- the tools ------------------------------------------------------------------
@@ -249,196 +247,132 @@ async function readFileTool(args: Record<string, unknown>, ctx: ToolContext, opt
   if (isOutcome(start)) return start;
   const end = intArg(args, "end_line");
   if (isOutcome(end)) return end;
-  let target;
+  const lines = { startLine: start, endLine: end, limits: options.limits };
   try {
-    target = confine(ctx.root, path!);
+    if (options.readText) {
+      // The editor's copy of an open file, numbered as the disk's would be.
+      const target = confine(ctx.root, path!);
+      const open = await options.readText(target.absolute);
+      if (typeof open === "string") return ok(formatReadFile(open, target.relative, lines));
+    }
+    return ok(runReadFile(ctx.root, path!, lines));
   } catch (error) {
-    return refused(error);
+    return failed(error);
   }
-  const kind = await kindOf(target.absolute);
-  if (kind === null) return failure(`${path} does not exist.`);
-  if (kind === "dir") return failure(`${path} is a directory; use list_dir to see what is in it.`);
-  const text = await readText(target.absolute, target.relative, options);
-  if (isOutcome(text)) return text;
-  if (text === "") return ok(`(${target.relative} is empty)`);
-  const lines = text.split("\n").map((line) => line.replace(/\r$/, ""));
-  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
-  const first = Math.max(1, start ?? 1);
-  if (first > lines.length) return failure(`${target.relative} has ${lines.length} lines; start_line ${first} is past its end.`);
-  const last = Math.min(lines.length, end ?? lines.length, first + LIMITS.read_max_lines - 1);
-  const out: string[] = [];
-  let bytes = 0;
-  let shown = first - 1;
-  for (let n = first; n <= last; n++) {
-    const line = `${n}\t${lines[n - 1]}`;
-    bytes += Buffer.byteLength(line) + 1;
-    if (bytes > LIMITS.read_max_bytes && out.length > 0) break;
-    out.push(line);
-    shown = n;
-  }
-  const wanted = Math.min(lines.length, end ?? lines.length);
-  if (shown < wanted) {
-    out.push(`[cut at line ${shown} of ${lines.length}: the read limit; pass start_line=${shown + 1} to read on]`);
-  }
-  return ok(out.join("\n"));
 }
 
-async function listDirTool(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolOutcome> {
+async function listDirTool(args: Record<string, unknown>, ctx: ToolContext, options: HostOptions): Promise<ToolOutcome> {
   const path = stringArg(args, "path", false);
   if (isOutcome(path)) return path;
-  let target;
   try {
-    target = confine(ctx.root, path || ".");
+    return ok(runListDir(ctx.root, path || ".", { limits: options.limits }));
   } catch (error) {
-    return refused(error);
+    return failed(error);
   }
-  if ((await kindOf(target.absolute)) !== "dir") return failure(`${path || "."} is not a directory.`);
-  const deny = loadDenyList(ctx.root);
-  const rules = await rulesAt(ctx.root, target.relative);
-  const entries = await readdir(target.absolute, { withFileTypes: true });
-  const dirs: string[] = [];
-  const files: string[] = [];
-  for (const entry of entries) {
-    const rel = join(target.relative === "." ? "" : target.relative, entry.name);
-    let isDir = entry.isDirectory();
-    if (entry.isSymbolicLink()) {
-      try {
-        isDir = (await kindOf(confine(ctx.root, rel, { deny }).absolute)) === "dir";
-      } catch {
-        continue;
-      }
-    }
-    if (deny.matches(rel, { isDir }) || PROTECTED_LIST.matches(rel, { isDir }) || rules.ignored(rel, isDir)) continue;
-    (isDir ? dirs : files).push(isDir ? `${entry.name}/` : entry.name);
-  }
-  const sorted = [...dirs.sort(), ...files.sort()];
-  if (sorted.length === 0) return ok(`(${target.relative} is empty)`);
-  const shown = sorted.slice(0, LIMITS.list_max_entries);
-  if (sorted.length > shown.length) shown.push(`[${sorted.length - shown.length} more entries not shown]`);
-  return ok(shown.join("\n"));
 }
 
-async function searchBase(ctx: ToolContext, path: string | undefined): Promise<{ relative: string } | ToolOutcome> {
-  let target;
-  try {
-    target = confine(ctx.root, path || ".");
-  } catch (error) {
-    return refused(error);
-  }
-  const kind = await kindOf(target.absolute);
-  if (kind === null) return failure(`${path} does not exist.`);
-  return { relative: target.relative };
-}
-
-async function globTool(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolOutcome> {
+async function globTool(args: Record<string, unknown>, ctx: ToolContext, options: HostOptions): Promise<ToolOutcome> {
   const pattern = stringArg(args, "pattern");
   if (isOutcome(pattern)) return pattern;
   const path = stringArg(args, "path", false);
   if (isOutcome(path)) return path;
-  const base = await searchBase(ctx, path);
-  if (isOutcome(base)) return base;
-  const matches = globMatcher(pattern!);
-  const prefix = base.relative === "." ? "" : `${base.relative}/`;
-  const found: string[] = [];
-  let more = false;
-  await walk({
-    root: ctx.root,
-    start: base.relative,
-    deny: loadDenyList(ctx.root),
-    signal: ctx.signal,
-    visit: (relative) => {
-      if (!matches(relative.slice(prefix.length))) return true;
-      if (found.length >= LIMITS.search_max_results) {
-        more = true;
-        return false;
+  try {
+    if (pattern!.trim() === "") throw new ToolError("empty_pattern");
+    const start = await searchStart(ctx.root, path || ".");
+    if (start.isFile) throw new ToolError("not_directory", { path: start.relative });
+    const base = start.relative === "." ? "" : start.relative;
+    const cap = limit("search_max_results", options);
+    const found: string[] = [];
+    let truncated = false;
+    for await (const relative of walkFiles(ctx.root, start, ctx.signal)) {
+      if (!globMatches(pattern!, under(relative, base))) continue;
+      if (found.length === cap) {
+        truncated = true;
+        break;
       }
       found.push(relative);
-      return true;
-    },
-  });
-  if (found.length === 0) return ok(`No files match ${pattern}.`);
-  if (more) found.push(`[stopped at ${LIMITS.search_max_results} results; narrow the pattern or the path]`);
-  return ok(found.join("\n"));
+    }
+    return ok(formatGlob(pattern!, found, { truncated, limits: options.limits }));
+  } catch (error) {
+    return failed(error);
+  }
 }
 
-async function grepTool(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolOutcome> {
+/** A matching line as the worker hands it back, then as grep shows it (see regexWorker.ts on `more`). */
+function shown(match: LineMatch): [string, number, string] {
+  return [match.relative, match.line, grepLine(match.more ? `${match.text}.` : match.text)];
+}
+
+async function grepTool(args: Record<string, unknown>, ctx: ToolContext, options: HostOptions): Promise<ToolOutcome> {
   const pattern = stringArg(args, "pattern");
   if (isOutcome(pattern)) return pattern;
   const path = stringArg(args, "path", false);
   if (isOutcome(path)) return path;
   const glob = stringArg(args, "glob", false);
   if (isOutcome(glob)) return glob;
-  const ignoreCase = args.ignore_case === true;
+  const flags = args.ignore_case === true ? "i" : "";
+  let matcher: RegexWorker | null = null;
   try {
-    new RegExp(pattern!, ignoreCase ? "i" : "");
-  } catch (error) {
-    return failure(`The pattern is not a valid regular expression: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  const deny = loadDenyList(ctx.root);
-  let target;
-  try {
-    target = confine(ctx.root, path || ".", { deny });
-  } catch (error) {
-    return refused(error);
-  }
-  const kind = await kindOf(target.absolute);
-  if (kind === null) return failure(`${path} does not exist.`);
-  const filter = glob ? globMatcher(glob) : null;
-  const prefix = kind === "dir" && target.relative !== "." ? `${target.relative}/` : "";
-  const found: string[] = [];
-  let more = false;
-  // The model's pattern runs in a worker, against a deadline: see regexWorker.ts.
-  const matcher = new RegexWorker(pattern!, ignoreCase ? "i" : "");
-  let batch: FileText[] = [];
-  let batchBytes = 0;
-  const flush = async (): Promise<boolean> => {
-    if (batch.length === 0) return true;
-    const files = batch;
-    batch = [];
-    batchBytes = 0;
-    const room = LIMITS.search_max_results - found.length;
-    const matches = await matcher.match(files, room + 1, MAX_MATCH_LINE_CHARS, ctx.signal);
-    for (const m of matches.slice(0, room)) found.push(`${m.relative}:${m.line}: ${m.text}`);
-    if (matches.length > room) {
-      more = true;
-      return false;
-    }
-    return true;
-  };
-  const search = async (relative: string, absolute: string): Promise<boolean> => {
-    if (filter && !filter(relative.slice(prefix.length))) return true;
-    let bytes: Buffer;
+    if (pattern === "") throw new ToolError("empty_pattern");
     try {
-      const info = await stat(absolute);
-      if (info.size > MAX_GREP_FILE_BYTES) return true;
-      bytes = await readFile(absolute);
-    } catch {
-      return true;
+      new RegExp(pattern!, flags);
+    } catch (error) {
+      throw new ToolError("invalid_regex", { pattern: pattern!, error: error instanceof Error ? error.message : String(error) });
     }
-    if (isBinary(bytes)) return true;
-    batch.push({ relative, text: decoder.decode(bytes) });
-    batchBytes += bytes.length;
-    return batchBytes >= GREP_BATCH_BYTES || batch.length >= GREP_BATCH_FILES ? flush() : true;
-  };
-  try {
-    if (kind === "file") {
-      await search(target.relative, target.absolute);
-    } else {
-      await walk({ root: ctx.root, start: target.relative, deny, signal: ctx.signal, visit: search });
+    const start = await searchStart(ctx.root, path || ".");
+    const base = start.isFile
+      ? start.relative.includes("/")
+        ? start.relative.slice(0, start.relative.lastIndexOf("/"))
+        : ""
+      : start.relative === "."
+        ? ""
+        : start.relative;
+    const cap = limit("search_max_results", options);
+    const maxFile = limit("grep_max_file_bytes", options);
+    const found: [string, number, string][] = [];
+    let truncated = false;
+    // The model's pattern runs in a worker, against a deadline: see regexWorker.ts.
+    matcher = new RegexWorker(pattern!, flags);
+    let batch: FileLines[] = [];
+    let batchBytes = 0;
+    const flush = async (): Promise<boolean> => {
+      if (batch.length === 0) return true;
+      const files = batch;
+      batch = [];
+      batchBytes = 0;
+      const room = cap - found.length;
+      const matches = await matcher!.match(files, room + 1, ctx.signal);
+      found.push(...matches.slice(0, room).map(shown));
+      truncated = matches.length > room;
+      return !truncated;
+    };
+    for await (const relative of walkFiles(ctx.root, start, ctx.signal)) {
+      if (glob && !globMatches(glob, under(relative, base))) continue;
+      const absolute = nodePath.join(ctx.root, ...relative.split("/"));
+      let bytes: Buffer;
+      try {
+        if ((await stat(absolute)).size > maxFile) continue;
+        bytes = await readFile(absolute);
+      } catch {
+        continue;
+      }
+      if (isBinary(bytes, options.limits)) continue;
+      batch.push({ relative, lines: textLines(decodeText(bytes)) });
+      batchBytes += bytes.length;
+      if ((batchBytes >= GREP_BATCH_BYTES || batch.length >= GREP_BATCH_FILES) && !(await flush())) break;
     }
-    if (!more) await flush();
+    if (!truncated) await flush();
+    return ok(formatGrep(pattern!, found, { truncated, limits: options.limits }));
   } catch (error) {
     if (error instanceof PatternTooSlow) return failure(error.message);
-    throw error;
+    return failed(error);
   } finally {
-    matcher.close();
+    matcher?.close();
   }
-  if (found.length === 0) return ok(`No matches for ${pattern}.`);
-  if (more) found.push(`[stopped at ${LIMITS.search_max_results} matches; narrow the pattern, the path or the glob]`);
-  return ok(found.join("\n"));
 }
 
 function changeResult(
+  tool: string,
   relative: string,
   verb: string,
   outcome: Awaited<ReturnType<ToolContext["approvals"]["change"]>>,
@@ -448,10 +382,7 @@ function changeResult(
   if (outcome.status === "failed") {
     return failure(`${relative} was not changed: ${outcome.reason} Read it again before proposing the change anew.`);
   }
-  if (outcome.status === "rejected") {
-    const said = outcome.reason ? ` They said: ${outcome.reason}` : "";
-    return { content: `The person rejected the change to ${relative}; the file is unchanged.${said}`, isError: false, rejected: true };
-  }
+  if (outcome.status === "rejected") return rejectedOutcome(tool, outcome.reason);
   // The view shows what landed, as a diff; the model is told in words.
   const display = unifiedDiff(before ?? "", outcome.content, relative) || `${verb} ${relative}.`;
   if (!outcome.edited) return { ...ok(`${verb} ${relative}.`), display };
@@ -465,6 +396,14 @@ function changeResult(
   };
 }
 
+/**
+ * Whether a write asks: the mode's answer for this path (`allowed` with the
+ * path asks for a protected one), and a guarded path asks whatever the mode.
+ */
+function asks(tool: string, decision: "allow" | "ask", ctx: ToolContext, target: WriteTarget): boolean {
+  return decision === "ask" || target.guarded || allowed(tool, ctx.mode, null, { path: target.relative }) !== "allow";
+}
+
 async function editTool(args: Record<string, unknown>, decision: "allow" | "ask", ctx: ToolContext, options: HostOptions): Promise<ToolOutcome> {
   const path = stringArg(args, "path");
   if (isOutcome(path)) return path;
@@ -472,38 +411,30 @@ async function editTool(args: Record<string, unknown>, decision: "allow" | "ask"
   if (isOutcome(oldString)) return oldString;
   const newString = stringArg(args, "new_string");
   if (isOutcome(newString)) return newString;
-  let target;
   try {
-    target = confine(ctx.root, path!, { write: true });
+    const target = writeTarget(ctx.root, path!);
+    const kind = await kindOf(target.absolute);
+    if (kind === null) throw new EditError("missing", target.relative);
+    if (kind === "dir") throw new ToolError("is_directory", { path: target.relative });
+    const before = await readForChange(target.absolute, target.relative, options);
+    const after = applyEdit(before, oldString!, newString!, { path: target.relative });
+    const outcome = await ctx.approvals.change(
+      {
+        tool: "edit",
+        relative: target.relative,
+        absolute: target.absolute,
+        before,
+        after,
+        diff: unifiedDiff(before, after, target.relative),
+        stale: staleCheck(ctx.root, target, before, options),
+      },
+      asks("edit", decision, ctx, target),
+      ctx.signal,
+    );
+    return changeResult("edit", target.relative, "Edited", outcome, before, after);
   } catch (error) {
-    return refused(error);
+    return failed(error);
   }
-  const kind = await kindOf(target.absolute);
-  if (kind === null) return failure(new EditError("missing", target.relative).message);
-  if (kind === "dir") return failure(`${target.relative} is a directory, not a file.`);
-  const before = await readText(target.absolute, target.relative, options);
-  if (isOutcome(before)) return before;
-  let after: string;
-  try {
-    after = applyEdit(before, oldString!, newString!, { path: target.relative });
-  } catch (error) {
-    if (error instanceof EditError) return failure(error.message);
-    throw error;
-  }
-  const outcome = await ctx.approvals.change(
-    {
-      tool: "edit",
-      relative: target.relative,
-      absolute: target.absolute,
-      before,
-      after,
-      diff: unifiedDiff(before, after, target.relative),
-      stale: staleCheck(ctx.root, target.relative, target.absolute, before, options),
-    },
-    decision === "ask" || asksAnyway(target.relative, ctx.mode),
-    ctx.signal,
-  );
-  return changeResult(target.relative, "Edited", outcome, before, after);
 }
 
 async function writeFileTool(args: Record<string, unknown>, decision: "allow" | "ask", ctx: ToolContext, options: HostOptions): Promise<ToolOutcome> {
@@ -511,70 +442,65 @@ async function writeFileTool(args: Record<string, unknown>, decision: "allow" | 
   if (isOutcome(path)) return path;
   const content = stringArg(args, "content");
   if (isOutcome(content)) return content;
-  let target;
   try {
-    target = confine(ctx.root, path!, { write: true });
+    const target = writeTarget(ctx.root, path!);
+    const kind = await kindOf(target.absolute);
+    if (kind === "dir") throw new ToolError("is_directory", { path: target.relative });
+    const before = kind === "file" ? await readForChange(target.absolute, target.relative, options) : null;
+    if (before === content) return ok(`${target.relative} already has exactly this content; nothing was written.`);
+    const outcome = await ctx.approvals.change(
+      {
+        tool: "write_file",
+        relative: target.relative,
+        absolute: target.absolute,
+        before,
+        after: content!,
+        diff: unifiedDiff(before ?? "", content!, target.relative),
+        stale: staleCheck(ctx.root, target, before, options),
+      },
+      asks("write_file", decision, ctx, target),
+      ctx.signal,
+    );
+    return changeResult("write_file", target.relative, before === null ? "Created" : "Wrote", outcome, before, content!);
   } catch (error) {
-    return refused(error);
+    return failed(error);
   }
-  const kind = await kindOf(target.absolute);
-  if (kind === "dir") return failure(`${target.relative} is a directory, not a file.`);
-  let before: string | null = null;
-  if (kind === "file") {
-    const text = await readText(target.absolute, target.relative, options);
-    if (isOutcome(text)) return text;
-    before = text;
-  }
-  if (before === content) return ok(`${target.relative} already has exactly this content; nothing was written.`);
-  const outcome = await ctx.approvals.change(
-    {
-      tool: "write_file",
-      relative: target.relative,
-      absolute: target.absolute,
-      before,
-      after: content!,
-      diff: unifiedDiff(before ?? "", content!, target.relative),
-      stale: staleCheck(ctx.root, target.relative, target.absolute, before, options),
-    },
-    decision === "ask" || asksAnyway(target.relative, ctx.mode),
-    ctx.signal,
-  );
-  return changeResult(target.relative, before === null ? "Created" : "Wrote", outcome, before, content!);
+}
+
+/** run_shell's text for a finished command: the SDK's `formatShell`, over output whose middle may already be cut (shell.ts). */
+export function shellText(result: ShellResult, timeoutS: number, limits?: Limits): string {
+  const status = { exitCode: result.exitCode, timedOut: result.timedOut, stopped: result.stopped, timeoutS, limits };
+  if (result.omitted === 0) return formatShell(result.output, status);
+  // The head, the contract's marker and the tail are there already: nothing more to cut.
+  return formatShell(result.output, { ...status, limits: { ...limits, shell_output_max_bytes: Number.MAX_SAFE_INTEGER } });
 }
 
 async function runShellTool(args: Record<string, unknown>, decision: "allow" | "ask", ctx: ToolContext, options: HostOptions): Promise<ToolOutcome> {
   const command = stringArg(args, "command");
   if (isOutcome(command)) return command;
   if (!command!.trim()) return failure("The command is empty.");
-  const timeout = intArg(args, "timeout_s");
-  if (isOutcome(timeout)) return timeout;
-  const timeoutS = Math.min(Math.max(1, timeout ?? LIMITS.shell_timeout_s_default), LIMITS.shell_timeout_s_max);
+  const max = limit("shell_timeout_s_max", options);
+  const given = args.timeout_s;
+  if (given !== undefined && given !== null && (typeof given !== "number" || !Number.isInteger(given) || given < 1 || given > max)) {
+    return failure(new ToolError("bad_timeout", { max }).message);
+  }
+  const timeoutS = typeof given === "number" ? given : limit("shell_timeout_s_default", options);
   if (decision === "ask") {
     const answer = await ctx.approvals.confirm(
       { kind: "shell", tool: "run_shell", title: `Run a command in ${ctx.root} (time limit ${timeoutS}s)`, detail: command! },
       ctx.signal,
     );
-    if (!answer.approved) {
-      const said = answer.reason ? ` They said: ${answer.reason}` : "";
-      return { content: `The person rejected the command; it did not run.${said}`, isError: false, rejected: true };
-    }
+    if (!answer.approved) return rejectedOutcome("run_shell", answer.reason);
   }
   const run = options.runShell ?? spawnShell;
   const result = await run(command!, {
     cwd: ctx.root,
     timeoutMs: timeoutS * 1000,
-    maxBytes: LIMITS.shell_output_max_bytes,
+    maxBytes: limit("shell_output_max_bytes", options),
     signal: ctx.signal,
     onOutput: ctx.onOutput,
   });
-  const output = result.output.trimEnd() || "(no output)";
-  if (result.stopped) return failure(`The person stopped the command.\n${output}`);
-  if (result.timedOut) return failure(`The command was stopped after ${timeoutS}s, its time limit.\n${output}`);
-  return { content: `Exit code ${result.exitCode}\n${output}`, isError: result.exitCode !== 0 };
-}
-
-function contractDecision(name: string): (mode: ModeName) => "allow" | "ask" | "deny" {
-  return (mode) => allowed(name, mode);
+  return { content: shellText(result, timeoutS, options.limits), isError: result.stopped || result.timedOut || result.exitCode !== 0 };
 }
 
 /**
@@ -583,27 +509,25 @@ function contractDecision(name: string): (mode: ModeName) => "allow" | "ask" | "
  */
 export function contractTools(options: HostOptions = {}): ToolSpec[] {
   const spec = (
-    name: string,
+    name: ToolName,
     run: (args: Record<string, unknown>, decision: "allow" | "ask", ctx: ToolContext) => Promise<ToolOutcome>,
     label: (args: Record<string, unknown>) => string,
-  ): ToolSpec => ({
-    name,
-    // Offered through `toolsForMode`; see `offeredTools` in loop.ts.
-    definition: { type: "function", function: { name } },
-    decide: contractDecision(name),
-    run: (args, decision, ctx) => (decision === "deny" ? Promise.resolve(failure(`${name} is not available in ${ctx.mode} mode.`)) : run(args, decision, ctx)),
-    label,
-  });
+  ): ToolSpec =>
+    toolSpec({
+      name,
+      kind: TOOLS_BY_NAME[name].kind,
+      description: "",
+      run: (args, decision, ctx) => (decision === "deny" ? Promise.resolve(failure(refusal("mode", { tool: name, mode: ctx.mode }))) : run(args, decision, ctx)),
+      label,
+    });
   const str = (value: unknown) => (typeof value === "string" ? value : "");
   return [
     spec("read_file", (a, _d, c) => readFileTool(a, c, options), (a) => str(a.path)),
-    spec("list_dir", (a, _d, c) => listDirTool(a, c), (a) => str(a.path) || "."),
-    spec("glob", (a, _d, c) => globTool(a, c), (a) => str(a.pattern)),
-    spec("grep", (a, _d, c) => grepTool(a, c), (a) => `${str(a.pattern)}${a.path ? ` in ${str(a.path)}` : ""}`),
+    spec("list_dir", (a, _d, c) => listDirTool(a, c, options), (a) => str(a.path) || "."),
+    spec("glob", (a, _d, c) => globTool(a, c, options), (a) => str(a.pattern)),
+    spec("grep", (a, _d, c) => grepTool(a, c, options), (a) => `${str(a.pattern)}${a.path ? ` in ${str(a.path)}` : ""}`),
     spec("edit", (a, d, c) => editTool(a, d, c, options), (a) => str(a.path)),
     spec("write_file", (a, d, c) => writeFileTool(a, d, c, options), (a) => str(a.path)),
     spec("run_shell", (a, d, c) => runShellTool(a, d, c, options), (a) => str(a.command)),
   ];
 }
-
-export const CONTRACT_TOOL_NAMES: ReadonlySet<string> = new Set(TOOL_NAMES);

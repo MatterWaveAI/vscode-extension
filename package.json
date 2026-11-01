@@ -47,7 +47,7 @@
           "enumDescriptions": [
             "Read and search only: no file changes, no commands.",
             "Every file change and every command needs your approval (the default).",
-            "File changes are applied without asking; commands still ask."
+            "File changes are applied without asking (a change to the agent's or the editor's own settings still asks); commands still ask."
           ],
           "default": "ask",
           "description": "The agent's approval mode in a new workspace. Yolo (nothing asks) is not a default: it is allowed per session, from the mode chip, /approval-mode or Shift+Tab, after a confirm. A workspace's settings can make this stricter (plan), never looser.",
@@ -77,7 +77,7 @@
         "matterwave.agent.webFetch": {
           "type": "boolean",
           "default": true,
-          "description": "Offer the agent web_fetch. Every fetch asks first in the plan, ask and auto-edit modes (plan does not offer it at all).",
+          "description": "Offer the agent web_fetch. Every fetch asks first in the ask and auto-edit modes; plan does not offer it.",
           "scope": "window"
         },
         "matterwave.agent.matterwaveMcp": {
@@ -89,7 +89,7 @@
         "matterwave.agent.mcpServers": {
           "type": "object",
           "default": {},
-          "markdownDescription": "MCP servers the agent may use, by name. Each is `{ \"command\": \"...\", \"args\": [...], \"env\": {...} }` (stdio) or `{ \"url\": \"https://...\", \"headers\": {...} }` (HTTP), with an optional `\"tools\": [...]` allow-list (only those tools reach the model), `\"trust\": true` (its tools run without asking outside plan mode) and `\"disabled\": true`. Workspace settings apply only in a trusted folder, and each server they add asks before it first starts (again whenever its definition changes); `trust` counts only in your user settings. A server's read-only marks are believed only for a trusted server and MatterWave's own.",
+          "markdownDescription": "MCP servers the agent may use, by name. Each is `{ \"command\": \"...\", \"args\": [...], \"env\": {...} }` (stdio) or `{ \"url\": \"https://...\", \"headers\": {...} }` (HTTP), with an optional `\"tools\": [...]` allow-list (only those tools reach the model), `\"trust\": true` (your standing approval: its tools run without asking where they would ask) and `\"disabled\": true`. Every other MCP tool asks before each call outside yolo. Workspace settings apply only in a trusted folder, and each server they add asks before it first starts (again whenever its definition changes); `trust` counts only in your user settings. A server's read-only marks, which let plan mode offer a tool (still asking), are believed only for a trusted server and MatterWave's own.",
           "additionalProperties": {
             "type": "object",
             "properties": {
