@@ -14,6 +14,7 @@ import { applyToFile, registerApplyContentProvider } from "./apply";
 import { CheckpointStore, type Checkpoint } from "./checkpoints";
 import { snapshotFolder } from "./snapshotFiles";
 import { requireTrust } from "./trust";
+import { commitMessageFrom, commitMessagePrompt, gitApi, repositoryFor } from "./commitMessage";
 import {
   CODE_ACTION_COMMANDS,
   DOCS_INSTRUCTION,
@@ -219,6 +220,9 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
       const at = await codeAt(uri, range);
       if (at) await editLines(chat, checkpoints, at.document, at.range, DOCS_INSTRUCTION, "Add docs");
     }),
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand("matterwave.generateCommitMessage", (clicked) => generateCommitMessage(chat, clicked)),
   );
   command("matterwave.explainTerminalCommand", () => terminalCommand("explain", terminals, chat, view));
   command("matterwave.fixTerminalCommand", () => terminalCommand("fix", terminals, chat, view));
@@ -528,6 +532,35 @@ async function fixProblem(chat: ChatController, checkpoints: CheckpointStore, ur
     return;
   }
   await editLines(chat, checkpoints, editor.document, problem.range, fixInstruction(problem), "Fix");
+}
+
+/**
+ * Fill the Source Control input box with a commit message for what is
+ * staged, in the configured style. Nothing staged, nothing written.
+ */
+async function generateCommitMessage(chat: ChatController, clicked: unknown): Promise<void> {
+  if (!(await requireTrust("Commit message generation"))) return;
+  const api = await gitApi();
+  if (!api) {
+    void vscode.window.showInformationMessage("The Git extension is not enabled, so there is no staged change to read.");
+    return;
+  }
+  const repository = await repositoryFor(api, clicked);
+  if (!repository) return;
+  const diff = await repository.diff(true);
+  if (!diff.trim()) {
+    void vscode.window.showInformationMessage("Nothing is staged. Stage the changes the commit is for, then try again.");
+    return;
+  }
+  const style = vscode.workspace.getConfiguration("matterwave", repository.rootUri).get<string>("commitMessageStyle") ?? "";
+  await vscode.window.withProgress({ location: vscode.ProgressLocation.SourceControl, title: "Writing a commit message…" }, async () => {
+    try {
+      const message = commitMessageFrom(await chat.answerOnce(commitMessagePrompt(diff, style)));
+      if (message) repository.inputBox.value = message;
+    } catch (error) {
+      void vscode.window.showErrorMessage(`The commit message could not be written: ${describe(error)}`);
+    }
+  });
 }
 
 /**

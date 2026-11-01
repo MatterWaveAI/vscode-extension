@@ -205,6 +205,20 @@ function editorWorkspace(dir) {
     const name = `file-${String(i).padStart(4, "0")}.ts`;
     writeFileSync(path.join(dir, "alpha", "many", name), `export const n = ${i};\n`);
   }
+  // beta is a git repository with one change staged: what a commit
+  // message is written for.
+  const git = (...args) => {
+    const result = spawnSync("git", ["-c", "user.name=e2e", "-c", "user.email=e2e@example.invalid", ...args], {
+      cwd: path.join(dir, "beta"),
+      encoding: "utf8",
+    });
+    if (result.status !== 0) throw new Error(`git ${args[0]} failed: ${result.stderr}`);
+  };
+  git("init", "-q");
+  git("add", ".");
+  git("commit", "-q", "-m", "Start");
+  writeFileSync(path.join(dir, "beta", "src", "staged.ts"), "export const staged = true;\n");
+  git("add", "src/staged.ts");
   const file = path.join(dir, "e2e.code-workspace");
   writeFileSync(
     file,

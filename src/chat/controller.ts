@@ -901,6 +901,32 @@ export class ChatController {
     return messageText(last);
   }
 
+  /**
+   * One prompt answered outside the chat: a temporary conversation (in no
+   * list, never shared) with the current model, removed once its answer is
+   * in. For text the editor fills in itself -- a commit message -- where a
+   * turn in the open conversation would only be noise. Throws what the API
+   * said when there is no answer.
+   */
+  async answerOnce(prompt: string): Promise<string> {
+    const model = this.model?.id;
+    const conversation = await this.deps.client.createConversation({ temporary: true, ...(model ? { model } : {}) });
+    try {
+      let answer: Message | null = null;
+      for await (const frame of this.deps.client.sendMessage(conversation.id, { content: prompt, ...(model ? { model } : {}) })) {
+        if (frame.event === "done") answer = frame.message as Message;
+        else if (frame.event === "error") throw new ApiError(0, frame.detail ?? "The answer failed.", this.lastRequestId);
+        else if (frame.event === "moderation_block") throw new ApiError(0, STREAM_ERROR_COPY.moderation.title, frame.request_id ?? null);
+      }
+      if (!answer || answer.truncated) throw new ApiError(0, "The answer was cut off before it finished.", this.lastRequestId);
+      return messageText(answer);
+    } finally {
+      await this.deps.client.deleteConversation(conversation.id).catch(() => {
+        // A temporary conversation is deleted a day after its last message anyway.
+      });
+    }
+  }
+
   /** Try a failed turn again in the cheapest way that cannot double-post it. */
   async retry(): Promise<void> {
     const failed = this.failed;

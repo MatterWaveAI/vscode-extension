@@ -334,6 +334,32 @@ describe("@-mentions", () => {
 });
 
 
+describe("answerOnce", () => {
+  it("answers in a temporary conversation it then deletes, leaving the chat as it was", async () => {
+    const { controller, calls, webview } = await setup({ "DELETE /api/conversations/c_1": () => new Response(null, { status: 204 }) });
+    await controller.refresh();
+    const before = lastState(webview.posted);
+    const answer = await controller.answerOnce("Write a commit message.");
+
+    expect(answer.length).toBeGreaterThan(0);
+    const create = calls.find((c) => c.method === "POST" && c.url === "/api/conversations");
+    expect(JSON.parse(String(create?.body))).toMatchObject({ temporary: true, model: "grt-small" });
+    expect(calls.some((c) => c.method === "DELETE" && c.url === "/api/conversations/c_1")).toBe(true);
+    expect(controller.activeConversationId()).toBeNull();
+    expect(lastState(webview.posted).conversations).toEqual(before.conversations);
+  });
+
+  it("throws what the API said when no answer came, and still deletes the conversation", async () => {
+    const { controller, calls } = await setup({
+      "POST /api/conversations/c_1/messages": () => json({ detail: "Your plan's allowance is used up." }, 402),
+      "DELETE /api/conversations/c_1": () => new Response(null, { status: 204 }),
+    });
+    await controller.refresh();
+    await expect(controller.answerOnce("x")).rejects.toMatchObject({ status: 402 });
+    expect(calls.some((c) => c.method === "DELETE" && c.url === "/api/conversations/c_1")).toBe(true);
+  });
+});
+
 describe("model selection", () => {
   it("refuses a model the plan does not include", async () => {
     const { controller } = await setup();

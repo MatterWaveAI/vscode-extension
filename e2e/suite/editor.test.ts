@@ -4,6 +4,7 @@ import * as vscode from "vscode";
 import { applyToFile } from "../../src/apply";
 import { createFetch } from "../../src/api/transport";
 import { CheckpointStore } from "../../src/checkpoints";
+import { commitMessagePrompt, gitApi, repositoryFor } from "../../src/commitMessage";
 import { searchWorkspaceFiles } from "../../src/fileSearch";
 import { snapshotFolder } from "../../src/snapshotFiles";
 import { editorFolders, resolveNamedFile } from "../../src/targets";
@@ -83,6 +84,23 @@ describe("the lightbulb in a real editor", function () {
     } finally {
       problems.dispose();
     }
+  });
+});
+
+describe("commit messages in a real editor", function () {
+  it("reads the staged diff of the repository whose title bar was clicked, through the Git extension", async function () {
+    const api = await gitApi();
+    assert.ok(api, "the built-in Git extension is enabled");
+    const beta = folder("beta").uri;
+    await waitFor("the Git extension to open the repository", () => api.getRepository(beta) ?? undefined, 30_000);
+    const repository = await repositoryFor(api, { rootUri: beta });
+    assert.ok(repository);
+    const diff = await repository.diff(true);
+    assert.match(diff, /\+export const staged = true;/);
+    assert.match(commitMessagePrompt(diff, ""), /```diff\n[\s\S]*src\/staged\.ts/);
+    repository.inputBox.value = "Stage the flag";
+    assert.equal(repository.inputBox.value, "Stage the flag");
+    repository.inputBox.value = "";
   });
 });
 

@@ -58,6 +58,13 @@
           "default": "",
           "description": "Path to a PEM file holding the certificate authority that signed the deployment's TLS certificate, for a deployment behind a private CA. Trusted in addition to the system's authorities. Empty uses the system's authorities alone.",
           "scope": "application"
+        },
+        "matterwave.commitMessageStyle": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "markdownDescription": "How **Generate Commit Message** writes a message: a convention (Conventional Commits, a ticket prefix) or plain words. Empty uses a summary line of at most 72 characters in the imperative mood, a blank line, and a short body saying what changed and why. A workspace can set its own.",
+          "scope": "resource"
         }
       }
     },
@@ -150,6 +157,12 @@
         "command": "matterwave.fixTerminalCommand",
         "title": "Fix Last Terminal Command",
         "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.generateCommitMessage",
+        "title": "Generate Commit Message",
+        "category": "MatterWave",
+        "icon": "$(sparkle)"
       },
       {
         "command": "matterwave.pickModel",
@@ -260,6 +273,13 @@
         {
           "command": "matterwave.fixTerminalCommand",
           "group": "matterwave@2"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "matterwave.generateCommitMessage",
+          "when": "scmProvider == git",
+          "group": "navigation"
         }
       ]
     },
