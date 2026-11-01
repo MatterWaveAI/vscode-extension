@@ -16,6 +16,7 @@ import { AgentSession, type AgentSettings } from "./agent/session";
 import { EditorReviewSurface, EditorTracker, PROPOSAL_SCHEME, ProposalFileSystem, openDocumentText } from "./agent/editor";
 import { McpManager, type McpServerConfig } from "./agent/mcp";
 import { describeServer, isMatterWaveMcp, resolveMcpServers, type PendingServer } from "./agent/mcpConfig";
+import { killAllShells } from "./agent/shell";
 import { stricterMode } from "./agent/loop";
 import { MODES_BY_NAME, MODE_NAMES, type ModeName } from "./lib/sdk/agent/types";
 import type { CodeBlock } from "./chat/codeBlocks";
@@ -214,6 +215,8 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
     editorTracker,
     agentLog,
     { dispose: () => mcp.dispose() },
+    // A command still running when the extension goes ends, with what it started.
+    { dispose: () => killAllShells() },
     vscode.workspace.registerFileSystemProvider(PROPOSAL_SCHEME, proposals, { isCaseSensitive: true }),
     // Trust decides whether the agent may run at all; the view follows it.
     vscode.workspace.onDidGrantWorkspaceTrust(() => chat.emit()),

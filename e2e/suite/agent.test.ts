@@ -279,6 +279,40 @@ describe("agent mode in a real editor, against a scripted /v1", function () {
     assert.equal(told.content, 'src/greet.ts:2:   return "Hello, " + name;');
   });
 
+  it("Stop ends an approved command and the process it detached from it within 2 s", async function () {
+    const command =
+      process.platform === "win32"
+        ? `cmd /c 'start /b powershell -NoProfile -Command "Write-Output CHILD=$PID; Start-Sleep 60"'; Start-Sleep 60`
+        : `perl -MPOSIX -e '$| = 1; POSIX::setsid(); print "CHILD=$$\\n"; exec @ARGV' sleep 60 & wait`;
+    fake.script.push([
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_shell", type: "function", function: { name: "run_shell", arguments: JSON.stringify({ command }) } }] } }] },
+    ]);
+    const alive = (pid: number) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const run = api.chat.send("Start the server.");
+    await waitFor("the approval", () => api.agent.pendingId("shell") !== null);
+    assert.equal(api.chat.snapshot().agent?.pending?.detail, command);
+    api.agent.decide(api.agent.pendingId("shell")!, true);
+    await waitFor("the detached process", () => /CHILD=\d+/.test(api.chat.snapshot().agent?.output ?? ""));
+    const child = Number(/CHILD=(\d+)/.exec(api.chat.snapshot().agent!.output!)![1]);
+    assert.ok(alive(child));
+    const stoppedAt = Date.now();
+    await api.chat.handle({ type: "stop" });
+    try {
+      await waitFor("the detached process to end", () => !alive(child), 2_000);
+    } finally {
+      if (alive(child)) process.kill(child);
+    }
+    assert.ok(Date.now() - stoppedAt < 2_000, `ended ${Date.now() - stoppedAt} ms after Stop`);
+    await run;
+  });
+
   it("still asks in auto-edit before writing the workspace's .vscode settings", async function () {
     const settingsFile = path.join(WORKSPACE, ".vscode", "agent-planted.json");
     fake.script.push([

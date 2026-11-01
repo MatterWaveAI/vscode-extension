@@ -98,14 +98,27 @@ model is told to read it again.
 
 **Commands.** `run_shell` runs in the root (PowerShell on Windows, `sh` elsewhere) as a child
 process with a time limit (120 s by default, 600 s at most) and a 64 KB output cap (its head and
-tail are kept, the middle cut); the card shows
-the whole command before it runs, and its output streams into the view and the "MatterWave Agent"
-output channel. **Stop** ends the model's stream, an approval that is waiting, and the command's
-whole process tree. A process that detaches itself from that tree (`cmd /c start /b ...` on
-Windows, `setsid` or a daemon elsewhere) can outlive Stop, as can one a finished command left
-running in the background. The command's environment is VS Code's minus its own plumbing
-(`ELECTRON_*`, `VSCODE_*`, as in the integrated terminal) and any `MATTERWAVE_*` or `MW_*` key or
-token.
+tail are kept, the middle cut); the card shows the whole command before it runs, and its output
+streams into the view and the "MatterWave Agent" output channel. **Stop** (or the time limit) ends
+the model's stream, an approval that is waiting, the command, and every process it started,
+including ones that detached from it:
+
+- **Windows**: the shell puts itself in a Job Object before the command runs, so everything it
+  starts, `cmd /c start /b` and `Start-Process` included, is in the job, and Windows ends the job
+  whole on Stop or when VS Code exits. A process started through a service (Task Scheduler, WMI,
+  an elevated `Start-Process -Verb RunAs`) is not the command's and is not reached. If PowerShell
+  cannot make the job (ConstrainedLanguage mode), the tree is ended with `taskkill /T` as before.
+- **Linux**: the shell leads a new session; where a systemd user manager runs, it also runs in a
+  transient scope, a cgroup that forking or detaching does not leave, and Stop kills the cgroup.
+  Without one, Stop reaches the session and every process still linked to the shell, but not a
+  daemon that started a session of its own and lost its parent.
+- **macOS**: a new session, and every process still linked to the shell by its parent; a daemon
+  that detached is out of reach (macOS has no cgroups).
+
+A command that ends on its own may leave a process running in the background, as in a terminal;
+when the window closes, a command still running is ended too. The command's environment is VS
+Code's minus its own plumbing (`ELECTRON_*`, `VSCODE_*`, as in the integrated terminal) and any
+`MATTERWAVE_*` or `MW_*` key or token.
 
 **Limits.** A run stops at `matterwave.agent.maxSteps` model calls (40) or
 `matterwave.agent.maxTokens` tokens (500,000), and says which. A spent budget (402, or the API's
@@ -231,8 +244,9 @@ do not need a VS Code download.
 (downloaded once into `.vscode-test/` by `@vscode/test-electron`, about 1 GB unpacked). It runs
 two suites. The agent suite always runs: a scratch folder is the workspace, and the suite serves a
 scripted fake `/v1` from inside the extension host, so it needs no deployment. It checks that a
-rejected diff leaves the file byte-identical, that an accepted change undoes with Ctrl+Z, and that
-an edited proposal writes your version. The deployment suite runs against a real deployment.
+rejected diff leaves the file byte-identical, that an accepted change undoes with Ctrl+Z, that
+an edited proposal writes your version, and that Stop ends a command and a process it detached
+(`cmd /c start /b` on Windows) within 2 s. The deployment suite runs against a real deployment.
 `e2e/run.mjs` signs in as the standing e2e account (`E2E_ADMIN_EMAIL` / `E2E_ADMIN_PASSWORD`;
 without them the run is skipped), approves a device login as that account to mint a device key
 for the run (which works on every plan), and the suite in `e2e/suite` signs the extension in
