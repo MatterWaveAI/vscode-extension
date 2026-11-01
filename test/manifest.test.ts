@@ -10,6 +10,8 @@ import { describe, expect, it } from "vitest";
 
 const root = (path: string) => fileURLToPath(new URL(`../${path}`, import.meta.url));
 const manifest = JSON.parse(readFileSync(root("package.json"), "utf8"));
+const english = JSON.parse(readFileSync(root("package.nls.json"), "utf8")) as Record<string, string>;
+const spanish = JSON.parse(readFileSync(root("package.nls.es.json"), "utf8")) as Record<string, string>;
 
 describe("the extension manifest", () => {
   it("has a PNG icon of at least 128x128, as both registries require", () => {
@@ -34,7 +36,7 @@ describe("the extension manifest", () => {
 
   it("declares limited support for untrusted workspaces", () => {
     expect(manifest.capabilities.untrustedWorkspaces.supported).toBe("limited");
-    expect(manifest.capabilities.untrustedWorkspaces.description).toMatch(/Restricted Mode/);
+    expect(english[manifest.capabilities.untrustedWorkspaces.description.slice(1, -1)]).toMatch(/Restricted Mode/);
   });
 
   it("binds inline edit on every platform, yielding Ctrl/Cmd+I to the editor's own inline chat", () => {
@@ -68,8 +70,29 @@ describe("the extension manifest", () => {
     const commands = new Set(manifest.contributes.commands.map((c: { command: string }) => c.command));
     for (const step of walkthrough.steps) {
       expect(readFileSync(root(step.media.markdown), "utf8").length, step.id).toBeGreaterThan(0);
-      for (const [, command] of step.description.matchAll(/\(command:([\w.]+)\)/g)) expect(commands.has(command), command).toBe(true);
+      for (const bundle of [english, spanish]) {
+        const description = bundle[step.description.slice(1, -1)] ?? "";
+        const linked = [...description.matchAll(/\(command:([\w.]+)\)/g)].map((m) => m[1]);
+        expect(linked.length, step.id).toBeGreaterThan(0);
+        for (const command of linked) expect(commands.has(command), command).toBe(true);
+      }
     }
+  });
+
+  it("names every user-facing manifest string by a key, with English and Spanish for each", () => {
+    const keys = new Set(Object.keys(english));
+    const placeholders: string[] = [];
+    const visit = (value: unknown, path: string) => {
+      if (typeof value === "string") {
+        if (/^%.+%$/.test(value)) placeholders.push(value.slice(1, -1));
+        else if (/(\.|^)(title|description|markdownDescription|name|displayName)$/.test(path)) throw new Error(`${path} is not localised: ${value}`);
+      } else if (Array.isArray(value)) value.forEach((item, i) => visit(item, `${path}[${i}]`));
+      else if (value && typeof value === "object") for (const [k, v] of Object.entries(value)) visit(v, path ? `${path}.${k}` : k);
+    };
+    visit({ displayName: manifest.displayName, description: manifest.description, contributes: manifest.contributes, capabilities: manifest.capabilities }, "");
+    for (const key of placeholders) expect(keys.has(key), key).toBe(true);
+    expect(Object.keys(spanish).sort()).toEqual([...keys].sort());
+    for (const key of keys) expect(spanish[key]?.trim(), key).toBeTruthy();
   });
 
   it("offers Explain and Fix on the terminal's context menu", () => {

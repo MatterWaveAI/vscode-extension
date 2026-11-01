@@ -1,7 +1,7 @@
 {
   "name": "matterwave",
-  "displayName": "MatterWave",
-  "description": "Chat with your organisation's MatterWave models from the editor.",
+  "displayName": "%displayName%",
+  "description": "%description%",
   "version": "0.3.0",
   "publisher": "matterwave",
   "private": false,
@@ -38,38 +38,38 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": "limited",
-      "description": "In Restricted Mode MatterWave chats and reads context, but does not change files (Apply, inline edit, Restore Checkpoint) or run git for @git until the workspace is trusted."
+      "description": "%capabilities.untrustedWorkspaces.description%"
     }
   },
   "main": "./dist/extension.js",
   "activationEvents": [],
   "contributes": {
     "configuration": {
-      "title": "MatterWave",
+      "title": "%configuration.title%",
       "properties": {
         "matterwave.baseUrl": {
           "type": "string",
           "default": "https://app.matterwave.dev",
-          "description": "The MatterWave deployment this editor talks to.",
+          "description": "%config.baseUrl.description%",
           "scope": "application"
         },
         "matterwave.caFile": {
           "type": "string",
           "default": "",
-          "description": "Path to a PEM file holding the certificate authority that signed the deployment's TLS certificate, for a deployment behind a private CA. Trusted in addition to the system's authorities. Empty uses the system's authorities alone.",
+          "description": "%config.caFile.description%",
           "scope": "application"
         },
         "matterwave.commitMessageStyle": {
           "type": "string",
           "default": "",
           "editPresentation": "multilineText",
-          "markdownDescription": "How **Generate Commit Message** writes a message: a convention (Conventional Commits, a ticket prefix) or plain words. Empty uses a summary line of at most 72 characters in the imperative mood, a blank line, and a short body saying what changed and why. A workspace can set its own.",
+          "markdownDescription": "%config.commitMessageStyle.markdownDescription%",
           "scope": "resource"
         },
         "matterwave.showAnswerUsage": {
           "type": "boolean",
           "default": true,
-          "description": "Show under each answer the tokens it used and their cost at the model's list price."
+          "description": "%config.showAnswerUsage.description%"
         }
       }
     },
@@ -77,7 +77,7 @@
       "activitybar": [
         {
           "id": "matterwave",
-          "title": "MatterWave",
+          "title": "%viewsContainer.matterwave.title%",
           "icon": "media/matterwave.svg"
         }
       ]
@@ -87,177 +87,177 @@
         {
           "type": "webview",
           "id": "matterwave.chat",
-          "name": "Chat"
+          "name": "%view.chat.name%"
         }
       ]
     },
     "commands": [
       {
         "command": "matterwave.signInWithDeviceCode",
-        "title": "Sign In (Device Code)",
-        "category": "MatterWave"
+        "title": "%command.signInWithDeviceCode.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.signInWithApiKey",
-        "title": "Sign In with API Key",
-        "category": "MatterWave"
+        "title": "%command.signInWithApiKey.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.signOut",
-        "title": "Sign Out",
-        "category": "MatterWave"
+        "title": "%command.signOut.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.openChat",
-        "title": "Open Chat",
-        "category": "MatterWave"
+        "title": "%command.openChat.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.newChat",
-        "title": "New Chat",
-        "category": "MatterWave",
+        "title": "%command.newChat.title%",
+        "category": "%command.category%",
         "icon": "$(add)"
       },
       {
         "command": "matterwave.askAboutSelection",
-        "title": "Ask about Selection",
-        "category": "MatterWave"
+        "title": "%command.askAboutSelection.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.askAboutFile",
-        "title": "Ask about File",
-        "category": "MatterWave"
+        "title": "%command.askAboutFile.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.inlineEdit",
-        "title": "Edit Selection with MatterWave",
-        "category": "MatterWave"
+        "title": "%command.inlineEdit.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.fixProblem",
-        "title": "Fix Problem",
-        "category": "MatterWave"
+        "title": "%command.fixProblem.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.explainCode",
-        "title": "Explain Code",
-        "category": "MatterWave"
+        "title": "%command.explainCode.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.generateTests",
-        "title": "Generate Tests",
-        "category": "MatterWave"
+        "title": "%command.generateTests.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.addDocs",
-        "title": "Add Docs",
-        "category": "MatterWave"
+        "title": "%command.addDocs.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.explainTerminalCommand",
-        "title": "Explain Last Terminal Command",
-        "category": "MatterWave"
+        "title": "%command.explainTerminalCommand.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.fixTerminalCommand",
-        "title": "Fix Last Terminal Command",
-        "category": "MatterWave"
+        "title": "%command.fixTerminalCommand.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.generateCommitMessage",
-        "title": "Generate Commit Message",
-        "category": "MatterWave",
+        "title": "%command.generateCommitMessage.title%",
+        "category": "%command.category%",
         "icon": "$(sparkle)"
       },
       {
         "command": "matterwave.pickModel",
-        "title": "Pick Model",
-        "category": "MatterWave"
+        "title": "%command.pickModel.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.compactNow",
-        "title": "Compact Conversation Now",
-        "category": "MatterWave"
+        "title": "%command.compactNow.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.copyRequestId",
-        "title": "Copy Last Request ID",
-        "category": "MatterWave"
+        "title": "%command.copyRequestId.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.exportConversation",
-        "title": "Export Conversation as Markdown",
-        "category": "MatterWave"
+        "title": "%command.exportConversation.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.shareConversation",
-        "title": "Create Share Link",
-        "category": "MatterWave"
+        "title": "%command.shareConversation.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.manageShares",
-        "title": "Manage Share Links",
-        "category": "MatterWave"
+        "title": "%command.manageShares.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.organizeConversation",
-        "title": "Organize",
-        "category": "MatterWave"
+        "title": "%command.organizeConversation.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.manageTags",
-        "title": "Manage Tags",
-        "category": "MatterWave"
+        "title": "%command.manageTags.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.manageFolders",
-        "title": "Manage Folders",
-        "category": "MatterWave"
+        "title": "%command.manageFolders.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.reportConversation",
-        "title": "Report Conversation",
-        "category": "MatterWave"
+        "title": "%command.reportConversation.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.customInstructions",
-        "title": "Edit Custom Instructions",
-        "category": "MatterWave"
+        "title": "%command.customInstructions.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.account",
-        "title": "Account",
-        "category": "MatterWave"
+        "title": "%command.account.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.manageApiKeys",
-        "title": "Manage API Keys",
-        "category": "MatterWave"
+        "title": "%command.manageApiKeys.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.switchAccount",
-        "title": "Switch Account",
-        "category": "MatterWave"
+        "title": "%command.switchAccount.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.promptLibrary",
-        "title": "Prompt Library",
-        "category": "MatterWave"
+        "title": "%command.promptLibrary.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.restoreCheckpoint",
-        "title": "Restore Checkpoint",
-        "category": "MatterWave"
+        "title": "%command.restoreCheckpoint.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.importHistory",
-        "title": "Import ChatGPT or Claude History",
-        "category": "MatterWave"
+        "title": "%command.importHistory.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.showLog",
-        "title": "Show Log",
-        "category": "MatterWave"
+        "title": "%command.showLog.title%",
+        "category": "%command.category%"
       }
     ],
     "menus": {
@@ -336,13 +336,13 @@
     "walkthroughs": [
       {
         "id": "matterwave.gettingStarted",
-        "title": "Get started with MatterWave",
-        "description": "Sign in, ask about your code, and let MatterWave change it under review.",
+        "title": "%walkthrough.gettingStarted.title%",
+        "description": "%walkthrough.gettingStarted.description%",
         "steps": [
           {
             "id": "signIn",
-            "title": "Sign in",
-            "description": "Confirm a code in your browser, or paste an API key. The credential stays in the editor's secret storage.\n[Sign In](command:matterwave.signInWithDeviceCode)",
+            "title": "%walkthrough.gettingStarted.signIn.title%",
+            "description": "%walkthrough.gettingStarted.signIn.description%",
             "media": {
               "markdown": "media/walkthrough/sign-in.md"
             },
@@ -353,8 +353,8 @@
           },
           {
             "id": "askAboutSelection",
-            "title": "Ask about a selection",
-            "description": "Select some code and ask about it; the answer streams into the chat view.\n[Ask about Selection](command:matterwave.askAboutSelection)",
+            "title": "%walkthrough.gettingStarted.askAboutSelection.title%",
+            "description": "%walkthrough.gettingStarted.askAboutSelection.description%",
             "media": {
               "markdown": "media/walkthrough/ask.md"
             },
@@ -364,8 +364,8 @@
           },
           {
             "id": "apply",
-            "title": "Apply an answer's code",
-            "description": "Every code block in an answer has Apply. A diff opens first, and the change lands in the editor, where Undo takes it back.\n[Open Chat](command:matterwave.openChat)",
+            "title": "%walkthrough.gettingStarted.apply.title%",
+            "description": "%walkthrough.gettingStarted.apply.description%",
             "media": {
               "markdown": "media/walkthrough/apply.md"
             },
@@ -375,8 +375,8 @@
           },
           {
             "id": "inlineEdit",
-            "title": "Edit in place",
-            "description": "Select lines, say what should change, and review the diff before it lands.\n[Edit Selection](command:matterwave.inlineEdit)",
+            "title": "%walkthrough.gettingStarted.inlineEdit.title%",
+            "description": "%walkthrough.gettingStarted.inlineEdit.description%",
             "media": {
               "markdown": "media/walkthrough/inline-edit.md"
             },
