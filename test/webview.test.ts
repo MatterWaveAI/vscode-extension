@@ -2,6 +2,7 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { Message } from "../src/api/types";
 import type { HostMessage, ViewState, WebviewMessage } from "../src/chat/protocol";
+import { chatHtml } from "../src/chat/viewProvider";
 
 const sent: WebviewMessage[] = [];
 
@@ -24,6 +25,8 @@ function state(over: Partial<ViewState>): ViewState {
     identity: "Ada",
     conversations: [{ id: "c_1", title: "Clock", pinned: false, archived: false, badge: null, source: null }],
     archivedConversations: [],
+    moreConversations: false,
+    moreArchived: false,
     searchResults: null,
     activeId: "c_1",
     transcript: [],
@@ -42,6 +45,9 @@ function state(over: Partial<ViewState>): ViewState {
     notificationsUnreadOnly: false,
     notificationsComplete: true,
     usage: null,
+    answerUsage: {},
+    promptNames: [],
+    announcements: [],
     ...over,
   };
 }
@@ -66,7 +72,11 @@ function post(msg: HostMessage): void {
 }
 
 beforeAll(async () => {
-  document.body.innerHTML = '<div id="app"></div>';
+  // The page the view provider serves, less its script: the same landmarks and live region.
+  const page = chatHtml({ cspSource: "vscode-resource:", scriptUri: "vscode-resource:/webview.js", nonce: "n" });
+  document.documentElement.lang = /<html lang="([^"]+)"/.exec(page)?.[1] ?? "";
+  document.title = /<title>([^<]*)<\/title>/.exec(page)?.[1] ?? "";
+  document.body.innerHTML = /<body>([\s\S]*?)<script/.exec(page)?.[1] ?? "";
   (globalThis as unknown as { acquireVsCodeApi: unknown }).acquireVsCodeApi = () => ({
     postMessage: (m: WebviewMessage) => sent.push(m),
   });
@@ -254,6 +264,166 @@ describe("the chat webview", () => {
     expect(sent.at(-1)).toEqual({ type: "archiveConversation", id: "c_3", archived: false });
   });
 
+  it("offers Load more at the end of a list with more rows, and asks once per state", () => {
+    post({ type: "state", state: state({ moreConversations: true }) });
+    const lists = document.querySelectorAll<HTMLElement>(".convos-list");
+    const more = Array.from(lists[0]?.querySelectorAll("button") ?? []).find((b) => b.textContent === "Load more");
+    expect(more).toBeDefined();
+    sent.length = 0;
+    more?.click();
+    more?.click();
+    expect(sent).toEqual([{ type: "loadMoreConversations", archived: false }]);
+
+    // Scrolling to the end asks too, once the next state has landed.
+    post({ type: "state", state: state({ moreConversations: true }) });
+    sent.length = 0;
+    lists[0]?.dispatchEvent(new Event("scroll"));
+    expect(sent).toEqual([{ type: "loadMoreConversations", archived: false }]);
+
+    // No more rows, no button; a search with more hits pages the same way.
+    post({ type: "state", state: state({ moreConversations: false }) });
+    expect(Array.from(lists[0]?.querySelectorAll("button") ?? []).some((b) => b.textContent === "Load more")).toBe(false);
+    post({ type: "state", state: state({ moreConversations: true, searchResults: [] }) });
+    expect(Array.from(lists[0]?.querySelectorAll("button") ?? []).some((b) => b.textContent === "Load more")).toBe(true);
+  });
+
+  it("offers Load more under the archive on its own", () => {
+    post({
+      type: "state",
+      state: state({ moreArchived: true, archivedConversations: [{ id: "c_9", title: "Old", pinned: false, archived: true, badge: null }] }),
+    });
+    const archive = document.querySelectorAll<HTMLElement>(".convos-list")[1];
+    sent.length = 0;
+    Array.from(archive?.querySelectorAll("button") ?? []).find((b) => b.textContent === "Load more")?.click();
+    expect(sent).toEqual([{ type: "loadMoreConversations", archived: true }]);
+  });
+
+  it("announces a finished answer once through the status region, and never makes the transcript live", () => {
+    post({ type: "state", state: state({ streaming: true, transcript: [] }) });
+    expect(document.querySelector(".transcript")?.getAttribute("aria-live")).toBeNull();
+    post({ type: "state", state: state({ streaming: false, transcript: [assistantEntry("a9")] }) });
+    const announcer = document.getElementById("announcer");
+    expect(announcer?.getAttribute("role")).toBe("status");
+    expect(announcer?.textContent).toBe("MatterWave answered: Answer");
+  });
+
+  it("passes axe's checks for a signed-in view with a conversation, a code block and an error", async () => {
+    const axe = (await import("axe-core")).default;
+    post({
+      type: "state",
+      state: state({
+        transcript: [
+          { message: message({ id: "u1", role: "user", parts: [{ type: "text", text: "Fix it" }], content: "Fix it" }), siblingIndex: 1, siblingCount: 1 },
+          {
+            message: message({ id: "a1", role: "assistant", parent_id: "u1", parts: [{ type: "text", text: "Here:\n\n```ts src/a.ts\nconst a = 1;\n```" }] }),
+            siblingIndex: 1,
+            siblingCount: 2,
+          },
+        ],
+        error: { title: "Something failed", guidance: "Try again.", retryable: true, requestId: "req-1" },
+      }),
+    });
+    // Colours come from the editor's theme variables, which a test page does not have.
+    const results = await axe.run(document, { rules: { "color-contrast": { enabled: false } } });
+    expect(results.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.html).join(" | ")}`)).toEqual([]);
+  });
+
+  it("offers Insert and Copy beside Apply, and colours the code from the theme without parsing it as HTML", () => {
+    const text = 'Here:\n\n```ts src/a.ts\nconst a = "<b>x</b>"; // note\n```';
+    post({
+      type: "state",
+      state: state({ transcript: [{ ...assistantEntry("a1"), message: { ...assistantEntry("a1").message, parts: [{ type: "text", text }] } }] }),
+    });
+    const bar = document.querySelector(".apply-bar");
+    expect(Array.from(bar?.querySelectorAll("button") ?? []).map((b) => b.textContent)).toEqual(["Apply → src/a.ts", "Insert", "Copy"]);
+    sent.length = 0;
+    bar?.querySelectorAll("button").forEach((b, at) => at > 0 && b.click());
+    expect(sent).toEqual([
+      { type: "insertCodeBlock", messageId: "a1", blockIndex: 0 },
+      { type: "copyCodeBlock", messageId: "a1", blockIndex: 0 },
+    ]);
+    const code = document.querySelector(".apply-wrap pre code") as HTMLElement;
+    expect(code.querySelector(".tok-keyword")?.textContent).toBe("const");
+    expect(code.querySelector(".tok-string")?.textContent).toBe('"<b>x</b>"');
+    expect(code.querySelector(".tok-comment")?.textContent).toBe("// note");
+    expect(code.querySelector("b")).toBeNull();
+    expect(code.textContent).toBe('const a = "<b>x</b>"; // note');
+  });
+
+  it("completes @ and / in the composer, with the keyboard", () => {
+    post({ type: "state", state: state({ promptNames: ["code-review"] }) });
+    const input = document.querySelector(".composer textarea") as HTMLTextAreaElement;
+    const list = document.getElementById("composer-suggestions") as HTMLElement;
+    input.value = "/co";
+    input.setSelectionRange(3, 3);
+    input.dispatchEvent(new Event("input"));
+    expect(list.hidden).toBe(false);
+    expect(Array.from(list.querySelectorAll("[role=option]")).map((o) => o.firstChild?.textContent)).toEqual(["/compact", "/code-review"]);
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    expect(input.getAttribute("aria-activedescendant")).toBe("composer-suggestion-1");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
+    expect(input.value).toBe("/code-review ");
+    expect(list.hidden).toBe(true);
+
+    input.value = "look at @te";
+    input.setSelectionRange(11, 11);
+    input.dispatchEvent(new Event("input"));
+    sent.length = 0;
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    expect(input.value).toBe("look at @terminal ");
+    // Enter took the suggestion; it did not send.
+    expect(sent).toEqual([]);
+    input.value = "";
+  });
+
+  it("offers Fork on a message and Report on an answer, and sends their intents", () => {
+    post({ type: "state", state: state({ transcript: [assistantEntry("a1")] }) });
+    const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>(".msg .actions button"));
+    sent.length = 0;
+    buttons.find((b) => b.textContent === "Fork")?.click();
+    buttons.find((b) => b.textContent === "Report")?.click();
+    expect(sent).toEqual([
+      { type: "forkConversation", messageId: "a1" },
+      { type: "reportMessage", messageId: "a1" },
+    ]);
+    // A temporary conversation cannot be forked, so it is not offered.
+    post({ type: "state", state: state({ temporary: true, transcript: [assistantEntry("a1")] }) });
+    expect(Array.from(document.querySelectorAll(".msg .actions button")).some((b) => b.textContent === "Fork")).toBe(false);
+  });
+
+  it("shows an announcement with Open and Dismiss, and no Dismiss on one that may not be", () => {
+    post({
+      type: "state",
+      state: state({
+        announcements: [
+          { id: "an_1", message: "Maintenance at 02:00 UTC.", severity: "warning", link: "https://mw.test/status", dismissible: true },
+          { id: "an_2", message: "Read the new terms.", severity: "critical", link: null, dismissible: false },
+        ],
+      }),
+    });
+    const banners = Array.from(document.querySelectorAll<HTMLElement>(".announcement"));
+    expect(banners.map((b) => b.className)).toEqual(["notice announcement warning", "notice announcement critical"]);
+    sent.length = 0;
+    banners[0]?.querySelectorAll("button").forEach((b) => b.click());
+    expect(sent).toEqual([
+      { type: "openNotification", id: "an_1", url: "https://mw.test/status" },
+      { type: "dismissAnnouncement", id: "an_1" },
+    ]);
+    expect(banners[1]?.querySelectorAll("button")).toHaveLength(0);
+  });
+
+  it("shows an answer's tokens and cost under it, and nothing for one without a count", () => {
+    post({
+      type: "state",
+      state: state({
+        transcript: [assistantEntry("a1"), assistantEntry("a2")],
+        answerUsage: { a1: { promptTokens: 1200, completionTokens: 34, costUsd: 0.000651 } },
+      }),
+    });
+    const lines = Array.from(document.querySelectorAll(".answer-usage")).map((n) => n.textContent);
+    expect(lines).toEqual(["1,200 in · 34 out · $0.0007"]);
+  });
+
   it("shows a row's library badge as a suffix on its title, and nothing when there is none", () => {
     post({
       type: "state",
@@ -311,13 +481,13 @@ describe("the chat webview", () => {
       }),
     });
     const thumbs = () => Array.from(document.querySelectorAll<HTMLButtonElement>(".msg .actions button"));
-    expect(thumbs().map((b) => b.textContent)).toEqual(["Like", "Dislike", "Regenerate"]);
+    expect(thumbs().map((b) => b.textContent)).toEqual(["Like", "Dislike", "Regenerate", "Report", "Fork"]);
     thumbs()
       .find((b) => b.textContent === "Like")
       ?.click();
     expect(sent.at(-1)).toEqual({ type: "rateMessage", messageId: "a1", rating: 1 });
     // The webview's own copy of the rating shows immediately, without a round-trip.
-    expect(thumbs().map((b) => b.textContent)).toEqual(["Liked", "Dislike", "Regenerate"]);
+    expect(thumbs().map((b) => b.textContent)).toEqual(["Liked", "Dislike", "Regenerate", "Report", "Fork"]);
     thumbs()
       .find((b) => b.textContent === "Liked")
       ?.click();
@@ -454,7 +624,7 @@ describe("the chat webview", () => {
     post({ type: "state", state: state({}) });
     const input = document.querySelector(".composer textarea") as HTMLTextAreaElement;
     input.value = "half-typed reply";
-    post({ type: "state", state: state({ source: SLACK }) });
+    post({ type: "state", state: state({ source: SLACK, transcript: [assistantEntry("a1")] }) });
     const panel = document.querySelector<HTMLElement>(".connector")!;
     expect(panel.hidden).toBe(false);
     expect((document.querySelector(".composer") as HTMLElement).hidden).toBe(true);
@@ -464,14 +634,14 @@ describe("the chat webview", () => {
     buttons[0]?.click();
     expect(sent.at(-1)).toEqual({ type: "openLink", url: SLACK.url });
     buttons[1]?.click();
-    expect(sent.at(-1)).toEqual({ type: "forkConversation" });
+    expect(sent.at(-1)).toEqual({ type: "forkConversation", messageId: "a1" });
     // Enter in the hidden composer sends nothing: the thread is answered elsewhere.
     const before = sent.length;
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     expect(sent.length).toBe(before);
 
     // Without a link from the connector, only the fork is offered.
-    post({ type: "state", state: state({ source: { ...SLACK, url: null } }) });
+    post({ type: "state", state: state({ source: { ...SLACK, url: null }, transcript: [assistantEntry("a1")] }) });
     expect(Array.from(panel.querySelectorAll("button")).map((b) => b.textContent)).toEqual(["Fork to continue here"]);
 
     // A person's own conversation gets the composer back, draft and all.
@@ -550,7 +720,7 @@ describe("the chat webview", () => {
     post({
       type: "state",
       state: state({
-        usage: { used: 1_200_000, included: 5_000_000, percent: 24, state: "overage", resetsAt: "2026-11-01T00:00:00+00:00", planName: "Team" },
+        usage: { used: 1_200_000, included: 5_000_000, percent: 24, state: "overage", resetsAt: "2026-11-01T00:00:00+00:00", planName: "Team", memberCap: null },
       }),
     });
     const line = document.querySelector(".meta .usage") as HTMLElement;
@@ -559,7 +729,7 @@ describe("the chat webview", () => {
     expect(line.title).toContain("1,200,000 of 5,000,000");
     expect(line.title).toContain("Team plan");
     // Plain sailing is unmarked; the other states say what they are.
-    post({ type: "state", state: state({ usage: { used: 10, included: 5_000, percent: 0.2, state: "ok", resetsAt: "2026-11-01T00:00:00+00:00", planName: "Team" } }) });
+    post({ type: "state", state: state({ usage: { used: 10, included: 5_000, percent: 0.2, state: "ok", resetsAt: "2026-11-01T00:00:00+00:00", planName: "Team", memberCap: null } }) });
     const plain = document.querySelector(".meta .usage") as HTMLElement;
     expect(plain.textContent).toBe("10 / 5k tokens · 0%");
     expect(plain.className).not.toContain("warn");

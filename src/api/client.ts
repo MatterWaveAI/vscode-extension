@@ -11,16 +11,20 @@ import {
 } from "../lib/matterwaveClient";
 import { ApiError, detailOf, parseRetryAfter } from "./errors";
 import type {
+  Announcement,
   ApiKeyCreated,
+  AccountExport,
   ApiKeyListing,
   Attachment,
   BudgetStatus,
+  AttachmentLimits,
   ContextUsage,
   Conversation,
   ConversationDetail,
   ConversationInstructions,
   DeviceAuthorization,
   DevicePoll,
+  Enforcement,
   Entitlements,
   FeedbackReason,
   FeedbackRow,
@@ -33,6 +37,7 @@ import type {
   NotificationListing,
   NotificationRow,
   OrgInstructions,
+  SearchHit,
   SendBody,
   ShareRow,
   TagRow,
@@ -72,6 +77,28 @@ export interface ClientOptions {
   onRequestId?: (id: string) => void;
   /** Told whether the last request reached the API at all. */
   onReachability?: (online: boolean) => void;
+  /** Told of every request once it is answered or fails: never its body, its query or its credential. */
+  onRequest?: (entry: RequestLogEntry) => void;
+}
+
+/** One request as the log records it. */
+export interface RequestLogEntry {
+  method: string;
+  /** The URL's path, without its query. */
+  path: string;
+  /** Null when no answer came. */
+  status: number | null;
+  requestId: string | null;
+  /** Until the answer's headers (a streamed turn goes on after that). */
+  ms: number;
+  /** What the runtime said when no answer came; null otherwise. */
+  error: string | null;
+}
+
+/** The log line for a request: method, path, status or failure, time, and the reference to quote. */
+export function requestLogLine(entry: RequestLogEntry): string {
+  const outcome = entry.status !== null ? String(entry.status) : `failed: ${entry.error ?? "no answer"}`;
+  return `${entry.method} ${entry.path} -> ${outcome} in ${entry.ms} ms${entry.requestId ? ` (request ${entry.requestId})` : ""}`;
 }
 
 /** How long one Retry-After is honoured before giving up instead. */
@@ -79,6 +106,8 @@ const MAX_RETRY_WAIT_S = 30;
 const MAX_RETRIES = 2;
 /** `mw_` and eight display characters: what `/api/keys` lists as a key's `prefix`. */
 const KEY_PREFIX_LENGTH = 11;
+/** The API's cap on one page of the conversation list. */
+const MAX_LIST_PAGE = 200;
 
 /** What a turn ends with when its body was cut and could not be resumed. */
 const TRUNCATED: ConversationFrame = {
@@ -164,9 +193,44 @@ export class MatterWaveClient {
     return this.json("GET", "/api/keys");
   }
 
-  /** Mint a key; `key` is in this answer and nowhere else, ever. */
-  createKey(name: string): Promise<ApiKeyCreated> {
-    return this.json("POST", "/api/keys", { name });
+  /**
+   * Mint a key; `key` is in this answer and nowhere else, ever. Scopes left
+   * out are the API's default (chat:read, chat:write); no expiry is a key
+   * that does not expire.
+   */
+  createKey(name: string, options: { scopes?: string[]; expiresInDays?: number } = {}): Promise<ApiKeyCreated> {
+    return this.json("POST", "/api/keys", {
+      name,
+      ...(options.scopes ? { scopes: options.scopes } : {}),
+      ...(options.expiresInDays ? { expires_in_days: options.expiresInDays } : {}),
+    });
+  }
+
+  /** A new name for a key; its secret, scopes and expiry stay as they are. */
+  renameKey(id: string, name: string): Promise<ApiKeyListing> {
+    return this.json("PATCH", `/api/keys/${encodeURIComponent(id)}`, { name });
+  }
+
+  // --- account ---------------------------------------------------------------
+
+  /** `GET /api/me/enforcement`: what moderation applies to the caller now; `state: "none"` for nearly everyone. */
+  enforcement(): Promise<Enforcement> {
+    return this.json("GET", "/api/me/enforcement");
+  }
+
+  /** `POST /api/me/export`: queue an export of everything this account has stored. */
+  startExport(): Promise<AccountExport> {
+    return this.json("POST", "/api/me/export", {});
+  }
+
+  /** Where an export stands; `download_url` (a path on the deployment) once it is ready. */
+  exportStatus(id: string): Promise<AccountExport> {
+    return this.json("GET", `/api/me/export/${encodeURIComponent(id)}`);
+  }
+
+  /** `GET /api/attachments/limits/me`: the largest upload, and what remains of the caller's storage. */
+  attachmentLimits(): Promise<AttachmentLimits> {
+    return this.json("GET", "/api/attachments/limits/me");
   }
 
   /** A new secret for the same key; the old one keeps working while `previous_valid_until` says. */
@@ -181,21 +245,76 @@ export class MatterWaveClient {
 
   // --- conversations -------------------------------------------------------
 
-  async listConversations(): Promise<Conversation[]> {
-    const list = await this.call(({ reads }) => reads.conversations.list());
-    return list.data;
+  /**
+   * One page of the sidebar list (the API's page is 50), and the cursor
+   * that resumes it -- null on the last page. `archived` reads the archive
+   * instead: every row whose `archived_at` is set.
+   */
+  async listConversations(
+    options: { archived?: boolean; cursor?: string | null } = {},
+  ): Promise<{ data: Conversation[]; nextCursor: string | null }> {
+    const params: { filter?: "archived"; cursor?: string } = {};
+    if (options.archived) params.filter = "archived";
+    if (options.cursor) params.cursor = options.cursor;
+    const list = await this.call(({ reads }) => reads.conversations.list(params));
+    return { data: list.data, nextCursor: list.next_cursor ?? null };
   }
 
-  /** The archive sidebar draws from: every row whose `archived_at` is set. */
-  async listArchivedConversations(): Promise<Conversation[]> {
-    const list = await this.call(({ reads }) => reads.conversations.list({ filter: "archived" }));
-    return list.data;
+  /**
+   * Every conversation in the list, page after page at the API's widest
+   * page, for a picker that has to offer all of them.
+   */
+  async allConversations(): Promise<Conversation[]> {
+    const rows: Conversation[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await this.call(({ reads }) => reads.conversations.list({ limit: MAX_LIST_PAGE, ...(cursor ? { cursor } : {}) }));
+      rows.push(...page.data);
+      cursor = page.next_cursor ?? undefined;
+    } while (cursor);
+    return rows;
   }
 
   /** Full-text search over the caller's own messages, newest matches first. */
   async searchConversations(query: string): Promise<(Conversation & { snippet: string })[]> {
     const results = await this.call(({ reads }) => reads.conversations.search(query));
     return results.data;
+  }
+
+  /**
+   * `GET /api/search`: titles and messages, ranked by relevance and
+   * recency, a page at a time; `nextCursor` is null on the last page.
+   */
+  async search(query: string, cursor?: string | null): Promise<{ data: SearchHit[]; nextCursor: string | null }> {
+    const params = new URLSearchParams({ q: query });
+    if (cursor) params.set("cursor", cursor);
+    const page = await this.json<{ data: SearchHit[]; next_cursor: string | null }>("GET", `/api/search?${params}`);
+    return { data: page.data, nextCursor: page.next_cursor ?? null };
+  }
+
+  /** Copy the path down to `messageId` into a new conversation of the caller's; a temporary one answers 409. */
+  forkConversation(id: string, messageId: string, title?: string): Promise<Conversation> {
+    return this.json("POST", `/api/conversations/${encodeURIComponent(id)}/fork`, {
+      message_id: messageId,
+      ...(title ? { title } : {}),
+    });
+  }
+
+  /**
+   * Report a conversation, or one message in it: `unsafe` goes to review,
+   * `unhelpful` to the product backlog. The note is the reporter's own words.
+   */
+  async reportConversation(id: string, report: { kind: "unsafe" | "unhelpful"; messageId?: string; note?: string }): Promise<void> {
+    await this.json("POST", `/api/conversations/${encodeURIComponent(id)}/report`, {
+      kind: report.kind,
+      ...(report.messageId ? { message_id: report.messageId } : {}),
+      ...(report.note ? { note: report.note } : {}),
+    });
+  }
+
+  /** `GET /api/announcements`: the deployment's notices inside their window, most severe first. */
+  announcements(): Promise<{ data: Announcement[] }> {
+    return this.json("GET", "/api/announcements");
   }
 
   /**
@@ -226,11 +345,6 @@ export class MatterWaveClient {
 
   async setActiveLeaf(id: string, messageId: string): Promise<ConversationDetail> {
     return narrow(await this.call(({ reads }) => reads.conversations.setActiveLeaf(id, messageId)));
-  }
-
-  /** Copy the path down to `messageId` into a new conversation named `title`. A write: never retried. */
-  async forkConversation(id: string, messageId: string, title?: string): Promise<ConversationDetail> {
-    return narrow(await this.call(({ writes }) => writes.conversations.fork(id, messageId, { title })));
   }
 
   // --- sidebar management (PUT sets a state, DELETE clears it) -------------
@@ -371,6 +485,16 @@ export class MatterWaveClient {
     return this.json("PUT", `/api/library/conversations/${encodeURIComponent(conversationId)}/tags`, {
       tag_ids: tagIds,
     });
+  }
+
+  /** `PATCH /api/library/folders/{id}`: a new name; one the caller already uses answers 409. */
+  renameFolder(id: string, name: string): Promise<FolderRow> {
+    return this.json("PATCH", `/api/library/folders/${encodeURIComponent(id)}`, { name });
+  }
+
+  /** Delete a folder; its conversations go back to the main list, nothing else is deleted. */
+  async deleteFolder(id: string): Promise<void> {
+    await this.json("DELETE", `/api/library/folders/${encodeURIComponent(id)}`);
   }
 
   /** Take a tag off every conversation that carries it; a gone or foreign one is one 404. */
@@ -537,16 +661,30 @@ export class MatterWaveClient {
 
   /** Every request, the SDK's and this file's own, reports reachability and the request id here. */
   private readonly observed: Fetch = async (input, init) => {
+    const started = Date.now();
+    const method = (init.method ?? "GET").toUpperCase();
+    // The path alone: a query can carry what the person typed (a search).
+    const path = new URL(input).pathname;
     let response: Response;
     try {
       response = await this.fetchImpl(input, init);
     } catch (error) {
-      if (!init.signal?.aborted) this.options.onReachability?.(false);
+      const aborted = Boolean(init.signal?.aborted);
+      if (!aborted) this.options.onReachability?.(false);
+      this.options.onRequest?.({
+        method,
+        path,
+        status: null,
+        requestId: null,
+        ms: Date.now() - started,
+        error: aborted ? "aborted" : error instanceof Error ? error.message : String(error),
+      });
       throw error;
     }
     this.options.onReachability?.(true);
     const requestId = response.headers.get("x-request-id");
     if (requestId) this.options.onRequestId?.(requestId);
+    this.options.onRequest?.({ method, path, status: response.status, requestId, ms: Date.now() - started, error: null });
     return response;
   };
 

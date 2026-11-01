@@ -7,9 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- The extension's exports (the chat controller and its message tap) are given only to the extension test runner; a production host exports nothing, so no other installed extension can read transcripts or run turns with your credential.
+- A file an answer names is applied only when it is a plain relative path that stays inside a workspace folder: `../`, absolute, drive-letter, UNC and URI paths are refused, and the Apply and Create dialogs show where the write lands.
+- In Restricted Mode (an untrusted workspace) Apply, inline edit, Restore Checkpoint, Insert at Cursor, the lightbulb's Fix and Add Docs, commit messages and `@git` wait for the workspace to be trusted.
+
+### Fixed
+
+- Apply, inline edit and restore change the document through the editor (a `WorkspaceEdit` over the range that differs) instead of writing to disk: the change joins Undo, unsaved edits are kept and diffed against, the checkpoint records what the buffer held, and no save conflict follows. A document changed while the diff was open is not applied.
+- Inline edit works on whole lines and keeps the selection's trailing line break and indentation; an answer with no fenced code is not applied.
+- Multi-root and remote workspaces: a named file goes to the folder its path names, else the active editor's, else the only one, else a pick; `@git` and `@folder` act on the right folder; checkpoints keep the file's full URI; new files are created through the editor's file service, so a remote host is kept.
+- The sidebar and the archive load every page of conversations (scroll to the end, or Load more), Organize lists them all, and the file picker searches the whole workspace as you type.
+- `@terminal` reads a terminal's recent commands, output and exit codes through shell integration (or its copied buffer), each `@` mention is its own pick, and backing out of a pick leaves no empty conversation.
+- A selection holding `@file` (a JSDoc tag) or starting with `/` is sent as it is, not read as a mention or a command.
+
 ### Added
 
 - **Connector conversations**: a conversation a connector opened (one started from a Slack routing rule) carries its source. Its sidebar row is badged with where it is answered (`Slack #support`), and while it is open the composer gives way to a notice -- "Answered in Slack #support -- reply in the thread" -- with an "Open in Slack" button for the thread's link and "Fork to continue here", which copies the conversation down to its leaf into one of the person's own and opens it. A send, edit or regenerate never leaves the client for such a conversation; the API's 409 `connector_conversation` on a stale row's send locks it the same way, without a failed turn. The vendored SDK client gains `Conversation.preset_id`, `preset` and `source`, `ConnectorConversationError`, and `conversations.fork`.
+- **Proxy support**: requests follow the editor's `http.proxy` (with credentials), `http.proxyStrictSSL` and the operating system's certificates, with `matterwave.caFile` trusted on top. The bundled HTTP client is gone and the extension is about 500 KB smaller.
+- **Get started**: a walkthrough (sign in, ask, apply, inline edit), keybindings for Open Chat, New Chat and Ask about Selection (`Ctrl+Alt+M C/N/A`, `Ctrl+Cmd+M` on macOS), and a **MatterWave** log of every request's method, path, status, time and request id, never content (**Show Log**). The extension activates when it is used, and asks for the server on first use.
+- **The lightbulb**: Fix with MatterWave for a reported problem, through a reviewed diff; Explain, Generate Tests and Add Docs for a selection.
+- **The terminal**: Explain and Fix Last Terminal Command from the terminal's context menu.
+- **Commit messages** from the staged changes, from the Source Control title bar, in the `matterwave.commitMessageStyle` style, written in a temporary conversation that leaves the chat untouched.
+- **MCP**: MatterWave's MCP server is offered to VS Code's agent mode, as the signed-in account (VS Code 1.101 and later).
+- **Conversations**: fork from any message, report an answer or a conversation, ranked and paged search over titles and messages, rename and delete folders (**Manage Folders**), and the deployment's announcements as dismissable banners.
+- **Account**: your spending cap beside the allowance; key creation with scopes and a lifetime, and key rename; an **Account** command with plan, cap, moderation status, **Export my data** and **See plans**; uploads checked against the deployment's own limits before they are sent.
+- **Composer**: Insert at Cursor and Copy on every code block, code coloured in the editor theme's colours, and completion for `@` and `/` (your saved prompts included).
+- Tokens and cost at list price under each answer (`matterwave.showAnswerUsage`).
+- The prompt library keeps prompts for every workspace or for this one, and Settings Sync carries it and your model choice to your other machines.
+- Checkpoint snapshots are files in the extension's storage, under one cap for every chat (least recently used first), instead of the editor's state.
+- The chat view is a labelled landmark for screen readers and says once when an answer finishes, instead of reading every streamed token.
+- Commands, settings and the walkthrough in Spanish.
+- `Cmd+I` for inline edit on macOS; `Ctrl/Cmd+I` yields to the editor's own inline chat when one is installed, and `Ctrl+Alt+M I` always works.
+- The Marketplace icon, gallery banner, keywords and links; the `.vsix` ships the licence and this changelog.
+
+[Unreleased]: https://github.com/MatterWaveAI/vscode-extension/compare/v0.3.0...HEAD
 
 ## [0.3.0] - 2026-10-31
 
@@ -37,7 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Deferred
 
-- **De-vendoring the SDK**: `@matterwave/sdk` is still not published to npm (registry 404; the sibling `typescript-sdk` repo sits at 0.3.0 unpublished), so the vendored client at `src/lib/matterwaveClient.ts` stays. Swap it for the package when it is published.
+- **De-vendoring the SDK**: `@matterwave/sdk` is not published to npm, so the vendored client at `src/lib/matterwaveClient.ts` stays until it is.
 
 [0.3.0]: https://github.com/MatterWaveAI/vscode-extension/releases/tag/v0.3.0
 

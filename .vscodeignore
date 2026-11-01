@@ -4,3 +4,7 @@
 !media/**
 !package.json
 !README.md
+!CHANGELOG.md
+!LICENSE
+!package.nls.json
+!package.nls.*.json

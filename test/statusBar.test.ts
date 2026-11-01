@@ -32,6 +32,7 @@ describe("statusText", () => {
       state,
       resetsAt: "2026-11-01T00:00:00+00:00",
       planName: "Team",
+      memberCap: null,
     });
     const view = statusText({ ...base, usage: usage("ok") });
     expect(view.tooltip).toContain("Allowance: 1,200,000 of 5,000,000 tokens (24%)");
@@ -39,5 +40,21 @@ describe("statusText", () => {
     expect(statusText({ ...base, usage: usage("overage") }).tooltip).toContain("— in overage");
     expect(statusText({ ...base, usage: usage("warn") }).tooltip).toContain("— running low");
     expect(statusText({ ...base, usage: usage("exhausted") }).tooltip).toContain("— exhausted");
+  });
+
+  it("adds the person's own cap when one applies", () => {
+    const usage: UsageView = {
+      used: 10,
+      included: 100,
+      percent: 10,
+      state: "ok",
+      resetsAt: "2026-11-01T00:00:00+00:00",
+      planName: "Team",
+      memberCap: { spentUsd: 3.2, capUsd: 10, exhausted: false },
+    };
+    expect(statusText({ ...base, usage }).tooltip).toContain("Your cap: $3.20 of $10.00");
+    expect(statusText({ ...base, usage: { ...usage, memberCap: { spentUsd: 10, capUsd: 10, exhausted: true } } }).tooltip).toContain(
+      "Your cap: $10.00 of $10.00 — reached",
+    );
   });
 });

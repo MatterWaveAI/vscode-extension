@@ -2,7 +2,7 @@ import { CONNECTOR_CONVERSATION_CODE, type ConversationFrame } from "../lib/matt
 import type { MatterWaveClient } from "../api/client";
 import { ApiError } from "../api/errors";
 import { isUntrustedCertificate } from "../api/transport";
-import type { Conversation, ConversationInstructions, ConversationSource, FeedbackReason, Library, Message, ModelInfo, NotificationRow, Part, UsageReport } from "../api/types";
+import type { Announcement, BudgetStatus, Conversation, ConversationInstructions, ConversationSource, FeedbackReason, Library, Message, ModelInfo, NotificationRow, Part, UsageReport } from "../api/types";
 import { connectorNoticeText } from "./connectorSource";
 import { fileAttachment } from "../context";
 import { classifyNotificationLink } from "../links";
@@ -15,6 +15,7 @@ import { switchTarget, transcriptOf } from "./branches";
 import { imageDataUri, MAX_IMAGE_BYTES, renderableImageType } from "./images";
 import { codeBlockAt, type CodeBlock } from "./codeBlocks";
 import type {
+  AnswerUsage,
   ConversationSummary,
   ErrorView,
   FeedbackSummary,
@@ -67,8 +68,8 @@ export interface ChatDeps {
    * written expecting the context it names.
    */
   resolveMention?: (mention: Mention) => Promise<ResolvedContext | null>;
-  /** The prompt library a `/name` expands to, when this editor keeps one. */
-  prompts?: { get(name: string): Promise<string | null> };
+  /** The prompt library a `/name` expands to, when this editor keeps one, and its names for completion. */
+  prompts?: { get(name: string): Promise<string | null>; names?(): Promise<string[]> };
   /**
    * Apply one code block to its file through a reviewed diff (the editor
    * side of the webview's Apply button). The controller hands over the
@@ -76,6 +77,15 @@ export interface ChatDeps {
    */
   applyCode?: (request: { messageId: string; block: CodeBlock }) => Promise<void> | void;
   onStatus?: (status: StatusInfo) => void;
+  /** Whether answers show their tokens and cost (the matterwave.showAnswerUsage setting); on when absent. */
+  showAnswerUsage?: () => boolean;
+  /** Report a conversation or one message of it: the editor asks what kind, and for a note. */
+  report?: (target: { conversationId: string; messageId?: string }) => Promise<void> | void;
+  /** A code block's code to the clipboard, and at the active editor's cursor. */
+  copyCode?: (code: string) => Promise<void> | void;
+  insertCode?: (code: string) => Promise<void> | void;
+  /** The announcements this person dismissed, kept by the editor across restarts. */
+  dismissedAnnouncements?: { has(id: string): boolean; add(id: string): void };
 }
 
 /** One @-mention's context, as the attachment upload takes it. */
@@ -114,8 +124,19 @@ export class ChatController {
   private identity: string | null = null;
   private conversations: Conversation[] = [];
   private archived: Conversation[] = [];
+  /** Where each list resumes: the last page's `next_cursor`, null once every row is on hand. */
+  private conversationsCursor: string | null = null;
+  private archivedCursor: string | null = null;
+  /** True while a page is on its way, so a scroll that fires twice asks once. */
+  private loadingMore = false;
   /** Non-null while the sidebar's search box holds a query. */
   private searchResults: (Conversation & { snippet: string })[] | null = null;
+  /** The query the results are for, and where its next page starts (null once every hit is on hand). */
+  private searchQuery: string | null = null;
+  private searchCursor: string | null = null;
+  /** The deployment's announcements in their window, before the person's dismissals. */
+  private announcements: Announcement[] = [];
+  private promptNames: string[] = [];
   private activeId: string | null = null;
   private path: Message[] = [];
   private tree: Message[] = [];
@@ -146,6 +167,10 @@ export class ChatController {
   /** The library, read once per refresh: the rows' folder/tag badges draw from it. */
   private library: Library | null = null;
   private abort: AbortController | null = null;
+  /** The running turn's tokens, from its `context` frame, until its `done` names the answer. */
+  private turnTokens: { prompt: number; completion: number; model: ModelInfo | null } | null = null;
+  /** What each answer this session streamed used, by message id: the API keeps no per-answer count. */
+  private readonly answerUsage = new Map<string, AnswerUsage>();
   private failed: FailedTurn | null = null;
   private reloadAfterTurn = false;
   lastRequestId: string | null = null;
@@ -177,12 +202,19 @@ export class ChatController {
         return this.pinConversation(message.id, message.pinned);
       case "archiveConversation":
         return this.archiveConversation(message.id, message.archived);
+      case "loadMoreConversations":
+        return this.loadMoreConversations(message.archived);
+      case "forkConversation":
+        return this.forkConversation(message.messageId);
+      case "reportMessage":
+        if (this.activeId) await this.deps.report?.({ conversationId: this.activeId, messageId: message.messageId });
+        return;
+      case "dismissAnnouncement":
+        return this.dismissAnnouncement(message.id);
       case "exportConversation":
       case "shareConversation":
         this.deps.runCommand(message.type);
         return;
-      case "forkConversation":
-        return this.forkConversation();
       case "openLink":
         return this.openNotificationLink(message.url);
       case "send":
@@ -214,6 +246,10 @@ export class ChatController {
         return this.openNotificationLink(message.url);
       case "applyCodeBlock":
         return this.applyCodeBlock(message.messageId, message.blockIndex);
+      case "copyCodeBlock":
+        return this.useCodeBlock("copy", message.messageId, message.blockIndex);
+      case "insertCodeBlock":
+        return this.useCodeBlock("insert", message.messageId, message.blockIndex);
       case "switchBranch":
         return this.switchBranch(message.messageId, message.step);
       case "continue":
@@ -240,7 +276,12 @@ export class ChatController {
       this.identity = null;
       this.conversations = [];
       this.archived = [];
+      this.conversationsCursor = null;
+      this.archivedCursor = null;
       this.searchResults = null;
+      this.searchQuery = null;
+      this.searchCursor = null;
+      this.announcements = [];
       this.activeId = null;
       this.path = [];
       this.tree = [];
@@ -263,17 +304,20 @@ export class ChatController {
         this.deps.client.me(),
         this.deps.client.models(),
         this.deps.client.listConversations(),
-        this.deps.client.listArchivedConversations(),
+        this.deps.client.listConversations({ archived: true }),
       ]);
       this.identity = me.name || me.email || me.subject;
       this.models = models.data;
       this.model = initialModel(models.data, this.deps.rememberedModel.get(), models.default_model);
       // A temporary conversation is in no list, whatever a deployment's rows
       // say: it would be gone within a day anyway.
-      this.conversations = conversations.filter(notTemporary);
-      this.archived = archived.filter(notTemporary);
+      // A refresh reads the first page of each list again; Load more goes on from there.
+      this.conversations = conversations.data.filter(notTemporary);
+      this.archived = archived.data.filter(notTemporary);
+      this.conversationsCursor = conversations.nextCursor;
+      this.archivedCursor = archived.nextCursor;
       // These are best-effort: a deployment without the route still chats.
-      await Promise.all([this.loadNotifications(), this.loadUsage(), this.loadLibrary()]);
+      await Promise.all([this.loadNotifications(), this.loadUsage(), this.loadLibrary(), this.loadAnnouncements(), this.loadPromptNames()]);
       if (this.activeId) await this.loadConversation(this.activeId);
     });
     this.emit();
@@ -305,6 +349,8 @@ export class ChatController {
     this.instructions = null;
     this.feedback = new Map();
     this.searchResults = null;
+    this.searchQuery = null;
+    this.searchCursor = null;
     this.emit();
   }
 
@@ -382,6 +428,18 @@ export class ChatController {
     await this.deps.applyCode?.({ messageId, block });
   }
 
+  /** Copy one code block, or put it at the editor's cursor: the block as the answer carries it. */
+  private async useCodeBlock(how: "copy" | "insert", messageId: string, blockIndex: number): Promise<void> {
+    const message = this.path.find((m) => m.id === messageId);
+    const block = message ? codeBlockAt(messageText(message), blockIndex) : null;
+    if (!block || !block.code.trim()) {
+      this.notice = "That code block is no longer in the conversation.";
+      this.emit();
+      return;
+    }
+    await (how === "copy" ? this.deps.copyCode?.(block.code) : this.deps.insertCode?.(block.code));
+  }
+
   private openNotificationLink(url: string): void {
     const target = classifyNotificationLink(url, this.deps.client.baseUrl);
     if (!target) return;
@@ -406,19 +464,103 @@ export class ChatController {
     return this.activeId;
   }
 
+  /**
+   * The next page of the list (or the archive), after the rows on hand: the
+   * API pages the sidebar 50 at a time by cursor, and a scroll to the end
+   * (or Load more) is what asks for more. A row already on hand -- moved by
+   * a pin or an archive since -- is not listed twice.
+   */
+  async loadMoreConversations(archived: boolean): Promise<void> {
+    // While the box holds a search, the end of the list is the end of its hits.
+    if (!archived && this.searchResults !== null) return this.loadMoreSearch();
+    const cursor = archived ? this.archivedCursor : this.conversationsCursor;
+    if (!cursor || this.loadingMore) return;
+    this.loadingMore = true;
+    try {
+      const page = await this.deps.client.listConversations({ archived, cursor });
+      const onHand = new Set([...this.conversations, ...this.archived].map((c) => c.id));
+      const added = page.data.filter((c) => notTemporary(c) && !onHand.has(c.id));
+      if (archived) {
+        this.archived = [...this.archived, ...added];
+        this.archivedCursor = page.nextCursor;
+      } else {
+        this.conversations = [...this.conversations, ...added];
+        this.conversationsCursor = page.nextCursor;
+      }
+    } catch (error) {
+      this.fail(error);
+    } finally {
+      this.loadingMore = false;
+    }
+    this.emit();
+  }
+
   /** The sidebar's search. An empty query leaves search mode for the list. */
   async searchConversations(query: string): Promise<void> {
     const q = query.trim();
     if (!q) {
       this.searchResults = null;
+      this.searchQuery = null;
+      this.searchCursor = null;
       this.emit();
       return;
     }
     await this.guard(async () => {
-      // The server keeps temporary conversations out of search; the filter
-      // holds if a row ever leaks through.
-      this.searchResults = (await this.deps.client.searchConversations(q)).filter(notTemporary);
+      // Ranked over titles and messages, a page at a time. The server keeps
+      // temporary conversations out of search; the filter holds if a row
+      // ever leaks through.
+      const page = await this.deps.client.search(q);
+      this.searchResults = page.data.filter(notTemporary);
+      this.searchQuery = q;
+      this.searchCursor = page.nextCursor;
     });
+    this.emit();
+  }
+
+  /** The next page of the search the box holds, after the hits on hand. */
+  private async loadMoreSearch(): Promise<void> {
+    const query = this.searchQuery;
+    const cursor = this.searchCursor;
+    if (!query || !cursor || this.loadingMore) return;
+    this.loadingMore = true;
+    try {
+      const page = await this.deps.client.search(query, cursor);
+      if (this.searchQuery !== query) return;
+      const onHand = new Set((this.searchResults ?? []).map((hit) => hit.id));
+      this.searchResults = [...(this.searchResults ?? []), ...page.data.filter((hit) => notTemporary(hit) && !onHand.has(hit.id))];
+      this.searchCursor = page.nextCursor;
+    } catch (error) {
+      this.fail(error);
+    } finally {
+      this.loadingMore = false;
+    }
+    this.emit();
+  }
+
+  /**
+   * Fork the open conversation at a message: the path down to it becomes a
+   * new conversation of the caller's, which opens. A temporary
+   * conversation cannot be forked; the API's 409 says so in its words.
+   */
+  async forkConversation(messageId: string): Promise<void> {
+    const id = this.activeId;
+    if (!id || this.abort) return;
+    let forked: Conversation | null = null;
+    await this.guard(async () => {
+      try {
+        forked = await this.deps.client.forkConversation(id, messageId);
+      } catch (error) {
+        if (!this.surfaceConflictNotice(error)) throw error;
+      }
+    });
+    const opened = forked as Conversation | null;
+    if (!opened) {
+      this.emit();
+      return;
+    }
+    this.conversations = [opened, ...this.conversations.filter((c) => c.id !== opened.id)];
+    await this.openConversation(opened.id);
+    this.notice = `Forked into “${opened.title || "a new conversation"}”: the original is unchanged.`;
     this.emit();
   }
 
@@ -650,11 +792,40 @@ export class ChatController {
 
   private async loadUsage(): Promise<void> {
     try {
-      this.usage = usageViewOf(await this.deps.client.usage());
+      // The cap is a second read, and a deployment without it still shows the allowance.
+      const [report, budget] = await Promise.all([this.deps.client.usage(), this.deps.client.budget().catch(() => null)]);
+      this.usage = usageViewOf(report, budget);
     } catch {
       // A deployment without the route still chats; the line just stays off.
       this.usage = null;
     }
+  }
+
+  /** The saved prompts' names, read again when the library changes. */
+  async reloadPrompts(): Promise<void> {
+    await this.loadPromptNames();
+    this.emit();
+  }
+
+  private async loadPromptNames(): Promise<void> {
+    this.promptNames = (await this.deps.prompts?.names?.().catch(() => [])) ?? [];
+  }
+
+  /** The deployment's announcements; a deployment without the route shows none. */
+  private async loadAnnouncements(): Promise<void> {
+    try {
+      this.announcements = (await this.deps.client.announcements()).data;
+    } catch {
+      this.announcements = [];
+    }
+  }
+
+  /** Hide one announcement for good; one the deployment marks as not dismissible stays. */
+  dismissAnnouncement(id: string): void {
+    const row = this.announcements.find((a) => a.id === id);
+    if (!row?.dismissible) return;
+    this.deps.dismissedAnnouncements?.add(id);
+    this.emit();
   }
 
   /** The library for the rows' badges; a failed read loses the badges, nothing else. */
@@ -704,6 +875,15 @@ export class ChatController {
       if (slash) return this.handleSlash(slash);
     }
     if (this.refuseConnectorTurn()) return;
+    // @-mentions resolve before anything is created, but only on a fresh
+    // send: a retry carries the attachment ids it uploaded the first time.
+    // Backing out of a pick then leaves no empty conversation behind.
+    let contexts: ResolvedContext[] = [];
+    if (attachmentIds.length === 0 && parseMentions(content).length > 0) {
+      const resolved = await this.resolveMentions(content);
+      if (resolved === null) return;
+      contexts = resolved;
+    }
     const id = await this.ensureConversation(temporary);
     if (!id) {
       // The composer has already let the text go; when the conversation
@@ -711,14 +891,12 @@ export class ChatController {
       if (this.error) this.failed = { content, attachmentIds, userMessageId: null, temporary };
       return;
     }
-    // @-mentions resolve and upload before the turn, but only on a fresh
-    // send: a retry carries the attachment ids it uploaded the first time.
-    // Prompt without a mention takes the exact path it always took.
+    // A prompt without a mention takes the exact path it always took.
     let mentionIds: string[] = [];
-    if (attachmentIds.length === 0 && parseMentions(content).length > 0) {
-      const resolved = await this.attachMentions(id, content);
-      if (resolved === null) return;
-      mentionIds = resolved;
+    if (contexts.length > 0) {
+      const uploaded = await this.uploadContexts(id, contexts);
+      if (uploaded === null) return;
+      mentionIds = uploaded;
     }
     return this.sendCore(content, [...attachmentIds, ...mentionIds], temporary, id);
   }
@@ -774,18 +952,16 @@ export class ChatController {
   }
 
   /**
-   * Upload every @-mention's context as an attachment, in the order the
-   * prompt names it. A mention the person backs out of -- or one that fails
-   * to upload -- sends nothing: the message was written expecting the
-   * context it names, and half a context is worse than none.
+   * Every @-mention's context, in the order the prompt names it, one pick
+   * per mention. A mention the person backs out of sends nothing: the
+   * message was written expecting the context it names, and half a context
+   * is worse than none.
    */
-  private async attachMentions(conversationId: string, content: string): Promise<string[] | null> {
-    const mentions = parseMentions(content);
-    if (mentions.length === 0) return [];
+  private async resolveMentions(content: string): Promise<ResolvedContext[] | null> {
     const resolve = this.deps.resolveMention;
     if (!resolve) return [];
-    const ids: string[] = [];
-    for (const mention of mentions) {
+    const parts: ResolvedContext[] = [];
+    for (const mention of parseMentions(content)) {
       let part: ResolvedContext | null;
       try {
         part = await resolve(mention);
@@ -798,6 +974,39 @@ export class ChatController {
         this.emit();
         return null;
       }
+      parts.push(part);
+    }
+    return parts;
+  }
+
+  /**
+   * Why an upload of `bytes` would be refused, from the deployment's own
+   * limits -- the largest upload, and what remains of the person's storage
+   * -- or null when it fits. Read fresh each time; a deployment that does
+   * not say lets the upload go and its own refusal stand.
+   */
+  private async uploadRefusal(bytes: number): Promise<string | null> {
+    const limits = await this.deps.client.attachmentLimits().catch(() => null);
+    if (!limits) return null;
+    if (bytes > limits.max_upload_bytes) {
+      return `That is ${megabytes(bytes)}; this deployment takes at most ${megabytes(limits.max_upload_bytes)} per upload.`;
+    }
+    if (bytes > limits.quota_remaining_bytes) {
+      return `That is ${megabytes(bytes)}, and ${megabytes(limits.quota_remaining_bytes)} of your ${megabytes(limits.quota_bytes)} attachment storage is left. Delete attachments in the web app to make room.`;
+    }
+    return null;
+  }
+
+  /** Upload the resolved contexts into the conversation; one that fails sends nothing. */
+  private async uploadContexts(conversationId: string, parts: ResolvedContext[]): Promise<string[] | null> {
+    const refusal = await this.uploadRefusal(parts.reduce((sum, part) => sum + new Blob([part.text]).size, 0));
+    if (refusal) {
+      this.notice = `The context was not attached, so the message was not sent. ${refusal}`;
+      this.emit();
+      return null;
+    }
+    const ids: string[] = [];
+    for (const part of parts) {
       try {
         const saved = await this.deps.client.uploadAttachment(
           new Blob([part.text], { type: "text/plain" }),
@@ -831,6 +1040,16 @@ export class ChatController {
   }
 
   /**
+   * Send text the editor composed (a selection with its question, a
+   * terminal command with its output) as it is: no `/command` and no
+   * `@mention` is read out of it, since code and output carry both as
+   * plain text (`@file` is a JSDoc tag, `/usr/bin` a path).
+   */
+  async sendText(content: string): Promise<void> {
+    await this.sendCore(content, [], false);
+  }
+
+  /**
    * One prompt out, the answer's text back -- the inline editor's road in.
    * The turn runs through the same pipeline as any send, so it shows in the
    * conversation; what comes back is the last assistant message's words, or
@@ -844,6 +1063,32 @@ export class ChatController {
     const last = this.path[this.path.length - 1];
     if (last?.role !== "assistant" || last.truncated) return null;
     return messageText(last);
+  }
+
+  /**
+   * One prompt answered outside the chat: a temporary conversation (in no
+   * list, never shared) with the current model, removed once its answer is
+   * in. For text the editor fills in itself -- a commit message -- where a
+   * turn in the open conversation would only be noise. Throws what the API
+   * said when there is no answer.
+   */
+  async answerOnce(prompt: string): Promise<string> {
+    const model = this.model?.id;
+    const conversation = await this.deps.client.createConversation({ temporary: true, ...(model ? { model } : {}) });
+    try {
+      let answer: Message | null = null;
+      for await (const frame of this.deps.client.sendMessage(conversation.id, { content: prompt, ...(model ? { model } : {}) })) {
+        if (frame.event === "done") answer = frame.message as Message;
+        else if (frame.event === "error") throw new ApiError(0, frame.detail ?? "The answer failed.", this.lastRequestId);
+        else if (frame.event === "moderation_block") throw new ApiError(0, STREAM_ERROR_COPY.moderation.title, frame.request_id ?? null);
+      }
+      if (!answer || answer.truncated) throw new ApiError(0, "The answer was cut off before it finished.", this.lastRequestId);
+      return messageText(answer);
+    } finally {
+      await this.deps.client.deleteConversation(conversation.id).catch(() => {
+        // A temporary conversation is deleted a day after its last message anyway.
+      });
+    }
   }
 
   /** Try a failed turn again in the cheapest way that cannot double-post it. */
@@ -867,9 +1112,15 @@ export class ChatController {
    * bytes, so the shape the conversation records is the file's own.
    */
   async askAboutFile(question: string, text: string, path: string): Promise<void> {
+    const { blob, filename } = fileAttachment(text, path);
+    const tooLarge = await this.uploadRefusal(blob.size);
+    if (tooLarge) {
+      this.notice = `${path} was not sent. ${tooLarge}`;
+      this.emit();
+      return;
+    }
     const id = await this.ensureConversation();
     if (!id) return;
-    const { blob, filename } = fileAttachment(text, path);
     let attachmentId: string;
     try {
       const attachment = await this.deps.client.uploadAttachment(blob, filename, id);
@@ -889,7 +1140,7 @@ export class ChatController {
   async sendAttachment(question: string, attachment: { blob: Blob; filename: string }): Promise<void> {
     // Before anything is sent: a model the API says cannot see images gets a
     // refusal that names what to pick instead, not a 422 after the upload.
-    const refusal = this.visionRefusal();
+    const refusal = this.visionRefusal() ?? (await this.uploadRefusal(attachment.blob.size));
     if (refusal) {
       this.notice = refusal;
       this.emit();
@@ -964,6 +1215,7 @@ export class ChatController {
     this.error = null;
     this.failed = null;
     this.reloadAfterTurn = false;
+    this.turnTokens = null;
     const parent = this.path[this.path.length - 1] ?? null;
     this.live = emptyAssistant(conversationId, parent?.id ?? null);
     let userMessageId = retryable?.userMessageId ?? null;
@@ -1054,6 +1306,7 @@ export class ChatController {
       }
       case "context": {
         const prompt = frame.prompt_tokens;
+        if (prompt !== null) this.turnTokens = { prompt, completion: frame.completion_tokens ?? 0, model: this.model };
         this.meter = {
           usedTokens: prompt === null ? null : prompt + (frame.completion_tokens ?? 0),
           contextWindow: frame.context_window ?? this.meter?.contextWindow ?? null,
@@ -1081,6 +1334,10 @@ export class ChatController {
       }
       case "done": {
         const message = frame.message as Message;
+        if (this.turnTokens) {
+          this.answerUsage.set(message.id, answerUsageOf(this.turnTokens));
+          this.turnTokens = null;
+        }
         this.path = [...this.path.filter((m) => m.id !== ""), message];
         this.live = null;
         this.emit();
@@ -1136,32 +1393,6 @@ export class ChatController {
     this.notice = connectorNoticeText(this.source);
     this.emit();
     return true;
-  }
-
-  /**
-   * The notice's fork: the path as it stands, down to its leaf, becomes a
-   * conversation of the person's own, which then opens with the composer
-   * back. A temporary conversation's 409 is its own sentence, as for pin.
-   */
-  async forkConversation(): Promise<void> {
-    if (!this.activeId || this.abort) return;
-    const id = this.activeId;
-    const leaf = this.path[this.path.length - 1];
-    if (!leaf) {
-      this.notice = "Nothing to fork yet.";
-      this.emit();
-      return;
-    }
-    const title = this.conversations.find((c) => c.id === id)?.title;
-    try {
-      const forked = await this.deps.client.forkConversation(id, leaf.id, title ? `Branch of ${title}` : undefined);
-      this.conversations = [forked, ...this.conversations];
-      await this.openConversation(forked.id);
-      this.notice = `Forked as "${forked.title}".`;
-    } catch (error) {
-      if (!this.surfaceConflictNotice(error)) this.fail(error);
-    }
-    this.emit();
   }
 
   async compact(): Promise<void> {
@@ -1262,6 +1493,11 @@ export class ChatController {
       identity: this.identity,
       conversations: this.conversations.map((c) => conversationSummary(c, this.library)),
       archivedConversations: this.archived.map((c) => conversationSummary(c, this.library)),
+      moreConversations: this.searchResults !== null ? this.searchCursor !== null : this.conversationsCursor !== null,
+      announcements: this.announcements
+        .filter((a) => !(this.deps.dismissedAnnouncements?.has(a.id) ?? false))
+        .map((a) => ({ id: a.id, message: a.message, severity: a.severity, link: a.link, dismissible: a.dismissible })),
+      moreArchived: this.archivedCursor !== null,
       searchResults: this.searchResults?.map((hit): SearchHitView => ({ ...conversationSummary(hit, this.library), snippet: hit.snippet })) ?? null,
       activeId: this.activeId,
       transcript: transcriptOf(this.path, this.tree),
@@ -1280,6 +1516,8 @@ export class ChatController {
       notificationsUnreadOnly: this.notificationsUnreadOnly,
       notificationsComplete: this.notificationsComplete,
       usage: this.usage,
+      promptNames: this.promptNames,
+      answerUsage: this.deps.showAnswerUsage?.() === false ? {} : Object.fromEntries(this.answerUsage),
     };
   }
 
@@ -1366,7 +1604,7 @@ function messageText(m: Message): string {
 }
 
 /** The usage report as the line reads it: the three states folded into one. */
-function usageViewOf(report: UsageReport): UsageView {
+function usageViewOf(report: UsageReport, budget: BudgetStatus | null): UsageView {
   const state = report.exhausted ? "exhausted" : report.in_overage ? "overage" : report.warn ? "warn" : "ok";
   return {
     used: report.used,
@@ -1375,7 +1613,31 @@ function usageViewOf(report: UsageReport): UsageView {
     state,
     resetsAt: report.resets_at,
     planName: report.plan.name,
+    memberCap:
+      budget && budget.member_cap !== null
+        ? { spentUsd: budget.member_spent / 1_000_000, capUsd: budget.member_cap / 1_000_000, exhausted: budget.member_exhausted }
+        : null,
   };
+}
+
+/**
+ * A turn's tokens as an answer's usage: what the prompt and the answer
+ * used, and what that costs at the model's list price per million -- the
+ * price the pricing page shows, not a bill.
+ */
+export function answerUsageOf(tokens: { prompt: number; completion: number; model: ModelInfo | null }): AnswerUsage {
+  const input = tokens.model?.input_usd_per_m;
+  const output = tokens.model?.output_usd_per_m;
+  const costUsd =
+    typeof input === "number" && typeof output === "number" ? (tokens.prompt * input + tokens.completion * output) / 1_000_000 : null;
+  return { promptTokens: tokens.prompt, completionTokens: tokens.completion, costUsd };
+}
+
+/** A byte count as people read it: "512 KB", "4.2 MB". */
+function megabytes(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  const mb = bytes / (1024 * 1024);
+  return `${Number.isInteger(mb) ? mb : mb.toFixed(1)} MB`;
 }
 
 function errorView(kind: StreamErrorKind, requestId: string | null): ErrorView {

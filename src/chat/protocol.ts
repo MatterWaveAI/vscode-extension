@@ -77,6 +77,14 @@ export interface NotificationView {
   read: boolean;
 }
 
+/** What one answer used, from its turn's `context` frame, and what that costs at the model's list price. */
+export interface AnswerUsage {
+  promptTokens: number;
+  completionTokens: number;
+  /** Null when the model list gave no price. */
+  costUsd: number | null;
+}
+
 /** The org's allowance this period, as the usage line renders it. */
 export interface UsageView {
   used: number;
@@ -86,6 +94,8 @@ export interface UsageView {
   state: "ok" | "warn" | "overage" | "exhausted";
   resetsAt: string;
   planName: string;
+  /** The person's own spending cap this period, in US dollars at list price; null when none applies. */
+  memberCap: { spentUsd: number; capUsd: number; exhausted: boolean } | null;
 }
 
 export interface ViewState {
@@ -96,6 +106,9 @@ export interface ViewState {
   conversations: ConversationSummary[];
   /** The archive, shown folded away under its own heading. */
   archivedConversations: ConversationSummary[];
+  /** True while the list (or the archive) has rows past the ones on hand: the end of it loads more. */
+  moreConversations: boolean;
+  moreArchived: boolean;
   /** The matches for the search box's text; null when no search is active. */
   searchResults: SearchHitView[] | null;
   activeId: string | null;
@@ -129,6 +142,21 @@ export interface ViewState {
   unreadNotifications: number;
   /** The org's allowance this period, or null when the API did not say. */
   usage: UsageView | null;
+  /** Tokens and cost of the answers this session streamed, by message id; empty while the setting hides them. */
+  answerUsage: Record<string, AnswerUsage>;
+  /** The deployment's announcements the person has not dismissed, most severe first. */
+  announcements: AnnouncementView[];
+  /** The saved prompts' names, for the composer's `/` completion. */
+  promptNames: string[];
+}
+
+/** One announcement as its banner shows it. */
+export interface AnnouncementView {
+  id: string;
+  message: string;
+  severity: "info" | "warning" | "critical";
+  link: string | null;
+  dismissible: boolean;
 }
 
 export type HostMessage =
@@ -151,11 +179,16 @@ export type WebviewMessage =
   | { type: "deleteConversation"; id: string }
   | { type: "pinConversation"; id: string; pinned: boolean }
   | { type: "archiveConversation"; id: string; archived: boolean }
+  /** The next page of the list, or of the archive. */
+  | { type: "loadMoreConversations"; archived: boolean }
+  /** A new conversation from the open one's path down to this message. */
+  | { type: "forkConversation"; messageId: string }
+  /** Report this message (the editor asks what kind, and for a note). */
+  | { type: "reportMessage"; messageId: string }
+  | { type: "dismissAnnouncement"; id: string }
   /** The web app's same conversation, as a Markdown file. */
   | { type: "exportConversation" }
   | { type: "shareConversation" }
-  /** A connector's conversation, copied down to its leaf into one of the person's own, which then opens. */
-  | { type: "forkConversation" }
   /** Open the thread a connector's conversation is answered in, in the browser. */
   | { type: "openLink"; url: string }
   /** `temporary` rides only on a first send, before any conversation exists. */
@@ -179,6 +212,9 @@ export type WebviewMessage =
   | { type: "openNotification"; id: string; url: string }
   /** Review a diff of one code block and apply it to its file on accept. */
   | { type: "applyCodeBlock"; messageId: string; blockIndex: number }
+  /** Copy one code block, or insert it at the editor's cursor. */
+  | { type: "copyCodeBlock"; messageId: string; blockIndex: number }
+  | { type: "insertCodeBlock"; messageId: string; blockIndex: number }
   | { type: "switchBranch"; messageId: string; step: -1 | 1 }
   | { type: "continue" }
   | { type: "compact" }
@@ -191,8 +227,8 @@ const WEBVIEW_TYPES = new Set<WebviewMessage["type"]>([
   "deleteConversation", "pinConversation", "archiveConversation", "exportConversation", "shareConversation",
   "send", "stop", "retry", "edit", "regenerate", "rateMessage", "setInstructions", "switchBranch", "continue",
   "compact", "pickModel", "signIn", "copyRequestId", "refreshNotifications", "readNotification", "readAllNotifications",
-  "openNotification", "loadMoreNotifications", "setNotificationsUnreadOnly", "applyCodeBlock",
-  "forkConversation", "openLink",
+  "openNotification", "loadMoreNotifications", "setNotificationsUnreadOnly", "applyCodeBlock", "loadMoreConversations",
+  "forkConversation", "reportMessage", "dismissAnnouncement", "copyCodeBlock", "insertCodeBlock", "openLink",
 ]);
 
 const FEEDBACK_REASON_SET = new Set<string>(FEEDBACK_REASONS);
@@ -237,6 +273,13 @@ export function parseWebviewMessage(raw: unknown): WebviewMessage | null {
       return id() && typeof msg.pinned === "boolean" ? (msg as WebviewMessage) : null;
     case "archiveConversation":
       return id() && typeof msg.archived === "boolean" ? (msg as WebviewMessage) : null;
+    case "loadMoreConversations":
+      return typeof msg.archived === "boolean" ? { type: "loadMoreConversations", archived: msg.archived } : null;
+    case "forkConversation":
+    case "reportMessage":
+      return str("messageId") && (msg.messageId as string).length <= 64 ? { type: msg.type, messageId: msg.messageId as string } : null;
+    case "dismissAnnouncement":
+      return id() && (msg.id as string).length <= 64 ? { type: "dismissAnnouncement", id: msg.id as string } : null;
     case "send":
       return str("content") && (msg.temporary === undefined || typeof msg.temporary === "boolean")
         ? (msg as WebviewMessage)
@@ -276,6 +319,8 @@ export function parseWebviewMessage(raw: unknown): WebviewMessage | null {
         ? { type: "openLink", url: msg.url }
         : null;
     case "applyCodeBlock":
+    case "copyCodeBlock":
+    case "insertCodeBlock":
       return (
         str("messageId") &&
         typeof msg.blockIndex === "number" &&
