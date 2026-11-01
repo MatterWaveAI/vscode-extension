@@ -49,7 +49,7 @@
       "properties": {
         "matterwave.baseUrl": {
           "type": "string",
-          "default": "https://app.matterwave.dev",
+          "default": "https://app.matterwave.ai",
           "description": "%config.baseUrl.description%",
           "scope": "application"
         },

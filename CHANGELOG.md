@@ -41,6 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Cmd+I` for inline edit on macOS; `Ctrl/Cmd+I` yields to the editor's own inline chat when one is installed, and `Ctrl+Alt+M I` always works.
 - The Marketplace icon, gallery banner, keywords and links; the `.vsix` ships the licence and this changelog.
 
+### Changed
+
+- The default server (`matterwave.baseUrl`) is `https://app.matterwave.ai`, the public deployment's address.
+
 [Unreleased]: https://github.com/MatterWaveAI/vscode-extension/compare/v0.3.0...HEAD
 
 ## [0.3.0] - 2026-10-31

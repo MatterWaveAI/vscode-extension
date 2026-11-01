@@ -106,7 +106,7 @@ changes no file and runs no git until you trust it.
 
 | Setting | Default | |
 |---|---|---|
-| `matterwave.baseUrl` | `https://app.matterwave.dev` | The MatterWave deployment to use. |
+| `matterwave.baseUrl` | `https://app.matterwave.ai` | The MatterWave deployment to use. |
 | `matterwave.caFile` | empty | Path to a PEM file with the certificate authority that signed the deployment's TLS certificate, trusted on top of the system's. For a deployment behind a private CA; `~/` is expanded. |
 | `matterwave.commitMessageStyle` | empty | How commit messages are written; a workspace can set its own. |
 | `matterwave.showAnswerUsage` | on | Tokens and cost under each answer. |

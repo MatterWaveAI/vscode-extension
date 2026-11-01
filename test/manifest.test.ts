@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { DEFAULT_BASE_URL } from "../src/settings";
 
 /**
  * The manifest as the Marketplace and Open VSX read it, and the package
@@ -32,6 +33,12 @@ describe("the extension manifest", () => {
     expect(manifest.bugs.url).toMatch(/^https:\/\/.*\/issues$/);
     expect(manifest.repository.url).toMatch(/^https:\/\//);
     expect(manifest.license).toBe("MIT");
+  });
+
+  it("defaults the server setting to the public deployment the code assumes", () => {
+    const setting = manifest.contributes.configuration.properties["matterwave.baseUrl"];
+    expect(setting.default).toBe(DEFAULT_BASE_URL);
+    expect(DEFAULT_BASE_URL).toBe("https://app.matterwave.ai");
   });
 
   it("declares limited support for untrusted workspaces", () => {
