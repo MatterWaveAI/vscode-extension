@@ -12,6 +12,7 @@ import { ChatViewProvider } from "./chat/viewProvider";
 import { fitsContentCap, MAX_CONTENT_CHARS, imageAttachment, imageContentType, selectionContent } from "./context";
 import { applyToFile, registerApplyContentProvider } from "./apply";
 import { CheckpointStore, type Checkpoint } from "./checkpoints";
+import { snapshotFolder } from "./snapshotFiles";
 import type { CodeBlock } from "./chat/codeBlocks";
 import { fitReplacement, inlineEditPrompt, replacementFromAnswer, selectedLines } from "./inlineEdit";
 import {
@@ -102,7 +103,8 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
   const view = new ChatViewProvider(context.extensionUri);
   // A window with no folder open has no workspace of its own to keep prompts for.
   const prompts = new PromptLibrary(context.globalState, vscode.workspace.workspaceFolders?.length ? context.workspaceState : null);
-  const checkpoints = new CheckpointStore(context.globalState);
+  // Snapshots are files in the extension's own storage, under one cap for every chat and workspace.
+  const checkpoints = new CheckpointStore(context.globalState, snapshotFolder(vscode.Uri.joinPath(context.globalStorageUri, "checkpoints")));
   // Listening from the start, so @terminal has the commands that ran since.
   const terminals = new TerminalHistory();
   context.subscriptions.push(terminals);
@@ -704,17 +706,16 @@ async function restoreCheckpoint(chat: ChatController, store: CheckpointStore): 
       row,
       label: row.path,
       description: row.label,
-      detail:
-        row.content === null
-          ? `${new Date(row.createdAt).toLocaleString()} · the file was new`
-          : `${new Date(row.createdAt).toLocaleString()} · ${row.content.length.toLocaleString()} characters`,
+      detail: row.isNew
+        ? `${new Date(row.createdAt).toLocaleString()} · the file was new`
+        : `${new Date(row.createdAt).toLocaleString()} · ${row.size.toLocaleString()} characters`,
     })),
     { title: "MatterWave checkpoints", placeHolder: "Pick a checkpoint to restore" },
   );
   if (!picked) return;
   const uri = await checkpointTarget(picked.row);
   if (!uri) return;
-  if (picked.row.content === null) {
+  if (picked.row.isNew) {
     const answer = await vscode.window.showInformationMessage(
       `Remove ${picked.row.path}? It did not exist when this checkpoint was taken.`,
       { modal: true },
@@ -737,7 +738,13 @@ async function restoreCheckpoint(chat: ChatController, store: CheckpointStore): 
     "Restore",
   );
   if (answer !== "Restore") return;
-  await applyToFile(uri, picked.row.content, {
+  const content = await store.content(picked.row.id);
+  if (content === null) {
+    void vscode.window.showWarningMessage(`The snapshot of ${picked.row.path} is gone from the extension's storage; nothing was restored.`);
+    await store.remove(picked.row.id);
+    return;
+  }
+  await applyToFile(uri, content, {
     title: `${picked.row.path} — restored checkpoint`,
     detail: "The file becomes exactly what the checkpoint kept.",
   });

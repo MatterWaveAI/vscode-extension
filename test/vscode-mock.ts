@@ -64,6 +64,12 @@ export enum ExtensionMode {
   Test = 3,
 }
 
+export enum FileType {
+  Unknown = 0,
+  File = 1,
+  Directory = 2,
+}
+
 export enum ConfigurationTarget {
   Global = 1,
   Workspace = 2,
@@ -305,8 +311,8 @@ export const workspace = {
         if (!path.startsWith(`${base}/`)) continue;
         const rest = path.slice(base.length + 1);
         const slash = rest.indexOf("/");
-        if (slash < 0) found.set(rest, 0);
-        else found.set(rest.slice(0, slash), 2);
+        if (slash < 0) found.set(rest, FileType.File);
+        else found.set(rest.slice(0, slash), FileType.Directory);
       }
       return Array.from(found, ([name, type]) => [name, type] as [string, number]);
     },

@@ -2,7 +2,9 @@
 import * as assert from "node:assert/strict";
 import * as vscode from "vscode";
 import { applyToFile } from "../../src/apply";
+import { CheckpointStore } from "../../src/checkpoints";
 import { searchWorkspaceFiles } from "../../src/fileSearch";
+import { snapshotFolder } from "../../src/snapshotFiles";
 import { editorFolders, resolveNamedFile } from "../../src/targets";
 import { copyTerminalText, TerminalHistory, terminalText } from "../../src/terminalOutput";
 
@@ -121,6 +123,25 @@ describe("reading a terminal in a real editor", function () {
       terminal.dispose();
       write.dispose();
     }
+  });
+});
+
+describe("checkpoints in a real editor", function () {
+  it("keeps snapshots as files in a storage folder, not in the editor's state", async function () {
+    const storage = vscode.Uri.joinPath(folder("alpha").uri, ".storage", "checkpoints");
+    const values = new Map<string, unknown>();
+    const state = {
+      get: <T>(key: string) => values.get(key) as T | undefined,
+      update: async (key: string, value: unknown) => void values.set(key, value),
+    };
+    const store = new CheckpointStore(state, snapshotFolder(storage));
+    const row = await store.record("c_e2e", { uri: "file:///x.ts", path: "x.ts" }, "the text before\n", "Apply");
+    assert.ok(row);
+    assert.equal(await disk(vscode.Uri.joinPath(storage, `${row.id}.txt`)), "the text before\n");
+    assert.equal(await store.content(row.id), "the text before\n");
+    assert.ok(!JSON.stringify([...values.values()]).includes("the text before"), "the index holds no snapshot text");
+    await store.remove(row.id);
+    assert.deepEqual(await vscode.workspace.fs.readDirectory(storage), []);
   });
 });
 

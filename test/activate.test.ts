@@ -21,6 +21,7 @@ function contextIn(mode: ExtensionMode): vscode.ExtensionContext {
   return {
     extensionMode: mode,
     extensionUri: Uri.file("/ext"),
+    globalStorageUri: Uri.file("/storage"),
     secrets: new MemorySecrets(),
     globalState: fakeMemento(),
     workspaceState: fakeMemento(),
