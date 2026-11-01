@@ -1,6 +1,7 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import * as nodePath from "node:path";
+import { readConfined, readHead } from "./readConfined";
 
 /**
  * Markdown definition files: custom commands (`.matterwave/commands/*.md`)
@@ -8,7 +9,8 @@ import * as nodePath from "node:path";
  * the workspace. Each is a Markdown body under an optional front matter
  * block of `key: value` lines (a value may be a `[a, b]` list or `- item`
  * lines). A workspace's files load only when the folder is trusted: they
- * are prompts a cloned repository could have written.
+ * are prompts a cloned repository could have written. They are read through
+ * the tools' confinement, so a link out of the workspace is skipped.
  */
 
 export interface FrontMatter {
@@ -70,12 +72,14 @@ export interface DefinitionDir {
   path: string;
   /** Where the files came from, as the view names it: "user" or "workspace". */
   scope: "user" | "workspace";
+  /** For a workspace folder: the root its files are confined to. */
+  root?: string;
 }
 
 /** The definition folders for `kind` ("commands" or "agents"): the person's, then the workspace's when it is trusted. */
 export function definitionDirs(kind: "commands" | "agents", root: string | null, trusted: boolean, home = homedir()): DefinitionDir[] {
   const dirs: DefinitionDir[] = [{ path: nodePath.join(home, ".matterwave", kind), scope: "user" }];
-  if (root && trusted) dirs.push({ path: nodePath.join(root, ".matterwave", kind), scope: "workspace" });
+  if (root && trusted) dirs.push({ path: nodePath.join(root, ".matterwave", kind), scope: "workspace", root });
   return dirs;
 }
 
@@ -93,11 +97,10 @@ export async function readDefinitions(dirs: DefinitionDir[]): Promise<{ name: st
       const name = fileName.slice(0, -3).toLowerCase();
       if (!/^[a-z0-9][a-z0-9_-]{0,39}$/.test(name)) continue;
       const file = nodePath.join(dir.path, fileName);
-      try {
-        byName.set(name, { name, scope: dir.scope, file, parsed: parseFrontMatter(await readFile(file, "utf8")) });
-      } catch {
-        // An unreadable file is skipped, not fatal.
-      }
+      // A workspace's file is confined to its root; an unreadable or refused one is skipped, not fatal.
+      const read = dir.root ? await readConfined(dir.root, nodePath.relative(dir.root, file)) : await readHead(file);
+      if (!read || "refused" in read) continue;
+      byName.set(name, { name, scope: dir.scope, file, parsed: parseFrontMatter(read.text) });
     }
   }
   return [...byName.values()];

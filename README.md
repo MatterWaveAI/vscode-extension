@@ -74,20 +74,33 @@ click it or press **Shift+Tab** in the composer to cycle, or use `/approval-mode
 | `yolo` | yes | applied | run |
 
 `yolo` is never a default and never saved: it asks for a confirm once per session.
-`matterwave.agent.defaultMode` sets the mode for a new workspace.
+`matterwave.agent.defaultMode` sets the mode for a new workspace; a workspace's own settings can
+make it stricter, never looser. Picking a stricter mode during a run applies from the next tool
+call, including the rest of the calls the model made in that step.
+
+Even in `auto-edit`, a change to what steers the agent or the editor asks first: `.vscode/`, a
+`*.code-workspace` file, `.matterwave/`, `MATTERWAVE.md`, `MATTERWAVE.local.md` and `AGENTS.md`.
+Otherwise a file the agent read could turn itself into standing instructions, or into an MCP
+server the editor starts.
 
 **Reviewing a change.** In `ask` every `edit` and `write_file` opens VS Code's diff editor: the
 file on the left, the proposal on the right. The proposal is editable: change it, then **Accept**
 (the ✓ in the editor's title bar, or the card in the chat view) and what the right side holds is
 written; **Reject** (✗) leaves the file byte-for-byte as it was, and the model is told. An applied
 change goes through a `WorkspaceEdit` and is saved, so **Ctrl+Z** in that editor undoes it, and
-each one is also a checkpoint for `/restore`.
+each one is also a checkpoint for `/restore`. If the file changed while the diff was open (you
+typed in it, a formatter ran), or a folder on its path became a link, nothing is written and the
+model is told to read it again.
 
 **Commands.** `run_shell` runs in the root (PowerShell on Windows, `sh` elsewhere) as a child
 process with a time limit (120 s by default, 600 s at most) and a 64 KB output cap; the card shows
 the whole command before it runs, and its output streams into the view and the "MatterWave Agent"
 output channel. **Stop** ends the model's stream, an approval that is waiting, and the command's
-whole process tree.
+whole process tree. A process that detaches itself from that tree (`cmd /c start /b ...` on
+Windows, `setsid` or a daemon elsewhere) can outlive Stop, as can one a finished command left
+running in the background. The command's environment is VS Code's minus its own plumbing
+(`ELECTRON_*`, `VSCODE_*`, as in the integrated terminal) and any `MATTERWAVE_*` or `MW_*` key or
+token.
 
 **Limits.** A run stops at `matterwave.agent.maxSteps` model calls (40) or
 `matterwave.agent.maxTokens` tokens (500,000), and says which. A spent budget (402, or the API's
@@ -98,9 +111,12 @@ model's window, old tool output is folded to a stub first, and then older steps 
 followed: `..`, an absolute path elsewhere and a link out of the root are refused before anything
 happens. A deny list applies to reads too, so secrets are not sent: `.env*`, `*.pem`, `id_*`,
 `.git/`, plus anything in a `.matterwaveignore` at the root (gitignore syntax). Searches also skip
-what `.gitignore` ignores. This is confinement, not a sandbox: an approved command runs as you and
-can reach anything you can. Everything the agent reads goes to MatterWave and to the model; the
-deny list is a floor, not a guarantee.
+what `.gitignore` ignores. The project's notes, commands and subagents and `@path` mentions are
+read through the same rules, so a `MATTERWAVE.md` that links to a key outside the root is refused,
+not sent. `grep` runs the model's pattern off the editor's thread and gives up on one that takes
+more than 5 s. This is confinement, not a sandbox: an approved command runs as you and can reach
+anything you can. Everything the agent reads goes to MatterWave and to the model; the deny list is
+a floor, not a guarantee.
 
 **Off when it cannot run.** The toggle is greyed out, with the reason beside it, in an untrusted
 workspace (the agent, `MATTERWAVE.md`, project commands, subagents and workspace MCP servers all
@@ -127,7 +143,9 @@ project's own git is not touched. `/resume` picks up an earlier agent run in thi
 tool rounds in context.
 
 **More tools.** `todo_write` keeps the run's plan as a checklist in the view. `web_fetch` reads a
-page, asking first except in yolo (`matterwave.agent.webFetch` turns it off). Subagents are Markdown
+page, asking first except in yolo (`matterwave.agent.webFetch` turns it off); it follows a redirect
+only on the approved site, hands any other back to the model as a URL to fetch (which asks again),
+and reads at most 4 MB. Subagents are Markdown
 files in `~/.matterwave/agents/` or `.matterwave/agents/`, with a `description` and a `tools`
 allow-list in front matter and their instructions as the body; the agent hands them jobs with
 `task`, and their steps count against the run's limits.
@@ -141,11 +159,18 @@ allow-list in front matter and their instructions as the body; the agent hands t
 }
 ```
 
-Only the tools a server's `tools` allow-list names reach the model. A tool the server marks
-read-only runs like `read_file`; any other asks in `ask` and `auto-edit`, is not offered in
-`plan`, and runs unasked only in `yolo` or for a server with `"trust": true`. MatterWave's own
-`/mcp` (your conversations and models) is there by default, signed in as the editor
-(`matterwave.agent.matterwaveMcp`).
+Only the tools a server's `tools` allow-list names reach the model. A tool marked read-only runs
+like `read_file`; any other asks in `ask` and `auto-edit`, is not offered in `plan`, and runs
+unasked only in `yolo` or for a server with `"trust": true`. A read-only mark is the server's own
+claim, so it counts only for a server you trust and for MatterWave's own `/mcp` (your conversations
+and models), which is there by default (`matterwave.agent.matterwaveMcp`). Your MatterWave
+credential is sent only to a server at exactly `<matterwave.baseUrl>/mcp`.
+
+A server a workspace's settings add (`.vscode/settings.json`, a `.code-workspace` file) starts only
+after you approve it, in a dialog that shows its command or URL; the answer is kept for that
+workspace until the definition changes, and `trust` counts only in your user settings. What a
+server sends is capped (8 MB a message, 100 tools, a 16,000-character schema each, 100,000
+characters a result), and two tools whose names would collide get distinct ones.
 
 **Usage.** **Usage** in the view (or **MatterWave: Show Usage**) lists this session's agent runs
 with their steps, tool calls and tokens, the period's allowance, and your spend from the budget.
@@ -157,13 +182,13 @@ Each run's totals also show when it ends.
 |---|---|---|
 | `matterwave.baseUrl` | `https://app.matterwave.dev` | The MatterWave deployment to use. |
 | `matterwave.caFile` | empty | Path to a PEM file with the certificate authority that signed the deployment's TLS certificate, trusted beside the system's. For a deployment behind a private CA; `~/` is expanded. |
-| `matterwave.agent.defaultMode` | `ask` | The agent's approval mode in a new workspace: `plan`, `ask` or `auto-edit`. |
-| `matterwave.agent.maxSteps` | `40` | Model calls per agent run. |
-| `matterwave.agent.maxTokens` | `500000` | Tokens per agent run, every step counted. |
+| `matterwave.agent.defaultMode` | `ask` | The agent's approval mode in a new workspace: `plan`, `ask` or `auto-edit`. A workspace's settings can only make it stricter. |
+| `matterwave.agent.maxSteps` | `40` | Model calls per agent run. A workspace's settings can only lower it. |
+| `matterwave.agent.maxTokens` | `500000` | Tokens per agent run, every step counted. A workspace's settings can only lower it. |
 | `matterwave.agent.editorContext` | `true` | Send the active file, the selection and recent files with agent prompts. |
 | `matterwave.agent.webFetch` | `true` | Offer `web_fetch` (always behind approval outside yolo). |
 | `matterwave.agent.matterwaveMcp` | `true` | Offer MatterWave's own `/mcp` tools. |
-| `matterwave.agent.mcpServers` | `{}` | MCP servers by name (see above); workspace values need a trusted folder. |
+| `matterwave.agent.mcpServers` | `{}` | MCP servers by name (see above); workspace values need a trusted folder and your approval per server. |
 
 Models, limits and policy come from the server.
 

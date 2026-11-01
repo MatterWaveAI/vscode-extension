@@ -69,7 +69,8 @@ export interface AgentSessionDeps {
   /** Workspace state: the mode (never yolo), the root, each conversation's agent history. */
   state?: Memento;
   mcp?: McpManager;
-  mcpConfigs?(): Record<string, McpServerConfig>;
+  /** The servers to sync before a run; may ask the person about a workspace's servers first. */
+  mcpConfigs?(): Record<string, McpServerConfig> | Promise<Record<string, McpServerConfig>>;
   fetch?: (input: string, init?: RequestInit) => Promise<Response>;
   /** The home folder for `~/.matterwave`; tests point it elsewhere. */
   home?: string;
@@ -187,7 +188,7 @@ export class AgentSession {
    * False when the person declined.
    */
   async setMode(name: ModeName): Promise<boolean> {
-    if (!MODES_BY_NAME[name]) return false;
+    if (!MODE_NAMES.includes(name)) return false;
     if (name === "yolo" && !this.yoloAllowed) {
       if (!(await this.deps.confirmYolo())) return false;
       this.yoloAllowed = true;
@@ -245,9 +246,10 @@ export class AgentSession {
     return true;
   }
 
-  /** The approval waited on, for the editor's Accept and Reject commands. */
-  pendingId(): string | null {
-    return this.pending?.id ?? null;
+  /** The approval waited on (of `kind`, when given), for the editor's Accept and Reject commands. */
+  pendingId(kind?: AgentPendingView["kind"]): string | null {
+    if (!this.pending || (kind && this.pending.kind !== kind)) return null;
+    return this.pending.id;
   }
 
   async showDiff(id: string): Promise<void> {
@@ -273,15 +275,18 @@ export class AgentSession {
   }
 
   private approvals(conversationId: string | null): Approvals {
-    const apply = async (change: ChangeRequest, content: string): Promise<string> => {
+    const apply = async (change: ChangeRequest, content: string): Promise<ChangeOutcome> => {
+      // The file may have changed, or its path been relinked, while the change waited for the person.
+      const stale = await change.stale?.();
+      if (stale) return { status: "failed", reason: stale };
       await this.deps.checkpoint?.(conversationId, change.relative, change.before);
       this.status = `Writing ${change.relative}`;
       this.changed();
-      return this.deps.review.apply(change, content);
+      return { status: "applied", content: await this.deps.review.apply(change, content), edited: content !== change.after };
     };
     return {
       change: async (change, ask, signal): Promise<ChangeOutcome> => {
-        if (!ask) return { status: "applied", content: await apply(change, change.after), edited: false };
+        if (!ask) return apply(change, change.after);
         const id = `a${this.nextId++}`;
         const handle = await this.deps.review.open(change, id);
         const decision = await this.wait(
@@ -289,10 +294,10 @@ export class AgentSession {
             id,
             kind: "edit",
             tool: change.tool,
-            title: change.before === null ? `Create ${change.relative}` : `Change ${change.relative}`,
-            detail: change.relative,
-            path: change.relative,
-            diff: change.diff,
+            title: revealInvisible(change.before === null ? `Create ${change.relative}` : `Change ${change.relative}`),
+            detail: revealInvisible(change.relative),
+            path: revealInvisible(change.relative),
+            diff: revealInvisible(change.diff),
           },
           signal,
           handle,
@@ -304,12 +309,19 @@ export class AgentSession {
         // What the diff's right side holds now: the proposal, or the person's edit of it.
         const proposal = await handle.proposal();
         await handle.close();
-        const content = await apply(change, proposal);
-        return { status: "applied", content, edited: proposal !== change.after };
+        return apply(change, proposal);
       },
       confirm: async (request: ConfirmRequest, signal) => {
         const decision = await this.wait(
-          { id: `a${this.nextId++}`, kind: request.kind, tool: request.tool, title: request.title, detail: request.detail, path: null, diff: null },
+          {
+            id: `a${this.nextId++}`,
+            kind: request.kind,
+            tool: request.tool,
+            title: revealInvisible(request.title),
+            detail: revealInvisible(request.detail),
+            path: null,
+            diff: null,
+          },
           signal,
         );
         return decision.reason ? { approved: decision.accept, reason: decision.reason } : { approved: decision.accept };
@@ -367,7 +379,7 @@ export class AgentSession {
     if (this.deps.mcp && this.deps.mcpConfigs) {
       this.status = "Connecting to MCP servers…";
       this.changed();
-      await this.deps.mcp.sync(this.deps.mcpConfigs());
+      await this.deps.mcp.sync(await this.deps.mcpConfigs());
       specs.push(...this.deps.mcp.specs());
     }
     const subagents = await loadSubagents(definitionDirs("agents", root, trusted, this.home()));
@@ -740,6 +752,45 @@ export class AgentSession {
       runs: this.runs.map((r) => ({ ...r })),
     };
   }
+}
+
+/** Code points that change how a command reads without being seen: controls, bidi overrides and isolates, zero-width and tag characters. */
+const INVISIBLE: readonly (readonly [number, number])[] = [
+  [0x00, 0x08],
+  [0x0b, 0x0c],
+  [0x0e, 0x1f],
+  [0x7f, 0x9f],
+  [0xad, 0xad],
+  [0x61c, 0x61c],
+  [0x115f, 0x1160],
+  [0x180e, 0x180e],
+  [0x200b, 0x200f],
+  [0x2028, 0x202e],
+  [0x2060, 0x206f],
+  [0x3164, 0x3164],
+  [0xfe00, 0xfe0f],
+  [0xfeff, 0xfeff],
+  [0xffa0, 0xffa0],
+  [0xfff9, 0xfffb],
+  [0xe0000, 0xe007f],
+  [0xe0100, 0xe01ef],
+];
+
+/**
+ * `text` with every invisible code point written out as `<U+202E>`, so what
+ * the approval card shows is what runs. Tabs and line breaks stay as they
+ * are; a carriage return not followed by a line feed is shown.
+ */
+export function revealInvisible(text: string): string {
+  let out = "";
+  const chars = Array.from(text);
+  for (let i = 0; i < chars.length; i++) {
+    const c = chars[i]!;
+    const code = c.codePointAt(0)!;
+    const hidden = INVISIBLE.some(([lo, hi]) => code >= lo && code <= hi) || (code === 0x0d && chars[i + 1] !== "\n");
+    out += hidden ? `<U+${code.toString(16).toUpperCase().padStart(4, "0")}>` : c;
+  }
+  return out;
 }
 
 function compactionNote(result: CompactionResult): string | null {

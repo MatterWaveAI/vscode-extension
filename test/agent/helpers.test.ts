@@ -207,9 +207,19 @@ describe("decisions outside the contract", () => {
     expect(mcpDecision(write, {}, "auto-edit")).toBe("ask");
     expect(mcpDecision(write, { trust: true }, "ask")).toBe("allow");
     expect(mcpDecision(write, { trust: true }, "plan")).toBe("deny");
-    expect(mcpDecision(read, {}, "plan")).toBe("allow");
+    expect(mcpDecision(read, { trust: true }, "plan")).toBe("allow");
+    expect(mcpDecision(read, {}, "plan", true)).toBe("allow");
+    expect(mcpDecision(read, {}, "ask", true)).toBe("allow");
     expect(mcpDecision(write, {}, "yolo")).toBe("allow");
     expect(mcpToolName("my server", "do.thing")).toBe("mcp__my_server__do_thing");
+  });
+
+  it("a read-only mark from a server whose hints are not trusted is not believed: it asks, and plan leaves it out", () => {
+    const read = { name: "r", description: "", inputSchema: {}, readOnly: true };
+    expect(mcpDecision(read, {}, "plan")).toBe("deny");
+    expect(mcpDecision(read, {}, "ask")).toBe("ask");
+    expect(mcpDecision(read, {}, "auto-edit")).toBe("ask");
+    expect(mcpDecision(read, {}, "plan", false)).toBe("deny");
   });
 });
 

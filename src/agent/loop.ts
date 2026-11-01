@@ -46,7 +46,11 @@ export interface LoopEvents {
 export interface LoopOptions {
   client: ModelClient;
   model?: string;
-  /** Read before every step: Shift+Tab during a run changes the next step's tools and prompt. */
+  /**
+   * Read before every step (Shift+Tab during a run changes the next step's
+   * tools and prompt) and again before every call: a stricter mode picked
+   * while a step's calls run applies to the calls not yet run.
+   */
   mode: () => ModeName;
   system: (mode: ModeName) => string;
   /** Appended to as the run goes: assistant steps and tool results. */
@@ -79,6 +83,14 @@ export function offeredTools(specs: readonly ToolSpec[], mode: ModeName): Tool[]
   const contract = toolsForMode(mode).filter((tool) => local.has(tool.function.name));
   const extra = specs.filter((s) => !CONTRACT_TOOL_NAMES.has(s.name) && s.decide(mode) !== "deny").map((s) => s.definition);
   return [...contract, ...extra];
+}
+
+/** The modes from the strictest to the loosest: each allows everything the one before it does. */
+const BY_STRICTNESS: readonly ModeName[] = ["plan", "ask", "auto-edit", "yolo"];
+
+/** The stricter of two modes. */
+export function stricterMode(a: ModeName, b: ModeName): ModeName {
+  return BY_STRICTNESS.indexOf(a) <= BY_STRICTNESS.indexOf(b) ? a : b;
 }
 
 /** A rough count for a message list when the server reports none: four characters a token. */
@@ -166,7 +178,12 @@ export async function runLoop(options: LoopOptions): Promise<LoopResult> {
   }
 }
 
-async function runTool(options: LoopOptions, byName: Map<string, ToolSpec>, call: ToolCall, mode: ModeName): Promise<ToolOutcome> {
+async function runTool(options: LoopOptions, byName: Map<string, ToolSpec>, call: ToolCall, stepMode: ModeName): Promise<ToolOutcome> {
+  // The step's tools were offered in its mode; the person may since have
+  // tightened it (yolo to ask, say, on seeing the first call). The stricter
+  // of the two decides, so a loosened mode never runs a tool the step was
+  // not offered and a tightened one takes hold at the next call.
+  const mode = stricterMode(stepMode, options.mode());
   const spec = byName.get(call.function.name);
   const args = parseArguments(call.function.arguments);
   const label = spec?.label && typeof args !== "string" ? spec.label(args) : "";

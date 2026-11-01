@@ -1,6 +1,7 @@
-import { readFile, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { PathRefusedError } from "../lib/sdk/agent/deny";
 import { confine } from "../lib/sdk/agent/confine";
+import { readHead } from "./readConfined";
 
 /**
  * What an agent prompt carries besides the person's words: the files it
@@ -84,7 +85,10 @@ export async function buildPromptContext(
         notes.push(`@${mention} is a folder; the agent can list it with list_dir.`);
         continue;
       }
-      text = await readFile(target.absolute, "utf8");
+      // Only the head is read: the message carries at most MAX_MENTION_FILE_CHARS of it.
+      const read = await readHead(target.absolute, MAX_MENTION_FILE_CHARS * 4);
+      if (!read) throw new Error("not a file");
+      text = read.text;
     } catch {
       notes.push(`@${mention} was not attached: there is no such file in the workspace.`);
       continue;

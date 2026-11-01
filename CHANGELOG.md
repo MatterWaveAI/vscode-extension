@@ -23,6 +23,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Usage view**: this session's agent runs (steps, tool calls, tokens), the period's allowance and your spend from `/api/budget`.
 - The chat stream's `compacting` frame: the view says the server is summarising earlier turns while the first token waits.
 
+### Security
+
+- MatterWave's credential goes to an MCP server only at exactly `<matterwave.baseUrl>/mcp`; a prefix match had let a look-alike host (`https://app.example.dev.evil.test/mcp`, `https://app.example.dev@evil.test/mcp`) named `matterwave` in a workspace's settings receive it.
+- MCP servers a workspace's settings add start only after the person approves that exact definition (kept per workspace until it changes), and a workspace cannot mark its own servers `trust`. A server's read-only marks count only for a trusted server and MatterWave's own; any other server's tools ask, and plan mode leaves them out.
+- `auto-edit` still asks before changing `.vscode/`, `*.code-workspace`, `.matterwave/`, `MATTERWAVE.md`, `MATTERWAVE.local.md` and `AGENTS.md`, so text the agent read cannot write itself into standing instructions or a server the editor starts. A workspace's settings can make the default mode stricter and the step and token caps lower, never the reverse.
+- A change is written only if the file still holds what its diff was made from and its path still leads where it did; a file changed while the diff was open, or a folder swapped for a link, is left alone and the model told.
+- A stricter mode picked during a run applies from the next tool call, including the rest of the step's calls; a looser one never runs a tool the step was not offered.
+- `MATTERWAVE.md`, `AGENTS.md`, the workspace's commands and subagents and `@path` mentions are read through the tools' confinement and size cap, so a link to a file outside the root is refused, not put in the prompt.
+- `run_shell` and MCP stdio servers start without VS Code's `ELECTRON_*` and `VSCODE_*` variables (`ELECTRON_RUN_AS_NODE`, the IPC handles) and without any `MATTERWAVE_*`/`MW_*` key or token.
+- `grep` runs the model's pattern in a worker and gives up after 5 s, so a catastrophically backtracking pattern cannot freeze the extension host.
+- What an MCP server sends is capped (8 MB a message, 100 tools, 16,000-character schemas), and colliding tool names are made unique. `web_fetch` follows redirects only on the approved origin and reads at most 4 MB.
+- The approval card writes out invisible characters (bidi overrides, zero-width and tag characters) in a command, URL or arguments, and the diff editor's Accept and Reject answer only a change under review.
+- A file's byte-order mark is no longer read as text, so an edit no longer writes a second one.
+
 ### Changed
 
 - The SDK's agent module (`@matterwave/sdk` `src/agent`, contract v1.0.0) is vendored byte for byte into `src/lib/sdk/agent` with a drift check (`pnpm sdk:check`, `test/sdkVendor.test.ts`).

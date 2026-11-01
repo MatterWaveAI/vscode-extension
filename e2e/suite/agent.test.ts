@@ -1,6 +1,6 @@
 /// <reference types="mocha" />
 import * as assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import * as path from "node:path";
@@ -144,7 +144,25 @@ describe("agent mode in a real editor, against a scripted /v1", function () {
 
   beforeEach(async function () {
     await vscode.commands.executeCommand("workbench.action.closeAllEditors");
-    writeFileSync(target, ORIGINAL);
+    // A document an earlier test left loaded is reset through the editor: the
+    // agent reads an open document, and a write to the disk alone reaches it
+    // only when the file watcher gets round to it.
+    const open = vscode.workspace.textDocuments.find((d) => d.uri.scheme === "file" && d.uri.fsPath.toLowerCase() === target.toLowerCase());
+    if (open && open.getText() !== ORIGINAL) {
+      const reset = new vscode.WorkspaceEdit();
+      reset.replace(open.uri, new vscode.Range(open.positionAt(0), open.positionAt(open.getText().length)), ORIGINAL);
+      assert.ok(await vscode.workspace.applyEdit(reset));
+      await open.save();
+    }
+    // Windows may hold the file for a moment after the editor's save.
+    for (let attempt = 0; readFileSync(target, "utf8") !== ORIGINAL; attempt++) {
+      try {
+        writeFileSync(target, ORIGINAL);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EBUSY" || attempt > 50) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
     // Each test is its own conversation.
     api.chat.newChat();
   });
@@ -226,5 +244,86 @@ describe("agent mode in a real editor, against a scripted /v1", function () {
     const told = (fake.v1Bodies.at(-1)!.messages as { role: string; content: string }[]).at(-1)!;
     assert.equal(told.role, "tool");
     assert.ok(told.content.includes("edited your proposal"));
+  });
+
+  it("writes nothing when the file changed while its diff was open, and tells the model to read it again", async function () {
+    fake.script.push(editCall('"Hello, "', '"Hi, "'));
+    const run = api.chat.send("Make the greeting shorter.");
+    await waitFor("the approval", () => api.agent.pendingId() !== null);
+    // The person changes the file itself (not the proposal) before accepting.
+    const document = await vscode.workspace.openTextDocument(target);
+    const theirs = ORIGINAL.replace("name: string", "who: string").replace("+ name", "+ who");
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(document.uri, new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length)), theirs);
+    assert.ok(await vscode.workspace.applyEdit(edit));
+    await document.save();
+    await vscode.commands.executeCommand("matterwave.agent.accept");
+    await run;
+    assert.equal(readFileSync(target, "utf8"), theirs, "the person's change survives");
+    const told = (fake.v1Bodies.at(-1)!.messages as { role: string; content: string }[]).at(-1)!;
+    assert.equal(told.role, "tool");
+    assert.ok(told.content.includes("changed while the change waited"), told.content);
+  });
+
+  it("greps the workspace from the bundled extension, the pattern matched off the editor's thread", async function () {
+    fake.script.push([
+      {
+        choices: [
+          { index: 0, delta: { tool_calls: [{ index: 0, id: "call_grep", type: "function", function: { name: "grep", arguments: JSON.stringify({ pattern: "Hel+o" }) } }] } },
+        ],
+      },
+    ]);
+    await api.chat.send("Where is the greeting?");
+    const told = (fake.v1Bodies.at(-1)!.messages as { role: string; content: string }[]).at(-1)!;
+    assert.equal(told.role, "tool");
+    assert.equal(told.content, 'src/greet.ts:2:   return "Hello, " + name;');
+  });
+
+  it("still asks in auto-edit before writing the workspace's .vscode settings", async function () {
+    const settingsFile = path.join(WORKSPACE, ".vscode", "agent-planted.json");
+    fake.script.push([
+      {
+        choices: [
+          {
+            index: 0,
+            delta: { tool_calls: [{ index: 0, id: "call_cfg", type: "function", function: { name: "write_file", arguments: JSON.stringify({ path: ".vscode/agent-planted.json", content: "{}\n" }) } }] },
+          },
+        ],
+      },
+    ]);
+    await api.agent.setMode("auto-edit");
+    try {
+      const run = api.chat.send("Configure the editor.");
+      await waitFor("the approval", () => api.agent.pendingId("edit") !== null);
+      await vscode.commands.executeCommand("matterwave.agent.reject");
+      await run;
+      assert.equal(existsSync(settingsFile), false);
+    } finally {
+      await api.agent.setMode("ask");
+    }
+  });
+
+  it("does not start an MCP server the workspace's settings add until the person approves it", async function () {
+    const config = vscode.workspace.getConfiguration("matterwave.agent");
+    await config.update("mcpServers", { planted: { command: "node", args: ["-e", "setInterval(() => {}, 1000)"] } }, vscode.ConfigurationTarget.Workspace);
+    const asked: string[] = [];
+    try {
+      await withStub(
+        "showWarningMessage",
+        async (message: string, options: { detail?: string }) => {
+          asked.push(`${message}\n${options?.detail ?? ""}`);
+          return undefined;
+        },
+        async () => {
+          await api.chat.send("Hello.");
+          await waitFor("the run's end", () => !api.chat.snapshot().agent?.running);
+        },
+      );
+      assert.equal(asked.length, 1, "asked once");
+      assert.ok(asked[0]!.includes("planted: runs node -e"), asked[0]);
+      assert.ok(!(api.chat.snapshot().agent?.mcp ?? []).some((server) => server.name === "planted"), "the declined server never started");
+    } finally {
+      await config.update("mcpServers", undefined, vscode.ConfigurationTarget.Workspace);
+    }
   });
 });

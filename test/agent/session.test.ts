@@ -294,7 +294,8 @@ describe("MCP servers", () => {
   const server = fileURLToPath(new URL("../fixtures/mcp-server.mjs", import.meta.url));
 
   it("lists a stdio server's tools, keeps the allow-list's others from the model, and asks before a tool that writes", async () => {
-    const mcp = new McpManager({ version: "test", fetch: () => Promise.reject(new Error("no http")) });
+    // Hints trusted, as for MatterWave's own server: its read-only tool runs unasked.
+    const mcp = new McpManager({ version: "test", fetch: () => Promise.reject(new Error("no http")), hintsTrusted: () => true });
     const model = new FakeModel([
       [callChunk("m1", "mcp__fx__read_thing", { id: "1" })],
       [callChunk("m2", "mcp__fx__write_thing", { id: "2" })],
@@ -324,15 +325,37 @@ describe("MCP servers", () => {
     }
   }, 30_000);
 
-  it("offers only an MCP server's read-only tools in plan mode", async () => {
+  it("offers only an MCP server's read-only tools in plan mode, and only when its hints are trusted", async () => {
+    const trusted = new McpManager({ version: "test", fetch: () => Promise.reject(new Error("no http")), hintsTrusted: () => true });
+    const untrusted = new McpManager({ version: "test", fetch: () => Promise.reject(new Error("no http")) });
+    try {
+      for (const [mcp, expected] of [
+        [trusted, ["mcp__fx__read_thing"]],
+        [untrusted, []],
+      ] as const) {
+        const model = new FakeModel([[textChunk("ok")]]);
+        const { agent } = session(model, { mcp, mcpConfigs: () => ({ fx: { command: process.execPath, args: [server] } }) });
+        await agent.setMode("plan");
+        await run(agent, "Look.");
+        expect(model.toolNames(0).filter((n) => n.startsWith("mcp__"))).toEqual(expected);
+      }
+    } finally {
+      trusted.dispose();
+      untrusted.dispose();
+    }
+  }, 30_000);
+
+  it("asks before a tool an untrusted server marks read-only: the mark is the server's own claim", async () => {
     const mcp = new McpManager({ version: "test", fetch: () => Promise.reject(new Error("no http")) });
-    const model = new FakeModel([[textChunk("ok")]]);
+    const model = new FakeModel([[callChunk("m1", "mcp__fx__read_thing", { id: "1" })], [textChunk("done")]]);
     const { agent } = session(model, { mcp, mcpConfigs: () => ({ fx: { command: process.execPath, args: [server] } }) });
     try {
-      await agent.setMode("plan");
-      await run(agent, "Look.");
-      const offered = model.toolNames(0).filter((n) => n.startsWith("mcp__"));
-      expect(offered).toEqual(["mcp__fx__read_thing"]);
+      const running = run(agent, "Use the server.");
+      await until(() => agent.pendingId() !== null, 15_000);
+      expect(agent.snapshot({ available: true, reason: null }).pending).toMatchObject({ kind: "mcp", tool: "mcp__fx__read_thing" });
+      agent.decide(agent.pendingId()!, false);
+      await running;
+      expect(model.requests[1]!.messages.at(-1)!.content).toBe("The person declined the call; it did not run.");
     } finally {
       mcp.dispose();
     }

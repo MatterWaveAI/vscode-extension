@@ -79,12 +79,18 @@ export function todoTool(onChange: (items: TodoItem[]) => void): ToolSpec {
 // --- web fetch ------------------------------------------------------------------
 
 export const WEB_FETCH_MAX_CHARS = 50_000;
+/** At most this much of a page is downloaded; its text is cut to WEB_FETCH_MAX_CHARS after. */
+export const WEB_FETCH_MAX_BYTES = 4 * 1024 * 1024;
 const WEB_FETCH_TIMEOUT_MS = 20_000;
+const MAX_REDIRECTS = 5;
 
 /**
  * Web fetch is a way out of the machine as much as a way in (a URL can
  * carry what the agent read), so it asks in `ask` and `auto-edit` alike,
- * runs unasked only in `yolo`, and is not offered in `plan`.
+ * runs unasked only in `yolo`, and is not offered in `plan`. What the person
+ * approves is the URL they saw: a redirect is followed only on the same
+ * origin, and one to anywhere else (another site, `localhost`, a metadata
+ * address) comes back to the model as a URL to fetch -- which asks again.
  */
 export function webFetchDecision(mode: ModeName): Decision {
   if (mode === "plan") return "deny";
@@ -127,7 +133,7 @@ export function webFetchTool(fetchImpl: (input: string, init?: RequestInit) => P
       const timeout = AbortSignal.timeout(WEB_FETCH_TIMEOUT_MS);
       const signal = AbortSignal.any([ctx.signal, timeout]);
       try {
-        const { title, text } = await fetchDocText(parsed.toString(), (input, init) => fetchImpl(input, { ...init, signal }));
+        const { title, text } = await fetchDocText(parsed.toString(), (input, init) => fetchApproved(fetchImpl, input, { ...init, signal }));
         const body = text.length > WEB_FETCH_MAX_CHARS ? `${text.slice(0, WEB_FETCH_MAX_CHARS)}\n[cut at ${WEB_FETCH_MAX_CHARS.toLocaleString("en-US")} characters]` : text;
         return ok(`${title ? `${title}\n` : ""}${parsed.toString()}\n\n${body || "(the page has no text)"}`);
       } catch (error) {
@@ -136,6 +142,55 @@ export function webFetchTool(fetchImpl: (input: string, init?: RequestInit) => P
       }
     },
   };
+}
+
+/** The answer leaves the origin the person approved: the model is handed the new URL, to fetch (and be asked about) on its own. */
+export class OffsiteRedirect extends Error {
+  constructor(readonly location: string) {
+    super(`The page redirects to ${location}, which is another site. Fetch that URL if you need it; the person is asked again.`);
+  }
+}
+
+/**
+ * `fetchImpl` for one approved URL: redirects followed by hand, on its
+ * origin only, and the body cut at WEB_FETCH_MAX_BYTES so a huge or endless
+ * answer cannot fill the extension host's memory.
+ */
+export async function fetchApproved(
+  fetchImpl: (input: string, init?: RequestInit) => Promise<Response>,
+  url: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const origin = new URL(url).origin;
+  let current = url;
+  for (let hop = 0; ; hop++) {
+    const response = await fetchImpl(current, { ...init, redirect: "manual" });
+    const location = response.headers.get("location");
+    if (response.status >= 300 && response.status < 400 && location) {
+      await response.body?.cancel().catch(() => undefined);
+      const next = new URL(location, current);
+      if (next.origin !== origin) throw new OffsiteRedirect(next.toString());
+      if (hop >= MAX_REDIRECTS) throw new Error(`more than ${MAX_REDIRECTS} redirects`);
+      current = next.toString();
+      continue;
+    }
+    if (!response.body) return response;
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const room = WEB_FETCH_MAX_BYTES - size;
+      chunks.push(value.byteLength > room ? value.subarray(0, room) : value);
+      size += Math.min(value.byteLength, room);
+      if (size >= WEB_FETCH_MAX_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        break;
+      }
+    }
+    return new Response(Buffer.concat(chunks), { status: response.status, statusText: response.statusText, headers: response.headers });
+  }
 }
 
 // --- subagents -------------------------------------------------------------------

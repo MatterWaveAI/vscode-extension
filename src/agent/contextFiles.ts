@@ -1,6 +1,6 @@
-import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import * as nodePath from "node:path";
+import { readConfined, readHead } from "./readConfined";
 
 /**
  * The project's own notes for the agent: `MATTERWAVE.md` at the workspace
@@ -11,7 +11,9 @@ import * as nodePath from "node:path";
  *
  * A cloned repository's notes are whatever its author wrote, so they load
  * only in a folder the person has trusted; in an untrusted one they are
- * ignored and the view says so.
+ * ignored and the view says so. Even trusted, each goes through the tools'
+ * confinement: a note that is a link out of the workspace (to a key, say) is
+ * refused, not sent.
  */
 
 export const PROJECT_CONTEXT_FILES = ["MATTERWAVE.md", "AGENTS.md"] as const;
@@ -32,15 +34,10 @@ export interface ContextFileOptions {
   trusted: boolean;
   /** The person's own notes for every project; `~/.matterwave/MATTERWAVE.md` by default. */
   userFile?: string | null;
-  read?: (path: string) => Promise<string | null>;
 }
 
 async function readOrNull(path: string): Promise<string | null> {
-  try {
-    return await readFile(path, "utf8");
-  } catch {
-    return null;
-  }
+  return (await readHead(path))?.text ?? null;
 }
 
 export function defaultUserContextFile(): string {
@@ -52,12 +49,11 @@ function clipped(text: string): string {
 }
 
 export async function loadProjectContext(root: string, options: ContextFileOptions): Promise<ProjectContext> {
-  const read = options.read ?? readOrNull;
   const sections: string[] = [];
   const files: string[] = [];
   const userFile = options.userFile === undefined ? defaultUserContextFile() : options.userFile;
   if (userFile) {
-    const text = await read(userFile);
+    const text = await readOrNull(userFile);
     if (text?.trim()) {
       sections.push(`Your notes for every project (${userFile}):\n\n${clipped(text.trim())}`);
       files.push("~/.matterwave/MATTERWAVE.md");
@@ -66,7 +62,7 @@ export async function loadProjectContext(root: string, options: ContextFileOptio
   const projectNames = [...PROJECT_CONTEXT_FILES, PERSONAL_CONTEXT_FILE];
   if (!options.trusted) {
     const present: string[] = [];
-    for (const name of projectNames) if ((await read(nodePath.join(root, name))) !== null) present.push(name);
+    for (const name of projectNames) if ((await readConfined(root, name)) !== null) present.push(name);
     return {
       text: sections.length > 0 ? sections.join("\n\n---\n\n") : null,
       files,
@@ -76,18 +72,28 @@ export async function loadProjectContext(root: string, options: ContextFileOptio
           : null,
     };
   }
+  const refused: string[] = [];
   for (const name of projectNames) {
-    const text = await read(nodePath.join(root, name));
+    const read = await readConfined(root, name);
+    if (read && "refused" in read) {
+      refused.push(name);
+      continue;
+    }
+    const text = read?.text;
     if (!text?.trim()) continue;
     const role = name === PERSONAL_CONTEXT_FILE ? "your personal notes for this project, which take precedence over the project's" : "the project's notes";
     sections.push(`${name} (${role}):\n\n${clipped(text.trim())}`);
     files.push(name);
   }
-  if (sections.length === 0) return { text: null, files, notice: null };
+  const notice =
+    refused.length > 0
+      ? `${refused.join(" and ")} ${refused.length === 1 ? "was" : "were"} not loaded: a link out of the workspace, or a path the deny list covers.`
+      : null;
+  if (sections.length === 0) return { text: null, files, notice };
   return {
     text: `Notes for this workspace follow. Follow them where they do not conflict with the rules above.\n\n${sections.join("\n\n---\n\n")}`,
     files,
-    notice: null,
+    notice,
   };
 }
 

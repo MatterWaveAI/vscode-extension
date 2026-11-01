@@ -1,14 +1,14 @@
 import type { Dirent } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import * as nodePath from "node:path";
-import { PROTECTED_LIST, PathRefusedError } from "../lib/sdk/agent/deny";
+import { DenyList, PROTECTED_LIST, PathRefusedError } from "../lib/sdk/agent/deny";
 import { EditError, applyEdit } from "../lib/sdk/agent/edit";
 import { unifiedDiff } from "../lib/sdk/agent/diff";
 import { allowed } from "../lib/sdk/agent/modes";
 import { confine, loadDenyList } from "../lib/sdk/agent/confine";
 import { LIMITS, TOOL_NAMES, type ModeName } from "../lib/sdk/agent/types";
-import type { DenyList } from "../lib/sdk/agent/deny";
 import { IgnoreRules, globMatcher } from "./ignore";
+import { PatternTooSlow, RegexWorker, type FileText } from "./regexWorker";
 import { runShell as spawnShell, type ShellOptions, type ShellResult } from "./shell";
 import {
   failure,
@@ -31,8 +31,10 @@ import {
  * deny list, protected paths for a write). Searches also skip what
  * `.gitignore` ignores. A write never touches the disk here: the change goes
  * to `approvals.change`, which shows the diff, waits for the person in `ask`
- * mode, and applies it through the editor. A command runs as a child process
- * in the root, with the contract's timeout and output cap.
+ * mode, and applies it through the editor -- after `stale()` confirms that
+ * the path still leads where it did and the file still holds what the diff
+ * was made from. A command runs as a child process in the root, with the
+ * contract's timeout and output cap.
  */
 
 export interface HostOptions {
@@ -52,8 +54,69 @@ const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_GREP_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_WALKED = 100_000;
 const MAX_MATCH_LINE_CHARS = 400;
+/** grep hands files to its matcher in batches of about this much text, or this many files. */
+const GREP_BATCH_BYTES = 1024 * 1024;
+const GREP_BATCH_FILES = 200;
 
-const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
+/** A leading byte-order mark is dropped, as the editor drops it: an edit must not write it back as text. */
+const decoder = new TextDecoder("utf-8");
+
+/**
+ * Paths that steer the agent or the editor rather than hold the project's
+ * code: VS Code's workspace settings (MCP servers, tasks, the executables
+ * other extensions run), the agent's own notes, commands and subagents. A
+ * change to one asks in every mode but yolo, auto-edit included, so text the
+ * agent read cannot quietly turn itself into standing instructions or a
+ * process the editor starts.
+ */
+export const AGENT_CONFIG = new DenyList([
+  ".vscode/",
+  "*.code-workspace",
+  ".matterwave/",
+  "MATTERWAVE.md",
+  "MATTERWAVE.local.md",
+  "AGENTS.md",
+]);
+
+/** Whether a change to `relative` asks in this mode whatever the mode's own rule says. */
+function asksAnyway(relative: string, mode: ModeName): boolean {
+  return mode !== "yolo" && AGENT_CONFIG.matches(relative);
+}
+
+/** For comparing what the diff was made from with the file now: the editor and the disk differ in a BOM and line endings, not content. */
+function comparable(text: string): string {
+  return (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text).replace(/\r\n/g, "\n");
+}
+
+function samePath(a: string, b: string): boolean {
+  const norm = (p: string) => (process.platform === "win32" ? nodePath.normalize(p).toLowerCase() : nodePath.normalize(p));
+  return norm(a) === norm(b);
+}
+
+/**
+ * What would make applying a change proposed earlier wrong now, or null: the
+ * path refused or leading elsewhere (a folder swapped for a link meanwhile),
+ * or the file not what the diff was made from (the person, a formatter or a
+ * command changed it while the change waited). Writing anyway would clobber
+ * that change or follow the new link.
+ */
+function staleCheck(root: string, relative: string, absolute: string, before: string | null, options: HostOptions): () => Promise<string | null> {
+  return async () => {
+    let now;
+    try {
+      now = confine(root, relative, { write: true });
+    } catch (error) {
+      return error instanceof PathRefusedError ? error.message : `${relative} can no longer be checked.`;
+    }
+    if (!samePath(now.absolute, absolute)) return `${relative} now leads somewhere else: a folder or link on its path changed while the change waited.`;
+    const kind = await kindOf(absolute);
+    if (before === null) return kind === null ? null : `${relative} was created by something else while the change waited.`;
+    if (kind !== "file") return `${relative} was removed while the change waited.`;
+    const current = await readText(absolute, relative, options);
+    if (isOutcome(current)) return current.content;
+    return comparable(current) === comparable(before) ? null : `${relative} changed while the change waited.`;
+  };
+}
 
 function isBinary(bytes: Uint8Array): boolean {
   const end = Math.min(bytes.length, 8000);
@@ -306,9 +369,8 @@ async function grepTool(args: Record<string, unknown>, ctx: ToolContext): Promis
   const glob = stringArg(args, "glob", false);
   if (isOutcome(glob)) return glob;
   const ignoreCase = args.ignore_case === true;
-  let regex: RegExp;
   try {
-    regex = new RegExp(pattern!, ignoreCase ? "i" : "");
+    new RegExp(pattern!, ignoreCase ? "i" : "");
   } catch (error) {
     return failure(`The pattern is not a valid regular expression: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -325,6 +387,24 @@ async function grepTool(args: Record<string, unknown>, ctx: ToolContext): Promis
   const prefix = kind === "dir" && target.relative !== "." ? `${target.relative}/` : "";
   const found: string[] = [];
   let more = false;
+  // The model's pattern runs in a worker, against a deadline: see regexWorker.ts.
+  const matcher = new RegexWorker(pattern!, ignoreCase ? "i" : "");
+  let batch: FileText[] = [];
+  let batchBytes = 0;
+  const flush = async (): Promise<boolean> => {
+    if (batch.length === 0) return true;
+    const files = batch;
+    batch = [];
+    batchBytes = 0;
+    const room = LIMITS.search_max_results - found.length;
+    const matches = await matcher.match(files, room + 1, MAX_MATCH_LINE_CHARS, ctx.signal);
+    for (const m of matches.slice(0, room)) found.push(`${m.relative}:${m.line}: ${m.text}`);
+    if (matches.length > room) {
+      more = true;
+      return false;
+    }
+    return true;
+  };
   const search = async (relative: string, absolute: string): Promise<boolean> => {
     if (filter && !filter(relative.slice(prefix.length))) return true;
     let bytes: Buffer;
@@ -336,23 +416,22 @@ async function grepTool(args: Record<string, unknown>, ctx: ToolContext): Promis
       return true;
     }
     if (isBinary(bytes)) return true;
-    const lines = decoder.decode(bytes).split("\n");
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i]!.replace(/\r$/, "");
-      if (!regex.test(line)) continue;
-      if (found.length >= LIMITS.search_max_results) {
-        more = true;
-        return false;
-      }
-      const text = line.length > MAX_MATCH_LINE_CHARS ? `${line.slice(0, MAX_MATCH_LINE_CHARS)}…` : line;
-      found.push(`${relative}:${i + 1}: ${text}`);
-    }
-    return true;
+    batch.push({ relative, text: decoder.decode(bytes) });
+    batchBytes += bytes.length;
+    return batchBytes >= GREP_BATCH_BYTES || batch.length >= GREP_BATCH_FILES ? flush() : true;
   };
-  if (kind === "file") {
-    await search(target.relative, target.absolute);
-  } else {
-    await walk({ root: ctx.root, start: target.relative, deny, signal: ctx.signal, visit: search });
+  try {
+    if (kind === "file") {
+      await search(target.relative, target.absolute);
+    } else {
+      await walk({ root: ctx.root, start: target.relative, deny, signal: ctx.signal, visit: search });
+    }
+    if (!more) await flush();
+  } catch (error) {
+    if (error instanceof PatternTooSlow) return failure(error.message);
+    throw error;
+  } finally {
+    matcher.close();
   }
   if (found.length === 0) return ok(`No matches for ${pattern}.`);
   if (more) found.push(`[stopped at ${LIMITS.search_max_results} matches; narrow the pattern, the path or the glob]`);
@@ -366,6 +445,9 @@ function changeResult(
   before: string | null,
   proposed: string,
 ): ToolOutcome {
+  if (outcome.status === "failed") {
+    return failure(`${relative} was not changed: ${outcome.reason} Read it again before proposing the change anew.`);
+  }
   if (outcome.status === "rejected") {
     const said = outcome.reason ? ` They said: ${outcome.reason}` : "";
     return { content: `The person rejected the change to ${relative}; the file is unchanged.${said}`, isError: false, rejected: true };
@@ -409,8 +491,16 @@ async function editTool(args: Record<string, unknown>, decision: "allow" | "ask"
     throw error;
   }
   const outcome = await ctx.approvals.change(
-    { tool: "edit", relative: target.relative, absolute: target.absolute, before, after, diff: unifiedDiff(before, after, target.relative) },
-    decision === "ask",
+    {
+      tool: "edit",
+      relative: target.relative,
+      absolute: target.absolute,
+      before,
+      after,
+      diff: unifiedDiff(before, after, target.relative),
+      stale: staleCheck(ctx.root, target.relative, target.absolute, before, options),
+    },
+    decision === "ask" || asksAnyway(target.relative, ctx.mode),
     ctx.signal,
   );
   return changeResult(target.relative, "Edited", outcome, before, after);
@@ -444,8 +534,9 @@ async function writeFileTool(args: Record<string, unknown>, decision: "allow" | 
       before,
       after: content!,
       diff: unifiedDiff(before ?? "", content!, target.relative),
+      stale: staleCheck(ctx.root, target.relative, target.absolute, before, options),
     },
-    decision === "ask",
+    decision === "ask" || asksAnyway(target.relative, ctx.mode),
     ctx.signal,
   );
   return changeResult(target.relative, before === null ? "Created" : "Wrote", outcome, before, content!);

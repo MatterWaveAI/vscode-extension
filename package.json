@@ -50,7 +50,7 @@
             "File changes are applied without asking; commands still ask."
           ],
           "default": "ask",
-          "description": "The agent's approval mode in a new workspace. Yolo (nothing asks) is not a default: it is allowed per session, from the mode chip, /approval-mode or Shift+Tab, after a confirm.",
+          "description": "The agent's approval mode in a new workspace. Yolo (nothing asks) is not a default: it is allowed per session, from the mode chip, /approval-mode or Shift+Tab, after a confirm. A workspace's settings can make this stricter (plan), never looser.",
           "scope": "window"
         },
         "matterwave.agent.maxSteps": {
@@ -58,14 +58,14 @@
           "default": 40,
           "minimum": 1,
           "maximum": 500,
-          "description": "The most model calls one agent run makes before it stops and says so.",
+          "description": "The most model calls one agent run makes before it stops and says so. A workspace's settings can lower it, not raise it past yours.",
           "scope": "window"
         },
         "matterwave.agent.maxTokens": {
           "type": "integer",
           "default": 500000,
           "minimum": 1000,
-          "description": "The most tokens one agent run spends (prompt and completion, every step) before it stops and says so.",
+          "description": "The most tokens one agent run spends (prompt and completion, every step) before it stops and says so. A workspace's settings can lower it, not raise it past yours.",
           "scope": "window"
         },
         "matterwave.agent.editorContext": {
@@ -89,7 +89,7 @@
         "matterwave.agent.mcpServers": {
           "type": "object",
           "default": {},
-          "markdownDescription": "MCP servers the agent may use, by name. Each is `{ \"command\": \"...\", \"args\": [...], \"env\": {...} }` (stdio) or `{ \"url\": \"https://...\", \"headers\": {...} }` (HTTP), with an optional `\"tools\": [...]` allow-list (only those tools reach the model), `\"trust\": true` (its tools run without asking outside plan mode) and `\"disabled\": true`. Workspace settings apply only in a trusted folder.",
+          "markdownDescription": "MCP servers the agent may use, by name. Each is `{ \"command\": \"...\", \"args\": [...], \"env\": {...} }` (stdio) or `{ \"url\": \"https://...\", \"headers\": {...} }` (HTTP), with an optional `\"tools\": [...]` allow-list (only those tools reach the model), `\"trust\": true` (its tools run without asking outside plan mode) and `\"disabled\": true`. Workspace settings apply only in a trusted folder, and each server they add asks before it first starts (again whenever its definition changes); `trust` counts only in your user settings. A server's read-only marks are believed only for a trusted server and MatterWave's own.",
           "additionalProperties": {
             "type": "object",
             "properties": {

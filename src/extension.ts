@@ -15,6 +15,8 @@ import { CheckpointStore, restorePlan } from "./checkpoints";
 import { AgentSession, type AgentSettings } from "./agent/session";
 import { EditorReviewSurface, EditorTracker, PROPOSAL_SCHEME, ProposalFileSystem, openDocumentText } from "./agent/editor";
 import { McpManager, type McpServerConfig } from "./agent/mcp";
+import { describeServer, isMatterWaveMcp, resolveMcpServers, type PendingServer } from "./agent/mcpConfig";
+import { stricterMode } from "./agent/loop";
 import { MODES_BY_NAME, MODE_NAMES, type ModeName } from "./lib/sdk/agent/types";
 import type { CodeBlock } from "./chat/codeBlocks";
 import { inlineEditPrompt, replacementFromAnswer } from "./inlineEdit";
@@ -109,16 +111,22 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
   const mcp = new McpManager({
     version: String((context.extension?.packageJSON as { version?: string } | undefined)?.version ?? "0.0.0"),
     fetch: (input, init) => transport(input, init),
-    // MatterWave's own /mcp signs in as the editor does; any other server
-    // carries only the headers its configuration names.
-    headersFor: async (name, config) => {
-      if (name !== MATTERWAVE_MCP || !config.url?.startsWith(baseUrl().replace(/\/+$/, ""))) return {};
+    // MatterWave's own /mcp signs in as the editor does -- only a server at
+    // exactly that URL, whatever it is named; any other server carries only
+    // the headers its configuration names.
+    headersFor: async (_name, config) => {
+      if (!isMatterWaveMcp(config.url, baseUrl())) return {};
       const token = await tokens.get();
       const headers: Record<string, string> = {};
       if (token) headers.Authorization = `Bearer ${token}`;
       return headers;
     },
+    // A read-only mark is the server's own claim: believed from a server the
+    // person trusts, and from MatterWave's own.
+    hintsTrusted: (_name, config) => config.trust === true || isMatterWaveMcp(config.url, baseUrl()),
   });
+  // Project MCP servers the person declined this session: not asked about again until the window reloads.
+  const declinedServers = new Set<string>();
 
   // The client reports request ids and reachability to the controller,
   // which is built from the client; the callbacks only run on a request,
@@ -161,7 +169,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
     readText: openDocumentText,
     state: context.workspaceState,
     mcp,
-    mcpConfigs,
+    mcpConfigs: () => mcpConfigs(context.workspaceState, declinedServers, agent.root()?.path ?? null),
     fetch: (input, init) => transport(input, init ?? {}),
     onChange: () => chat.emit(),
     log: (line) => agentLog.appendLine(line),
@@ -323,12 +331,13 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
   });
   command("matterwave.agent.setMode", () => pickApprovalMode(agent));
   command("matterwave.agent.cycleMode", () => agent.cycleMode());
+  // The diff editor's buttons answer a change under review, never a command or a call waiting in the view.
   command("matterwave.agent.accept", () => {
-    const id = agent.pendingId();
+    const id = agent.pendingId("edit");
     if (id) agent.decide(id, true);
   });
   command("matterwave.agent.reject", () => {
-    const id = agent.pendingId();
+    const id = agent.pendingId("edit");
     if (id) agent.decide(id, false);
   });
   command("matterwave.agent.pickRoot", () => agent.pickRoot());
@@ -797,29 +806,79 @@ async function restoreCheckpoint(chat: ChatController, store: CheckpointStore, a
 
 // --- agent mode ----------------------------------------------------------------------
 
-const MATTERWAVE_MCP = "matterwave";
+const MCP_APPROVED_KEY = "matterwave.agent.mcpApproved";
+
+/** A persistable mode named by a settings value, or null; yolo is never a default, whatever a settings file says. */
+function settingMode(value: unknown): ModeName | null {
+  return typeof value === "string" && MODE_NAMES.includes(value as ModeName) && MODES_BY_NAME[value as ModeName].persistable ? (value as ModeName) : null;
+}
 
 function agentSettings(): AgentSettings {
   const config = vscode.workspace.getConfiguration("matterwave.agent");
-  const mode = config.get<string>("defaultMode") ?? "ask";
+  // The person's own default, which a workspace's settings may make stricter
+  // (plan) but never looser: a repository's .vscode/settings.json must not
+  // turn on auto-edit for itself.
+  const modes = config.inspect<string>("defaultMode");
+  let mode: ModeName = settingMode(modes?.globalValue) ?? "ask";
+  for (const value of [modes?.workspaceValue, modes?.workspaceFolderValue]) {
+    const project = settingMode(value);
+    if (project) mode = stricterMode(mode, project);
+  }
+  // The same for the caps: a workspace may lower them, not raise them past the person's.
+  const cap = (key: string, fallback: number): number => {
+    const layers = config.inspect<number>(key);
+    const own = typeof layers?.globalValue === "number" ? layers.globalValue : fallback;
+    const project = [layers?.workspaceValue, layers?.workspaceFolderValue].filter((v): v is number => typeof v === "number");
+    return Math.min(own, ...project);
+  };
   return {
-    maxSteps: config.get<number>("maxSteps") ?? 40,
-    maxTokens: config.get<number>("maxTokens") ?? 500_000,
-    // Yolo is never a default, whatever a settings file says.
-    defaultMode: (MODES_BY_NAME[mode as ModeName]?.persistable ? mode : "ask") as ModeName,
+    maxSteps: cap("maxSteps", 40),
+    maxTokens: cap("maxTokens", 500_000),
+    defaultMode: mode,
     webFetch: config.get<boolean>("webFetch") ?? true,
     editorContext: config.get<boolean>("editorContext") ?? true,
   };
 }
 
-/** The MCP servers the agent offers: the settings' (workspace ones only in a trusted folder), and MatterWave's own `/mcp`. */
-function mcpConfigs(): Record<string, McpServerConfig> {
-  const config = vscode.workspace.getConfiguration("matterwave.agent");
-  const servers: Record<string, McpServerConfig> = { ...(config.get<Record<string, McpServerConfig>>("mcpServers") ?? {}) };
-  if (config.get<boolean>("matterwaveMcp") ?? true) {
-    servers[MATTERWAVE_MCP] ??= { url: `${baseUrl().replace(/\/+$/, "")}/mcp` };
-  }
-  return servers;
+/**
+ * The MCP servers the agent offers: the person's settings, the workspace's
+ * once approved (the settings are read only in a trusted folder, and each
+ * project server asks before it first starts), and MatterWave's own `/mcp`.
+ */
+async function mcpConfigs(state: vscode.Memento, declined: Set<string>, root: string | null): Promise<Record<string, McpServerConfig>> {
+  const config = vscode.workspace.getConfiguration("matterwave.agent", root ? vscode.Uri.file(root) : undefined);
+  const layers = config.inspect<Record<string, unknown>>("mcpServers");
+  const approvedKeys = () => new Set(state.get<string[]>(MCP_APPROVED_KEY) ?? []);
+  return resolveMcpServers(
+    { user: layers?.globalValue, project: [layers?.workspaceValue, layers?.workspaceFolderValue] },
+    {
+      matterwaveBase: (config.get<boolean>("matterwaveMcp") ?? true) ? baseUrl() : null,
+      approved: (key) => approvedKeys().has(key),
+      approve: async (pending) => {
+        const asking = pending.filter((server) => !declined.has(server.key));
+        if (asking.length === 0) return [];
+        const approved = await approveProjectServers(asking);
+        for (const server of asking) if (!approved.includes(server.key)) declined.add(server.key);
+        if (approved.length > 0) await state.update(MCP_APPROVED_KEY, [...approvedKeys(), ...approved].slice(-200));
+        return approved;
+      },
+    },
+  );
+}
+
+/** Ask before starting MCP servers a workspace's settings define: each runs as the person, with their files. */
+async function approveProjectServers(pending: PendingServer[]): Promise<string[]> {
+  const answer = await vscode.window.showWarningMessage(
+    pending.length === 1
+      ? `This workspace's settings add the MCP server "${pending[0]!.name}" for the agent. Start it?`
+      : `This workspace's settings add ${pending.length} MCP servers for the agent. Start them?`,
+    {
+      modal: true,
+      detail: `${pending.map(describeServer).join("\n")}\n\nA server runs as you, with access to your files and network, and the agent may call its tools (each call asks first). Only start servers you expect from this project. Your answer is kept for this workspace until the definition changes.`,
+    },
+    pending.length === 1 ? "Start It" : "Start Them",
+  );
+  return answer ? pending.map((server) => server.key) : [];
 }
 
 /** Yolo's per-session flag: a modal that says what it means. Never saved. */

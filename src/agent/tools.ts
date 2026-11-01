@@ -29,11 +29,19 @@ export interface ChangeRequest {
   after: string;
   /** The unified diff, the SDK's, for the view and the model. */
   diff: string;
+  /**
+   * Checked just before the change is written: why writing it now would be
+   * wrong (the file changed, or its path leads elsewhere, since the diff was
+   * made), or null. Absent, nothing is checked.
+   */
+  stale?: () => Promise<string | null>;
 }
 
 export type ChangeOutcome =
   | { status: "applied"; content: string; edited: boolean }
-  | { status: "rejected"; reason?: string };
+  | { status: "rejected"; reason?: string }
+  /** Accepted, or allowed, but not written: `reason` says why (see `ChangeRequest.stale`). */
+  | { status: "failed"; reason: string };
 
 export interface ConfirmRequest {
   kind: "shell" | "mcp" | "web" | "tool";

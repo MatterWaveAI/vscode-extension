@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { shellFor } from "../lib/sdk/agent/modes";
+import { childEnv } from "./env";
 
 /**
  * `run_shell`'s process: the contract's shell for the platform (PowerShell
@@ -34,6 +35,7 @@ export interface ShellOptions {
   /** Each piece of output as it arrives, for a live view; capped output is still what the result returns. */
   onOutput?: (text: string) => void;
   onSpawn?: (pid: number) => void;
+  /** The environment to start from (the extension host's by default); `childEnv` cleans it either way. */
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
 }
@@ -154,7 +156,8 @@ export function runShell(command: string, options: ShellOptions): Promise<ShellR
     let exitTimer: ReturnType<typeof setTimeout> | undefined;
     const child = spawn(file, args, {
       cwd: options.cwd,
-      env: options.env ?? process.env,
+      // The editor's plumbing and MatterWave's credential stay out of the command's environment.
+      env: childEnv(options.env ?? process.env),
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
       // Its own process group on POSIX, so the group can be killed whole.

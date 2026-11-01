@@ -1,6 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { sseEvents } from "../lib/matterwaveClient";
 import type { Decision, ModeName } from "../lib/sdk/agent/types";
+import { childEnv } from "./env";
 import { killTree } from "./shell";
 import { failure, type ToolOutcome, type ToolSpec } from "./tools";
 
@@ -10,18 +12,29 @@ import { failure, type ToolOutcome, type ToolSpec } from "./tools";
  * process the extension starts) or HTTP (Streamable HTTP, JSON or SSE
  * answers), plus MatterWave's own `/mcp` with the signed-in credential.
  *
- * Each server's tools reach the model as `mcp__<server>__<tool>`, only those
- * its `tools` allow-list names when it has one. They go through the same
- * approvals as the local tools: a tool the server marks read-only runs like
- * `read_file`; any other asks in `ask` and `auto-edit` (it can reach
- * anything, like a command), is not offered in `plan`, and runs unasked
- * only in `yolo` -- or always, for a server the person marked `trust`.
+ * Each server's tools reach the model as `mcp__<server>__<tool>` (made
+ * unique where two would collide), only those its `tools` allow-list names
+ * when it has one. They go through the same approvals as the local tools: a
+ * tool marked read-only runs like `read_file`; any other asks in `ask` and
+ * `auto-edit` (it can reach anything, like a command), is not offered in
+ * `plan`, and runs unasked only in `yolo` -- or always, for a server the
+ * person marked `trust`. A server's read-only mark is its own claim, so it
+ * counts only for a server whose hints are trusted (one marked `trust`, and
+ * MatterWave's own); any other server's tools all ask.
+ *
+ * What a server sends is capped: one message at MAX_MESSAGE_BYTES, its tool
+ * list at MAX_TOOLS_PER_SERVER tools with schemas under MAX_SCHEMA_CHARS, a
+ * result at MAX_RESULT_CHARS, so a broken or hostile server cannot fill the
+ * extension host's memory or every request's prompt.
  */
 
 export const PROTOCOL_VERSION = "2025-06-18";
 const REQUEST_TIMEOUT_MS = 30_000;
 const CALL_TIMEOUT_MS = 300_000;
 const MAX_RESULT_CHARS = 100_000;
+export const MAX_MESSAGE_BYTES = 8 * 1024 * 1024;
+export const MAX_TOOLS_PER_SERVER = 100;
+export const MAX_SCHEMA_CHARS = 16_000;
 
 export interface McpServerConfig {
   command?: string;
@@ -91,11 +104,12 @@ export class StdioTransport implements Transport {
   private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: unknown) => void }>();
   private stderrTail = "";
   private exited: string | null = null;
+  private readonly gone: (why: string) => void;
 
   constructor(command: string, args: string[], options: { env?: Record<string, string>; cwd?: string }) {
     this.child = spawn(command, args, {
       cwd: options.cwd,
-      env: { ...process.env, ...options.env },
+      env: childEnv(process.env, options.env ?? {}),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       // A `.cmd` shim (npx on Windows) only runs through the shell.
@@ -106,17 +120,26 @@ export class StdioTransport implements Transport {
     this.child.stderr?.on("data", (chunk: Buffer) => {
       this.stderrTail = (this.stderrTail + chunk.toString("utf8")).slice(-2000);
     });
-    const gone = (why: string) => {
+    this.gone = (why: string) => {
+      if (this.exited) return;
       this.exited = why;
       for (const { reject } of this.pending.values()) reject(new McpError(`${why}${this.stderrTail ? `: ${this.stderrTail.trim().split("\n").pop()}` : ""}`));
       this.pending.clear();
     };
-    this.child.on("error", (error) => gone(`The server could not start (${error.message})`));
-    this.child.on("exit", (code) => gone(`The server exited (code ${code ?? "none"})`));
+    this.child.on("error", (error) => this.gone(`The server could not start (${error.message})`));
+    this.child.on("exit", (code) => this.gone(`The server exited (code ${code ?? "none"})`));
   }
 
   private take(chunk: string): void {
+    if (this.exited) return;
     this.buffered += chunk;
+    if (this.buffered.length > MAX_MESSAGE_BYTES && !this.buffered.includes("\n")) {
+      // One message past the cap: the server is broken or hostile, and holding more would only grow.
+      this.buffered = "";
+      this.gone(`The server sent a message over ${MAX_MESSAGE_BYTES.toLocaleString("en-US")} bytes`);
+      killTree(this.child);
+      return;
+    }
     let newline: number;
     while ((newline = this.buffered.indexOf("\n")) !== -1) {
       const line = this.buffered.slice(0, newline).trim();
@@ -169,6 +192,20 @@ export class StdioTransport implements Transport {
   }
 }
 
+/** `body`, erroring once more than `max` bytes have come through. */
+function capped(body: ReadableStream<Uint8Array>, max: number): ReadableStream<Uint8Array> {
+  let seen = 0;
+  return body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        seen += chunk.byteLength;
+        if (seen > max) controller.error(new McpError(`The server's answer passed ${max.toLocaleString("en-US")} bytes.`));
+        else controller.enqueue(chunk);
+      },
+    }),
+  );
+}
+
 /** A server at a URL: one POST per message, the answer as JSON or as an event stream (Streamable HTTP). */
 export class HttpTransport implements Transport {
   private nextId = 1;
@@ -206,7 +243,7 @@ export class HttpTransport implements Transport {
       const type = response.headers.get("content-type") ?? "";
       let message: { id?: unknown; result?: unknown; error?: unknown } | null = null;
       if (type.includes("text/event-stream") && response.body) {
-        for await (const event of sseEvents(response.body)) {
+        for await (const event of sseEvents(capped(response.body, MAX_MESSAGE_BYTES))) {
           try {
             const parsed = JSON.parse(event.data) as { id?: unknown };
             if (parsed.id === id) {
@@ -218,7 +255,8 @@ export class HttpTransport implements Transport {
           }
         }
       } else {
-        message = (await response.json()) as typeof message;
+        const body = response.body ? new Response(capped(response.body, MAX_MESSAGE_BYTES)) : response;
+        message = (await body.json()) as typeof message;
       }
       if (!message) throw new McpError(`${method}: the server closed the stream without an answer.`);
       if (message.error) throw rpcError(message.error);
@@ -259,18 +297,20 @@ export class McpClient {
     await this.transport.notify("notifications/initialized", {});
   }
 
+  /** The server's tools, at most MAX_TOOLS_PER_SERVER, each with a schema under MAX_SCHEMA_CHARS (a larger one is left out). */
   async listTools(): Promise<McpToolInfo[]> {
     const tools: McpToolInfo[] = [];
     let cursor: string | undefined;
-    for (let page = 0; page < 20; page++) {
+    for (let page = 0; page < 20 && tools.length < MAX_TOOLS_PER_SERVER; page++) {
       const result = (await this.transport.request("tools/list", cursor ? { cursor } : {}, REQUEST_TIMEOUT_MS)) as {
         tools?: unknown[];
         nextCursor?: unknown;
       } | null;
       for (const raw of result?.tools ?? []) {
         const t = raw as { name?: unknown; description?: unknown; inputSchema?: unknown; annotations?: { readOnlyHint?: unknown } };
-        if (typeof t.name !== "string") continue;
+        if (typeof t.name !== "string" || tools.length >= MAX_TOOLS_PER_SERVER) continue;
         const schema = t.inputSchema && typeof t.inputSchema === "object" ? (t.inputSchema as Record<string, unknown>) : {};
+        if (JSON.stringify(schema).length > MAX_SCHEMA_CHARS) continue;
         tools.push({
           name: t.name,
           description: typeof t.description === "string" ? t.description : "",
@@ -315,9 +355,31 @@ export function mcpToolName(server: string, tool: string): string {
   return `mcp__${clean(server)}__${clean(tool)}`.slice(0, 64);
 }
 
-export function mcpDecision(tool: McpToolInfo, config: McpServerConfig, mode: ModeName): Decision {
-  if (mode === "plan") return tool.readOnly ? "allow" : "deny";
-  if (mode === "yolo" || config.trust === true || tool.readOnly) return "allow";
+/**
+ * `mcpToolName`, made unique among `taken`: cleaning and the 64-character cut
+ * can give two tools one name (`a.b` and `a_b`, or two long names), and the
+ * model's call must reach the tool whose description it read.
+ */
+export function uniqueToolName(server: string, tool: string, taken: ReadonlySet<string>): string {
+  const name = mcpToolName(server, tool);
+  if (!taken.has(name)) return name;
+  for (let salt = 0; ; salt++) {
+    const hash = createHash("sha256").update(`${server}\0${tool}\0${salt}`).digest("hex").slice(0, 8);
+    const candidate = `${name.slice(0, 55)}_${hash}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+/**
+ * What a mode decides about an MCP tool. `hintsTrusted` says whether the
+ * server's read-only mark is believed: a server's annotations are its own
+ * claim, so an untrusted server's "read-only" tool asks like any other and
+ * is not offered in plan mode.
+ */
+export function mcpDecision(tool: McpToolInfo, config: McpServerConfig, mode: ModeName, hintsTrusted = config.trust === true): Decision {
+  const readOnly = tool.readOnly && hintsTrusted;
+  if (mode === "plan") return readOnly ? "allow" : "deny";
+  if (mode === "yolo" || config.trust === true || readOnly) return "allow";
   return "ask";
 }
 
@@ -337,6 +399,8 @@ export interface McpManagerOptions {
   headersFor?: (name: string, config: McpServerConfig) => Promise<Record<string, string>>;
   /** The transport for a config; tests substitute their own. */
   transportFor?: (name: string, config: McpServerConfig) => Transport;
+  /** Whether a server's read-only marks are believed; by default only for a server marked `trust`. */
+  hintsTrusted?: (name: string, config: McpServerConfig) => boolean;
 }
 
 interface Connected {
@@ -414,18 +478,21 @@ export class McpManager {
   /** The connected servers' allowed tools as specs the agent offers by mode. */
   specs(): ToolSpec[] {
     const specs: ToolSpec[] = [];
+    const taken = new Set<string>();
     for (const [server, entry] of this.servers) {
       const client = entry.client;
       if (!client || entry.status.state !== "connected") continue;
+      const hintsTrusted = this.options.hintsTrusted?.(server, entry.config) ?? entry.config.trust === true;
       for (const tool of entry.tools) {
-        const name = mcpToolName(server, tool.name);
+        const name = uniqueToolName(server, tool.name, taken);
+        taken.add(name);
         specs.push({
           name,
           definition: {
             type: "function",
             function: { name, description: `[MCP ${server}] ${tool.description}`.slice(0, 1024), parameters: tool.inputSchema },
           },
-          decide: (mode) => mcpDecision(tool, entry.config, mode),
+          decide: (mode) => mcpDecision(tool, entry.config, mode, hintsTrusted),
           label: () => `${server} › ${tool.name}`,
           run: async (args, decision, ctx) => {
             if (decision === "ask") {
