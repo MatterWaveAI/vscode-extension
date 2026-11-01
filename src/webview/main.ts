@@ -6,6 +6,8 @@ import { parseCodeBlocks } from "../chat/codeBlocks";
 import { renderMarkdown } from "./markdown";
 import { answerUsageLabel } from "../chat/usage";
 import { announcement } from "./announce";
+import { tokenize } from "./highlight";
+import { suggestionsAt, type Suggestions } from "./suggest";
 
 /**
  * The chat view's script. It only renders and reports intents: there is no
@@ -171,7 +173,90 @@ instructionsPanel.append(
   instructionsEffective,
 );
 
+// --- autocomplete: @ for context, / for commands and saved prompts ----------------
+
+const suggestionList = el("div", { className: "suggestions" });
+suggestionList.id = "composer-suggestions";
+suggestionList.setAttribute("role", "listbox");
+suggestionList.setAttribute("aria-label", "Suggestions");
+suggestionList.hidden = true;
+composer.insertBefore(suggestionList, input.nextSibling);
+input.setAttribute("aria-autocomplete", "list");
+input.setAttribute("aria-controls", suggestionList.id);
+let offered: Suggestions | null = null;
+let chosen = 0;
+
+function closeSuggestions(): void {
+  offered = null;
+  suggestionList.hidden = true;
+  suggestionList.replaceChildren();
+  input.removeAttribute("aria-activedescendant");
+}
+
+function renderSuggestions(): void {
+  if (!offered) return closeSuggestions();
+  suggestionList.replaceChildren(
+    ...offered.items.map((item, at) => {
+      const option = el("div", {}, [el("span", { text: item.insert }), el("span", { className: "detail", text: item.detail })]);
+      option.id = `composer-suggestion-${at}`;
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", String(at === chosen));
+      // mousedown, not click: the textarea keeps its focus and caret.
+      option.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        chosen = at;
+        acceptSuggestion();
+      });
+      return option;
+    }),
+  );
+  suggestionList.hidden = false;
+  input.setAttribute("aria-activedescendant", `composer-suggestion-${chosen}`);
+}
+
+function updateSuggestions(): void {
+  const next = suggestionsAt(input.value, input.selectionStart ?? input.value.length, state?.promptNames ?? []);
+  if (!next) return closeSuggestions();
+  if (offered?.items.map((i) => i.insert).join() !== next.items.map((i) => i.insert).join()) chosen = 0;
+  offered = next;
+  renderSuggestions();
+}
+
+/** Put the chosen suggestion in place of the token, and a space after it. */
+function acceptSuggestion(): void {
+  const item = offered?.items[chosen];
+  if (!offered || !item) return;
+  const before = input.value.slice(0, offered.start);
+  const after = input.value.slice(offered.end).replace(/^\s*/, "");
+  input.value = `${before}${item.insert} ${after}`;
+  const caret = before.length + item.insert.length + 1;
+  input.setSelectionRange(caret, caret);
+  closeSuggestions();
+}
+
+input.addEventListener("input", updateSuggestions);
+input.addEventListener("blur", closeSuggestions);
+
 input.addEventListener("keydown", (event) => {
+  if (offered) {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const count = offered.items.length;
+      chosen = (chosen + (event.key === "ArrowDown" ? 1 : count - 1)) % count;
+      renderSuggestions();
+      return;
+    }
+    if ((event.key === "Tab" || event.key === "Enter") && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      acceptSuggestion();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeSuggestions();
+      return;
+    }
+  }
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     submit();
@@ -738,7 +823,20 @@ function markdown(text: string): HTMLElement {
   // Safe by construction: renderMarkdown escapes the source and its output
   // passes the allowlist sanitiser before it gets here.
   node.innerHTML = renderMarkdown(text);
+  for (const code of Array.from(node.querySelectorAll<HTMLElement>("pre > code"))) highlight(code);
   return node;
+}
+
+/**
+ * Colour a code block by its fence's language: its text becomes spans
+ * built with `textContent`, so nothing the model wrote is parsed as HTML,
+ * and the colours are the editor theme's (the page's `tok-` classes).
+ */
+function highlight(code: HTMLElement): void {
+  const language = /(?:^|\s)language-([\w+#.-]+)/.exec(code.className)?.[1] ?? null;
+  const tokens = tokenize(code.textContent ?? "", language);
+  if (tokens.every((token) => token.kind === "text")) return;
+  code.replaceChildren(...tokens.map((token) => (token.kind === "text" ? document.createTextNode(token.text) : el("span", { className: `tok-${token.kind}`, text: token.text }))));
 }
 
 /**
@@ -756,12 +854,20 @@ function markdownWithApply(text: string, messageId: string): HTMLElement {
     const block = blocks[at];
     if (!block || !block.code.trim()) return;
     const bar = el("div", { className: "apply-bar" });
-    bar.appendChild(
+    bar.append(
       button(
         block.filename ? `Apply → ${block.filename}` : "Apply…",
         () => send({ type: "applyCodeBlock", messageId, blockIndex: block.index }),
         { className: "link", title: "Review a diff of this code against the file, then apply it" },
       ),
+      button("Insert", () => send({ type: "insertCodeBlock", messageId, blockIndex: block.index }), {
+        className: "link",
+        title: "Put this code at the editor's cursor",
+      }),
+      button("Copy", () => send({ type: "copyCodeBlock", messageId, blockIndex: block.index }), {
+        className: "link",
+        title: "Copy this code to the clipboard",
+      }),
     );
     const wrap = el("div", { className: "apply-wrap" });
     pre.replaceWith(wrap);

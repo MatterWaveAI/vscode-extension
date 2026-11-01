@@ -98,3 +98,11 @@ describe("the fork, report and announcement intents", () => {
     expect(parseWebviewMessage({ type: "dismissAnnouncement", id: 3 })).toBeNull();
   });
 });
+
+describe("the copy and insert intents", () => {
+  it("carry a message id and a block index, like Apply", () => {
+    expect(parseWebviewMessage({ type: "copyCodeBlock", messageId: "m_1", blockIndex: 2 })).toEqual({ type: "copyCodeBlock", messageId: "m_1", blockIndex: 2 });
+    expect(parseWebviewMessage({ type: "insertCodeBlock", messageId: "m_1", blockIndex: 0 })).toEqual({ type: "insertCodeBlock", messageId: "m_1", blockIndex: 0 });
+    expect(parseWebviewMessage({ type: "insertCodeBlock", messageId: "m_1", blockIndex: -1 })).toBeNull();
+  });
+});

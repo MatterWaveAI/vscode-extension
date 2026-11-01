@@ -67,8 +67,8 @@ export interface ChatDeps {
    * written expecting the context it names.
    */
   resolveMention?: (mention: Mention) => Promise<ResolvedContext | null>;
-  /** The prompt library a `/name` expands to, when this editor keeps one. */
-  prompts?: { get(name: string): Promise<string | null> };
+  /** The prompt library a `/name` expands to, when this editor keeps one, and its names for completion. */
+  prompts?: { get(name: string): Promise<string | null>; names?(): Promise<string[]> };
   /**
    * Apply one code block to its file through a reviewed diff (the editor
    * side of the webview's Apply button). The controller hands over the
@@ -80,6 +80,9 @@ export interface ChatDeps {
   showAnswerUsage?: () => boolean;
   /** Report a conversation or one message of it: the editor asks what kind, and for a note. */
   report?: (target: { conversationId: string; messageId?: string }) => Promise<void> | void;
+  /** A code block's code to the clipboard, and at the active editor's cursor. */
+  copyCode?: (code: string) => Promise<void> | void;
+  insertCode?: (code: string) => Promise<void> | void;
   /** The announcements this person dismissed, kept by the editor across restarts. */
   dismissedAnnouncements?: { has(id: string): boolean; add(id: string): void };
 }
@@ -132,6 +135,7 @@ export class ChatController {
   private searchCursor: string | null = null;
   /** The deployment's announcements in their window, before the person's dismissals. */
   private announcements: Announcement[] = [];
+  private promptNames: string[] = [];
   private activeId: string | null = null;
   private path: Message[] = [];
   private tree: Message[] = [];
@@ -237,6 +241,10 @@ export class ChatController {
         return this.openNotificationLink(message.url);
       case "applyCodeBlock":
         return this.applyCodeBlock(message.messageId, message.blockIndex);
+      case "copyCodeBlock":
+        return this.useCodeBlock("copy", message.messageId, message.blockIndex);
+      case "insertCodeBlock":
+        return this.useCodeBlock("insert", message.messageId, message.blockIndex);
       case "switchBranch":
         return this.switchBranch(message.messageId, message.step);
       case "continue":
@@ -304,7 +312,7 @@ export class ChatController {
       this.conversationsCursor = conversations.nextCursor;
       this.archivedCursor = archived.nextCursor;
       // These are best-effort: a deployment without the route still chats.
-      await Promise.all([this.loadNotifications(), this.loadUsage(), this.loadLibrary(), this.loadAnnouncements()]);
+      await Promise.all([this.loadNotifications(), this.loadUsage(), this.loadLibrary(), this.loadAnnouncements(), this.loadPromptNames()]);
       if (this.activeId) await this.loadConversation(this.activeId);
     });
     this.emit();
@@ -411,6 +419,18 @@ export class ChatController {
       return;
     }
     await this.deps.applyCode?.({ messageId, block });
+  }
+
+  /** Copy one code block, or put it at the editor's cursor: the block as the answer carries it. */
+  private async useCodeBlock(how: "copy" | "insert", messageId: string, blockIndex: number): Promise<void> {
+    const message = this.path.find((m) => m.id === messageId);
+    const block = message ? codeBlockAt(messageText(message), blockIndex) : null;
+    if (!block || !block.code.trim()) {
+      this.notice = "That code block is no longer in the conversation.";
+      this.emit();
+      return;
+    }
+    await (how === "copy" ? this.deps.copyCode?.(block.code) : this.deps.insertCode?.(block.code));
   }
 
   private openNotificationLink(url: string): void {
@@ -772,6 +792,16 @@ export class ChatController {
       // A deployment without the route still chats; the line just stays off.
       this.usage = null;
     }
+  }
+
+  /** The saved prompts' names, read again when the library changes. */
+  async reloadPrompts(): Promise<void> {
+    await this.loadPromptNames();
+    this.emit();
+  }
+
+  private async loadPromptNames(): Promise<void> {
+    this.promptNames = (await this.deps.prompts?.names?.().catch(() => [])) ?? [];
   }
 
   /** The deployment's announcements; a deployment without the route shows none. */
@@ -1460,6 +1490,7 @@ export class ChatController {
       notificationsUnreadOnly: this.notificationsUnreadOnly,
       notificationsComplete: this.notificationsComplete,
       usage: this.usage,
+      promptNames: this.promptNames,
       answerUsage: this.deps.showAnswerUsage?.() === false ? {} : Object.fromEntries(this.answerUsage),
     };
   }

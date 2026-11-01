@@ -42,6 +42,7 @@ function view(transcript: Message[]): ViewState {
     notificationsComplete: true,
     usage: null,
     answerUsage: {},
+    promptNames: [],
     announcements: [],
   };
 }

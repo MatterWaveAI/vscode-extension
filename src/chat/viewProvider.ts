@@ -121,6 +121,14 @@ button:disabled { opacity: .5; cursor: default; }
 .msg .body pre { background: var(--vscode-textCodeBlock-background); padding: 6px; overflow-x: auto; }
 .msg .body code { font-family: var(--vscode-editor-font-family); }
 .apply-wrap pre { margin-bottom: 0; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.tok-comment { color: var(--vscode-descriptionForeground); font-style: italic; }
+.tok-string { color: var(--vscode-symbolIcon-stringForeground, var(--vscode-debugTokenExpression-string)); }
+.tok-number { color: var(--vscode-symbolIcon-numberForeground, var(--vscode-debugTokenExpression-number)); }
+.tok-keyword { color: var(--vscode-symbolIcon-keywordForeground, var(--vscode-debugTokenExpression-name)); }
+.suggestions { display: flex; flex-direction: column; border: 1px solid var(--vscode-editorSuggestWidget-border, var(--vscode-panel-border)); background: var(--vscode-editorSuggestWidget-background, var(--vscode-input-background)); max-height: 160px; overflow-y: auto; }
+.suggestions [role=option] { padding: 2px 6px; cursor: pointer; display: flex; gap: 8px; }
+.suggestions [role=option] .detail { opacity: .7; }
+.suggestions [role=option][aria-selected=true] { background: var(--vscode-editorSuggestWidget-selectedBackground, var(--vscode-list-activeSelectionBackground)); color: var(--vscode-editorSuggestWidget-selectedForeground, var(--vscode-list-activeSelectionForeground)); }
 .apply-bar { display: flex; gap: 6px; padding: 1px 2px 6px; background: var(--vscode-textCodeBlock-background); border-bottom-left-radius: 4px; border-bottom-right-radius: 4px; margin-bottom: 6px; }
 .msg .actions { display: flex; gap: 4px; margin-top: 2px; }
 details { border-left: 2px solid var(--vscode-panel-border); padding-left: 6px; margin: 4px 0; }

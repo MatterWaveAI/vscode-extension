@@ -138,6 +138,8 @@ export interface ViewState {
   answerUsage: Record<string, AnswerUsage>;
   /** The deployment's announcements the person has not dismissed, most severe first. */
   announcements: AnnouncementView[];
+  /** The saved prompts' names, for the composer's `/` completion. */
+  promptNames: string[];
 }
 
 /** One announcement as its banner shows it. */
@@ -200,6 +202,9 @@ export type WebviewMessage =
   | { type: "openNotification"; id: string; url: string }
   /** Review a diff of one code block and apply it to its file on accept. */
   | { type: "applyCodeBlock"; messageId: string; blockIndex: number }
+  /** Copy one code block, or insert it at the editor's cursor. */
+  | { type: "copyCodeBlock"; messageId: string; blockIndex: number }
+  | { type: "insertCodeBlock"; messageId: string; blockIndex: number }
   | { type: "switchBranch"; messageId: string; step: -1 | 1 }
   | { type: "continue" }
   | { type: "compact" }
@@ -213,7 +218,7 @@ const WEBVIEW_TYPES = new Set<WebviewMessage["type"]>([
   "send", "stop", "retry", "edit", "regenerate", "rateMessage", "setInstructions", "switchBranch", "continue",
   "compact", "pickModel", "signIn", "copyRequestId", "refreshNotifications", "readNotification", "readAllNotifications",
   "openNotification", "loadMoreNotifications", "setNotificationsUnreadOnly", "applyCodeBlock", "loadMoreConversations",
-  "forkConversation", "reportMessage", "dismissAnnouncement",
+  "forkConversation", "reportMessage", "dismissAnnouncement", "copyCodeBlock", "insertCodeBlock",
 ]);
 
 const FEEDBACK_REASON_SET = new Set<string>(FEEDBACK_REASONS);
@@ -300,6 +305,8 @@ export function parseWebviewMessage(raw: unknown): WebviewMessage | null {
         ? (msg as WebviewMessage)
         : null;
     case "applyCodeBlock":
+    case "copyCodeBlock":
+    case "insertCodeBlock":
       return (
         str("messageId") &&
         typeof msg.blockIndex === "number" &&

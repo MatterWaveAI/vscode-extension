@@ -402,6 +402,38 @@ describe("answerOnce", () => {
   });
 });
 
+describe("copy and insert a code block", () => {
+  it("hands the block's code to the editor's clipboard and cursor", async () => {
+    const answer = { ...DONE, parts: [{ type: "text", text: "Use:\n\n```py\nprint(1)\n```" }] };
+    const { controller } = await setup({
+      "GET /api/conversations/c_1": () => json({ ...CONVERSATION, messages: [USER, answer] }),
+      "GET /api/conversations/c_1/tree": () => json({ ...CONVERSATION, messages: [USER, answer] }),
+    });
+    const copied: string[] = [];
+    const inserted: string[] = [];
+    controller["deps"].copyCode = (code) => void copied.push(code);
+    controller["deps"].insertCode = (code) => void inserted.push(code);
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    await controller.handle({ type: "copyCodeBlock", messageId: "m_asst", blockIndex: 0 });
+    await controller.handle({ type: "insertCodeBlock", messageId: "m_asst", blockIndex: 0 });
+    expect(copied).toEqual(["print(1)"]);
+    expect(inserted).toEqual(["print(1)"]);
+  });
+});
+
+describe("prompt names for completion", () => {
+  it("reads the library's names with the rest of the state, and again on request", async () => {
+    let names = ["review"];
+    const { controller } = await setup({}, { prompts: { get: async () => null, names: async () => names } } as never);
+    await controller.refresh();
+    expect(controller.snapshot().promptNames).toEqual(["review"]);
+    names = ["review", "tests"];
+    await controller.reloadPrompts();
+    expect(controller.snapshot().promptNames).toEqual(["review", "tests"]);
+  });
+});
+
 describe("model selection", () => {
   it("refuses a model the plan does not include", async () => {
     const { controller } = await setup();

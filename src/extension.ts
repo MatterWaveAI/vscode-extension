@@ -172,13 +172,18 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
     // this deployment; only http(s) URLs the classifier accepted get here.
     openLink: (url) => void vscode.env.openExternal(vscode.Uri.parse(url)),
     resolveMention: (mention) => resolveMention(mention, terminals),
-    prompts: { get: (name) => prompts.get(name) },
+    prompts: { get: (name) => prompts.get(name), names: async () => [...new Set((await prompts.list()).map((row) => row.name))] },
     applyCode: async ({ block }) => {
       await applyCodeBlockFlow(chat, checkpoints, block);
     },
     onStatus: (status) => statusBar.update(status),
     showAnswerUsage: () => vscode.workspace.getConfiguration("matterwave").get<boolean>("showAnswerUsage") !== false,
     report: (target) => reportFlow(client, target),
+    copyCode: async (code) => {
+      await vscode.env.clipboard.writeText(code);
+      void vscode.window.setStatusBarMessage("Code copied to the clipboard.", 3000);
+    },
+    insertCode: (code) => insertAtCursor(code),
     dismissedAnnouncements: {
       has: (id) => (context.globalState.get<string[]>(DISMISSED_KEY) ?? []).includes(id),
       add: (id) => {
@@ -351,7 +356,10 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
   command("matterwave.customInstructions", () => editCustomInstructions(client));
   command("matterwave.manageApiKeys", () => manageApiKeys(client));
   command("matterwave.switchAccount", () => switchAccount(tokens));
-  command("matterwave.promptLibrary", () => managePrompts(prompts));
+  command("matterwave.promptLibrary", async () => {
+    await managePrompts(prompts);
+    await chat.reloadPrompts();
+  });
   command("matterwave.restoreCheckpoint", () => restoreCheckpoint(chat, checkpoints));
   command("matterwave.importHistory", async () => {
     await view.reveal();
@@ -892,6 +900,29 @@ async function applyCodeBlockFlow(chat: ChatController, checkpoints: CheckpointS
     title: `${relativePath(target)} — reviewed change`,
     onSnapshot: (snapshot) => recordCheckpoint(chat, checkpoints, target, snapshot, "Apply"),
   });
+}
+
+/**
+ * A code block at the editor's cursor -- or over its selection -- as an
+ * ordinary edit of the document: it joins the undo stack and is not saved.
+ * The editor is the one last focused, since clicking in the chat moves the
+ * focus away from it.
+ */
+async function insertAtCursor(code: string): Promise<void> {
+  if (!(await requireTrust("Insert at Cursor"))) return;
+  const editor = vscode.window.activeTextEditor ?? vscode.window.visibleTextEditors[0];
+  if (!editor) {
+    void vscode.window.showInformationMessage("Open a file and put the cursor where the code goes.");
+    return;
+  }
+  const inserted = await editor.edit((edit) => {
+    for (const selection of editor.selections) edit.replace(selection, code);
+  });
+  if (!inserted) {
+    void vscode.window.showErrorMessage(`The code could not be inserted into ${relativePath(editor.document.uri)}.`);
+    return;
+  }
+  await vscode.window.showTextDocument(editor.document, { viewColumn: editor.viewColumn, preserveFocus: false });
 }
 
 /**

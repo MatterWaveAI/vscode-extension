@@ -45,6 +45,7 @@ function state(over: Partial<ViewState>): ViewState {
     notificationsComplete: true,
     usage: null,
     answerUsage: {},
+    promptNames: [],
     announcements: [],
     ...over,
   };
@@ -317,6 +318,54 @@ describe("the chat webview", () => {
     // Colours come from the editor's theme variables, which a test page does not have.
     const results = await axe.run(document, { rules: { "color-contrast": { enabled: false } } });
     expect(results.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.html).join(" | ")}`)).toEqual([]);
+  });
+
+  it("offers Insert and Copy beside Apply, and colours the code from the theme without parsing it as HTML", () => {
+    const text = 'Here:\n\n```ts src/a.ts\nconst a = "<b>x</b>"; // note\n```';
+    post({
+      type: "state",
+      state: state({ transcript: [{ ...assistantEntry("a1"), message: { ...assistantEntry("a1").message, parts: [{ type: "text", text }] } }] }),
+    });
+    const bar = document.querySelector(".apply-bar");
+    expect(Array.from(bar?.querySelectorAll("button") ?? []).map((b) => b.textContent)).toEqual(["Apply → src/a.ts", "Insert", "Copy"]);
+    sent.length = 0;
+    bar?.querySelectorAll("button").forEach((b, at) => at > 0 && b.click());
+    expect(sent).toEqual([
+      { type: "insertCodeBlock", messageId: "a1", blockIndex: 0 },
+      { type: "copyCodeBlock", messageId: "a1", blockIndex: 0 },
+    ]);
+    const code = document.querySelector(".apply-wrap pre code") as HTMLElement;
+    expect(code.querySelector(".tok-keyword")?.textContent).toBe("const");
+    expect(code.querySelector(".tok-string")?.textContent).toBe('"<b>x</b>"');
+    expect(code.querySelector(".tok-comment")?.textContent).toBe("// note");
+    expect(code.querySelector("b")).toBeNull();
+    expect(code.textContent).toBe('const a = "<b>x</b>"; // note');
+  });
+
+  it("completes @ and / in the composer, with the keyboard", () => {
+    post({ type: "state", state: state({ promptNames: ["code-review"] }) });
+    const input = document.querySelector(".composer textarea") as HTMLTextAreaElement;
+    const list = document.getElementById("composer-suggestions") as HTMLElement;
+    input.value = "/co";
+    input.setSelectionRange(3, 3);
+    input.dispatchEvent(new Event("input"));
+    expect(list.hidden).toBe(false);
+    expect(Array.from(list.querySelectorAll("[role=option]")).map((o) => o.firstChild?.textContent)).toEqual(["/compact", "/code-review"]);
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    expect(input.getAttribute("aria-activedescendant")).toBe("composer-suggestion-1");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
+    expect(input.value).toBe("/code-review ");
+    expect(list.hidden).toBe(true);
+
+    input.value = "look at @te";
+    input.setSelectionRange(11, 11);
+    input.dispatchEvent(new Event("input"));
+    sent.length = 0;
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    expect(input.value).toBe("look at @terminal ");
+    // Enter took the suggestion; it did not send.
+    expect(sent).toEqual([]);
+    input.value = "";
   });
 
   it("offers Fork on a message and Report on an answer, and sends their intents", () => {
