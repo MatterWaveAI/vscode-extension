@@ -5,7 +5,9 @@ import {
   copyTerminalText,
   describeCommand,
   plainText,
+  proposedCommand,
   tail,
+  terminalCommandPrompt,
   TerminalHistory,
   terminalText,
 } from "../src/terminalOutput";
@@ -126,5 +128,32 @@ describe("terminalText", () => {
     env.clipboard.text = "kept";
     expect(await copyTerminalText(terminal)).toBeNull();
     expect(env.clipboard.text).toBe("kept");
+  });
+});
+
+describe("terminalCommandPrompt and proposedCommand", () => {
+  const failed = { command: "npm tset", cwd: "/ws", output: "npm error Unknown command: \"tset\"\n", exitCode: 1, done: true };
+
+  it("asks for an explanation with the command, its output and its exit code fenced", () => {
+    const prompt = terminalCommandPrompt("explain", "bash", failed);
+    expect(prompt).toMatch(/^Explain what this terminal command did/);
+    expect(prompt).toContain("From the terminal “bash”:");
+    expect(prompt).toContain('```console\n$ npm tset (in /ws)\nnpm error Unknown command: "tset"\n[exit code 1]\n```');
+  });
+
+  it("asks a fix for one fenced command, and fences output that holds backticks with a longer fence", () => {
+    const prompt = terminalCommandPrompt("fix", "zsh", { ...failed, output: "```weird```\n" });
+    expect(prompt).toMatch(/^This terminal command did not do what was meant\. Answer with the corrected command in one fenced code block/);
+    expect(prompt).toContain("````console\n");
+  });
+
+  it("takes the one proposed command, dropping an echoed prompt sign", () => {
+    expect(proposedCommand("Use this:\n\n```sh\n$ npm test\n```\n\nYou swapped two letters.")).toBe("npm test");
+    expect(proposedCommand("```\nnpm run build\n```")).toBe("npm run build");
+  });
+
+  it("proposes nothing when the answer has no command or several", () => {
+    expect(proposedCommand("Just retry it.")).toBeNull();
+    expect(proposedCommand("```sh\na\n```\nor\n```sh\nb\n```")).toBeNull();
   });
 });

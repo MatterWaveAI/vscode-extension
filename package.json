@@ -122,6 +122,16 @@
         "category": "MatterWave"
       },
       {
+        "command": "matterwave.explainTerminalCommand",
+        "title": "Explain Last Terminal Command",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.fixTerminalCommand",
+        "title": "Fix Last Terminal Command",
+        "category": "MatterWave"
+      },
+      {
         "command": "matterwave.pickModel",
         "title": "Pick Model",
         "category": "MatterWave"
@@ -220,6 +230,16 @@
           "command": "matterwave.inlineEdit",
           "when": "editorHasSelection && isWorkspaceTrusted",
           "group": "matterwave@3"
+        }
+      ],
+      "terminal/context": [
+        {
+          "command": "matterwave.explainTerminalCommand",
+          "group": "matterwave@1"
+        },
+        {
+          "command": "matterwave.fixTerminalCommand",
+          "group": "matterwave@2"
         }
       ]
     },

@@ -72,6 +72,13 @@ describe("the extension manifest", () => {
     }
   });
 
+  it("offers Explain and Fix on the terminal's context menu", () => {
+    expect(manifest.contributes.menus["terminal/context"].map((m: { command: string }) => m.command)).toEqual([
+      "matterwave.explainTerminalCommand",
+      "matterwave.fixTerminalCommand",
+    ]);
+  });
+
   it("binds and menus only commands it contributes", () => {
     const commands = new Set(manifest.contributes.commands.map((c: { command: string }) => c.command));
     for (const binding of manifest.contributes.keybindings) expect(commands.has(binding.command), binding.command).toBe(true);

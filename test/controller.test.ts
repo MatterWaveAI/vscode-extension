@@ -245,6 +245,25 @@ describe("@-mentions", () => {
     expect(lastState(webview.posted).transcript).toEqual([]);
   });
 
+  it("reads no mention or command out of text the editor composed", async () => {
+    let asked = 0;
+    const { controller, calls } = await setup(
+      {},
+      {
+        resolveMention: async () => {
+          asked++;
+          return null;
+        },
+      },
+    );
+    await controller.refresh();
+    const selection = "/clear the cache\n```ts src/a.ts\n/** @file the module */\n```";
+    await controller.sendText(selection);
+    expect(asked).toBe(0);
+    const send = calls.find((c) => c.url === "/api/conversations/c_1/messages");
+    expect(JSON.parse(String(send?.body)).content).toBe(selection);
+  });
+
   it("resolves every mention before the conversation is created", async () => {
     const order: string[] = [];
     const { controller, calls } = await setup(

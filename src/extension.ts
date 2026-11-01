@@ -27,7 +27,7 @@ import {
   terminalContext,
 } from "./contextProviders";
 import { mentionTitle, type Mention } from "./chat/mentions";
-import { TerminalHistory, terminalText } from "./terminalOutput";
+import { proposedCommand, terminalCommandPrompt, TerminalHistory, terminalText } from "./terminalOutput";
 import { keyDetail } from "./keys";
 import { conversationToMarkdown, safeFilename } from "./chat/export";
 import type { ApiKeyListing, ImportRecord } from "./api/types";
@@ -197,6 +197,8 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
     await signInWithApiKey(client, tokens);
   });
   command("matterwave.openChat", () => view.reveal());
+  command("matterwave.explainTerminalCommand", () => terminalCommand("explain", terminals, chat, view));
+  command("matterwave.fixTerminalCommand", () => terminalCommand("fix", terminals, chat, view));
   command("matterwave.showLog", () => log.show(true));
   command("matterwave.signOut", async () => {
     switch (await signOut(client, tokens)) {
@@ -416,7 +418,8 @@ async function askAboutSelection(chat: ChatController, view: ChatViewProvider): 
     return;
   }
   await view.reveal();
-  await chat.send(content);
+  // The selection is sent as it is: code carries `@file` and `/x` as plain text.
+  await chat.sendText(content);
 }
 
 async function askAboutFile(chat: ChatController, view: ChatViewProvider): Promise<void> {
@@ -438,6 +441,48 @@ async function askAboutFile(chat: ChatController, view: ChatViewProvider): Promi
     return;
   }
   await chat.askAboutFile(question, editor.document.getText(), path);
+}
+
+/**
+ * Explain or fix the last command of the active terminal, as shell
+ * integration saw it run: the command, its output and its exit code go to
+ * the chat. A fix's proposed command can be put on the terminal's prompt,
+ * never run: the person reads it and presses Enter.
+ */
+async function terminalCommand(
+  kind: "explain" | "fix",
+  history: TerminalHistory,
+  chat: ChatController,
+  view: ChatViewProvider,
+): Promise<void> {
+  const terminal = vscode.window.activeTerminal;
+  if (!terminal) {
+    void vscode.window.showInformationMessage("Open a terminal and run a command first.");
+    return;
+  }
+  const record = history.last(terminal);
+  if (!record) {
+    void vscode.window.showInformationMessage(
+      `No command has run in “${terminal.name}” that MatterWave could see. Run it again in a shell with shell integration (bash, zsh, fish or PowerShell).`,
+    );
+    return;
+  }
+  await view.reveal();
+  const prompt = terminalCommandPrompt(kind, terminal.name, record);
+  if (kind === "explain") {
+    await chat.sendText(prompt);
+    return;
+  }
+  const answer = await chat.ask(prompt);
+  const fixed = answer ? proposedCommand(answer) : null;
+  if (!fixed) return;
+  const put = await vscode.window.showInformationMessage(`Put the fixed command on the prompt of “${terminal.name}”?`, {
+    detail: fixed,
+  }, "Put on Prompt");
+  if (put !== "Put on Prompt") return;
+  terminal.show();
+  // Without a newline: it waits on the prompt for the person to run it.
+  terminal.sendText(fixed, false);
 }
 
 type PickItem = vscode.QuickPickItem & { row: PickerRow };

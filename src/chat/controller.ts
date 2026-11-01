@@ -876,6 +876,16 @@ export class ChatController {
   }
 
   /**
+   * Send text the editor composed (a selection with its question, a
+   * terminal command with its output) as it is: no `/command` and no
+   * `@mention` is read out of it, since code and output carry both as
+   * plain text (`@file` is a JSDoc tag, `/usr/bin` a path).
+   */
+  async sendText(content: string): Promise<void> {
+    await this.sendCore(content, [], false);
+  }
+
+  /**
    * One prompt out, the answer's text back -- the inline editor's road in.
    * The turn runs through the same pipeline as any send, so it shows in the
    * conversation; what comes back is the last assistant message's words, or

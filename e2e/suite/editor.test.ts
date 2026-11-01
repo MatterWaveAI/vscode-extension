@@ -7,7 +7,7 @@ import { CheckpointStore } from "../../src/checkpoints";
 import { searchWorkspaceFiles } from "../../src/fileSearch";
 import { snapshotFolder } from "../../src/snapshotFiles";
 import { editorFolders, resolveNamedFile } from "../../src/targets";
-import { copyTerminalText, TerminalHistory, terminalText } from "../../src/terminalOutput";
+import { copyTerminalText, terminalCommandPrompt, TerminalHistory, terminalText } from "../../src/terminalOutput";
 
 /**
  * The extension's edits inside a real editor, in the two-folder workspace
@@ -111,6 +111,25 @@ describe("reading a terminal in a real editor", function () {
       const text = await terminalText(history, terminal);
       assert.match(text ?? "", /\$ echo mw-e2e-marker/);
       assert.match(text ?? "", /\[exit code 0\]/);
+    } finally {
+      terminal.dispose();
+    }
+  });
+
+  it("sees a failed command's exit code, which is what Fix is asked about", async function () {
+    const terminal = vscode.window.createTerminal({ name: "e2e failing" });
+    try {
+      terminal.show();
+      const integration = await waitFor("shell integration", () => terminal.shellIntegration, 45_000);
+      integration.executeCommand("git --no-such-option");
+      const record = await waitFor("the command to finish", () => {
+        const last = history.last(terminal);
+        return last?.done ? last : undefined;
+      });
+      assert.notEqual(record.exitCode, 0);
+      const prompt = terminalCommandPrompt("fix", terminal.name, record);
+      assert.match(prompt, /\$ git --no-such-option/);
+      assert.match(prompt, /\[exit code [1-9][0-9]*\]/);
     } finally {
       terminal.dispose();
     }

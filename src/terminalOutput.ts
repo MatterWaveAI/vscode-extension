@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { parseCodeBlocks } from "./chat/codeBlocks";
 
 /**
  * What ran in the editor's terminals, and what it printed.
@@ -118,6 +119,32 @@ export class TerminalHistory implements vscode.Disposable {
     this.records.clear();
     this.running.clear();
   }
+}
+
+/**
+ * The prompt for the terminal's Explain and Fix: what to do, then the
+ * command as it ran -- its working directory, output and exit code --
+ * fenced so the output reads as output.
+ */
+export function terminalCommandPrompt(kind: "explain" | "fix", terminalName: string, record: CommandRecord): string {
+  const body = describeCommand(record);
+  const longestRun = Math.max(0, ...Array.from(body.matchAll(/`+/g), (m) => m[0].length));
+  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  const ask =
+    kind === "explain"
+      ? "Explain what this terminal command did and what its output means. If it failed, say why."
+      : "This terminal command did not do what was meant. Answer with the corrected command in one fenced code block, then say in a sentence or two what was wrong.";
+  return [ask, "", `From the terminal “${terminalName}”:`, "", `${fence}console`, body, fence, ""].join("\n");
+}
+
+/** The command a Fix answer proposes: its one fenced block, trimmed; null when it has none or several. */
+export function proposedCommand(answer: string): string | null {
+  const blocks = parseCodeBlocks(answer)
+    .map((block) => block.code.trim())
+    .filter(Boolean);
+  if (blocks.length !== 1) return null;
+  // A prompt the model echoed is not part of the command.
+  return (blocks[0] ?? "").replace(/^\$ /, "");
 }
 
 /** The text of a terminal's whole buffer, by select-all and copy; null when nothing came of it. */
