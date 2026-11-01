@@ -5,7 +5,7 @@
   "version": "0.3.0",
   "publisher": "matterwave",
   "private": false,
-  "license": "MIT",
+  "license": "Apache-2.0",
   "icon": "media/icon.png",
   "galleryBanner": {
     "color": "#0B0C0E",

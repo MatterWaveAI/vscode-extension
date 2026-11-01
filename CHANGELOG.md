@@ -44,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The default server (`matterwave.baseUrl`) is `https://app.matterwave.ai`, the public deployment's address.
+- The extension is licensed under Apache-2.0 instead of MIT; the `.vsix` ships `LICENSE` and `NOTICE`.
 
 [Unreleased]: https://github.com/MatterWaveAI/vscode-extension/compare/v0.3.0...HEAD
 

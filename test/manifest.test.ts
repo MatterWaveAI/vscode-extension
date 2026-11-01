@@ -32,7 +32,7 @@ describe("the extension manifest", () => {
     expect(manifest.homepage).toMatch(/^https:\/\//);
     expect(manifest.bugs.url).toMatch(/^https:\/\/.*\/issues$/);
     expect(manifest.repository.url).toMatch(/^https:\/\//);
-    expect(manifest.license).toBe("MIT");
+    expect(manifest.license).toBe("Apache-2.0");
   });
 
   it("defaults the server setting to the public deployment the code assumes", () => {
@@ -152,9 +152,11 @@ describe("the extension manifest", () => {
     expect(readFileSync(root(".github/workflows/ci.yml"), "utf8")).toContain("sh scripts/check-ticket-ids.sh");
   });
 
-  it("ships the licence and the changelog in the .vsix", () => {
+  it("ships the licence, its notice and the changelog in the .vsix", () => {
     const ignore = readFileSync(root(".vscodeignore"), "utf8").split(/\r?\n/);
     expect(ignore).toContain("!LICENSE");
+    expect(ignore).toContain("!NOTICE");
+    expect(readFileSync(root("LICENSE"), "utf8")).toMatch(/Apache License\s+Version 2\.0, January 2004/);
     expect(ignore).toContain("!CHANGELOG.md");
   });
 });

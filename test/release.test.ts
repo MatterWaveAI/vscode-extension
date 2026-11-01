@@ -56,7 +56,7 @@ describe("the SBOM script", () => {
       type: "application",
       name: `${pkg.publisher}.${pkg.name}`,
       version: pkg.version,
-      licenses: [{ license: { id: "MIT" } }],
+      licenses: [{ license: { id: "Apache-2.0" } }],
     });
     const sdk = bom.components.find((c: { name: string }) => c.name === "@matterwave/sdk");
     expect(sdk).toMatchObject({ purl: expect.stringMatching(/^pkg:npm\/%40matterwave\/sdk@\d+\.\d+\.\d+$/) });

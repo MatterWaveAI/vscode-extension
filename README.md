@@ -155,7 +155,12 @@ suites:
 `pnpm run icon` regenerates `media/icon.png` from the activity-bar glyph. `pre-commit install`
 turns on the gitleaks hook CI also runs.
 
-The MatterWave SDK is vendored at `src/lib/matterwaveClient.ts` (trimmed from
-[MatterWaveAI/typescript-sdk](https://github.com/MatterWaveAI/typescript-sdk), MIT): the package is
-not published to npm, so the extension carries the client it needs. Without a connection the
-composer is disabled and the draft is kept; **Reconnect** in the view tries the API again.
+The MatterWave SDK is vendored at `src/lib/matterwaveClient.ts` (trimmed from version 0.1.0 of
+[MatterWaveAI/typescript-sdk](https://github.com/MatterWaveAI/typescript-sdk), released under MIT):
+the package is not published to npm, so the extension carries the client it needs. Without a
+connection the composer is disabled and the draft is kept; **Reconnect** in the view tries the API
+again.
+
+## Licence
+
+Apache License 2.0: see [LICENSE](LICENSE) and [NOTICE](NOTICE).
