@@ -62,6 +62,20 @@ describe("activation in a real editor", function () {
   });
 });
 
+// A code-action request can come back Canceled while the editor is still
+// settling (seen on the Linux runner); ask again rather than fail on it.
+async function codeActions(uri: vscode.Uri, range: vscode.Range): Promise<vscode.CodeAction[]> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await vscode.commands.executeCommand<vscode.CodeAction[]>("vscode.executeCodeActionProvider", uri, range);
+    } catch (error) {
+      const canceled = error instanceof Error && (error.name === "Canceled" || error.message === "Canceled");
+      if (!canceled || attempt === 5) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
+    }
+  }
+}
+
 describe("the lightbulb in a real editor", function () {
   it("offers a MatterWave Fix for a reported problem, and Explain, Tests and Docs for a selection", async function () {
     await vscode.commands.executeCommand("matterwave.showLog");
@@ -71,14 +85,14 @@ describe("the lightbulb in a real editor", function () {
     try {
       const range = new vscode.Range(0, 7, 0, 12);
       problems.set(uri, [new vscode.Diagnostic(range, "Unexpected const.", vscode.DiagnosticSeverity.Error)]);
-      const atProblem = await vscode.commands.executeCommand<vscode.CodeAction[]>("vscode.executeCodeActionProvider", uri, range);
+      const atProblem = await codeActions(uri, range);
       const fix = atProblem.find((a) => a.title === "Fix with MatterWave: Unexpected const.");
       assert.ok(fix, `offered: ${atProblem.map((a) => a.title).join(", ")}`);
       assert.equal(fix.command?.command, "matterwave.fixProblem");
 
       const selection = new vscode.Range(0, 0, 0, 20);
       problems.clear();
-      const titles = (await vscode.commands.executeCommand<vscode.CodeAction[]>("vscode.executeCodeActionProvider", uri, selection)).map((a) => a.title);
+      const titles = (await codeActions(uri, selection)).map((a) => a.title);
       for (const title of ["Explain with MatterWave", "Generate Tests with MatterWave", "Add Docs with MatterWave"]) {
         assert.ok(titles.includes(title), `${title} in ${titles.join(", ")}`);
       }
