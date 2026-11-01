@@ -119,7 +119,7 @@ details { border-left: 2px solid var(--vscode-panel-border); padding-left: 6px; 
 details summary { cursor: pointer; opacity: .8; }
 details pre { white-space: pre-wrap; }
 .notice, .error { margin: 6px 8px; padding: 6px 8px; border-radius: 4px; }
-.notice { background: var(--vscode-inputValidation-infoBackground); border: 1px solid var(--vscode-inputValidation-infoBorder); }
+.notice { background: var(--vscode-inputValidation-infoBackground); border: 1px solid var(--vscode-inputValidation-infoBorder); white-space: pre-line; }
 .error { background: var(--vscode-inputValidation-errorBackground); border: 1px solid var(--vscode-inputValidation-errorBorder); }
 .error .title { font-weight: 600; }
 .cut { margin-top: 4px; font-size: 90%; display: flex; gap: 6px; align-items: center; opacity: .9; }

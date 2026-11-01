@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Agent mode**: an Agent toggle in the chat view runs the coding agent over `/v1/chat/completions` with the shared tool contract (`read_file`, `list_dir`, `glob`, `grep`, `edit`, `write_file`, `run_shell`) in the extension host, confined to the workspace root -- `..`, absolute paths elsewhere, links out of the root and the deny list (`.env*`, `*.pem`, `id_*`, `.git/`, `.matterwaveignore`) are refused before anything happens, and searches skip what `.gitignore` ignores. The root is the workspace folder (pick one when several are open).
+- **Approval modes**: `plan` (reads only), `ask` (the default: every change and command approved), `auto-edit` (changes applied, commands asked) and `yolo` (per session, after a confirm, never saved). The mode chip and the status bar always show it; Shift+Tab, the chip and `/approval-mode` change it.
+- **Native diff review**: in `ask` every write opens VS Code's diff on an editable virtual document. Accept writes what the right side holds through a `WorkspaceEdit` (so Ctrl+Z undoes it), Reject leaves the file byte-identical, and the model is told either way, including when you edited its proposal.
+- **Commands and Stop**: `run_shell` runs as a child process in the root with the contract's time limit and output cap, its output streaming into the view. Stop ends the stream, a waiting approval and the command's whole process tree (`taskkill /T` on Windows, the process group elsewhere).
+- **Run limits**: a step cap and a per-run token cap end a looping run with a message naming the setting; a 402 or a spent budget (`insufficient_quota`) ends it with the chat's budget copy. Agent mode is greyed out with its reason in an untrusted workspace, for a model with `supports_tools: false`, or when `/api/me` says the org turned `local_agent_tools` off (a missing field reads as allowed).
+- **Context**: `MATTERWAVE.md`, `AGENTS.md`, a personal `MATTERWAVE.local.md` and `~/.matterwave/MATTERWAVE.md`, loaded only in a trusted folder (with a notice otherwise), plus the account's custom instructions; `@path` mentions; the active file, selection and recent files, size-capped and never from a denied path.
+- **Checkpoints and `/restore`**: every applied agent write is a checkpoint, and restoring one puts back every file it and the later ones changed, after one confirm, without touching the project's git.
+- **Slash commands**: `/help`, `/approval-mode`, `/context`, `/restore`, `/init` (the agent drafts `MATTERWAVE.md`) and `/resume` (an earlier run with its tool rounds) join `/model`, `/compact`, `/clear`, `/share` and `/export`; custom commands are Markdown files in `~/.matterwave/commands` or `.matterwave/commands`.
+- **Agent compaction**: old tool output is folded first, then older steps are summarised (the conversation's compaction when the run is stored, a `/v1` call otherwise); `/compact` does it on demand.
+- **MCP client**: stdio and HTTP servers from `matterwave.agent.mcpServers`, each with a tool allow-list and optional trust, plus MatterWave's own `/mcp` signed in as the editor; their tools go through the same approvals.
+- **Todo list, subagents, web fetch**: `todo_write` shows the run's plan in the view; subagents defined in `.matterwave/agents/*.md` run as nested loops with their own tool allow-list under the run's limits; `web_fetch` asks first outside yolo.
+- **Usage view**: this session's agent runs (steps, tool calls, tokens), the period's allowance and your spend from `/api/budget`.
+- The chat stream's `compacting` frame: the view says the server is summarising earlier turns while the first token waits.
+
+### Changed
+
+- The SDK's agent module (`@matterwave/sdk` `src/agent`, contract v1.0.0) is vendored byte for byte into `src/lib/sdk/agent` with a drift check (`pnpm sdk:check`, `test/sdkVendor.test.ts`).
+- `pnpm run test:e2e` always runs the new agent suite (a scripted `/v1`, no deployment needed); the deployment suite still skips without its environment. CI runs the agent tool tests on Linux, Windows and macOS, and the agent e2e suite.
+
 ## [0.3.0] - 2026-10-31
 
 ### Added

@@ -818,9 +818,13 @@ export class ChatController {
 
   // --- agent mode ----------------------------------------------------------------
 
-  /** Agent mode is on: the composer's text goes to the agent, not the chat. */
+  /**
+   * Agent mode is on and can run: the composer's text goes to the agent.
+   * Switched on but unavailable (an untrusted folder, a model without tools),
+   * the composer chats, and the toggle says why it is greyed out.
+   */
   private agentOn(): boolean {
-    return Boolean(this.deps.agent?.enabled);
+    return Boolean(this.deps.agent?.enabled) && this.agentAvailability().available;
   }
 
   private agentAvailability(): { available: boolean; reason: string | null } {
@@ -1613,7 +1617,7 @@ export class ChatController {
       meterPercent: meterPercent(state.meter),
       unreadNotifications: state.unreadNotifications,
       usage: state.usage,
-      agentMode: state.agent?.enabled ? state.agent.mode : null,
+      agentMode: state.agent?.enabled && state.agent.available ? state.agent.mode : null,
     });
   }
 }

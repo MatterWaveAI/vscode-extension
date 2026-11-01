@@ -189,7 +189,7 @@ input.addEventListener("keydown", (event) => {
     return;
   }
   // Shift+Tab cycles the approval mode while the agent is on; otherwise it moves focus as ever.
-  if (event.key === "Tab" && event.shiftKey && state?.agent?.enabled) {
+  if (event.key === "Tab" && event.shiftKey && state?.agent?.enabled && state.agent.available) {
     event.preventDefault();
     send({ type: "agentCycleMode" });
   }
@@ -260,7 +260,7 @@ function render(): void {
   // Offline, the composer closes but the textarea is never replaced, so the
   // draft is there when the connection is.
   input.disabled = state.offline;
-  input.placeholder = state.offline ? OFFLINE_PLACEHOLDER : state.agent?.enabled ? AGENT_PLACEHOLDER : PLACEHOLDER;
+  input.placeholder = state.offline ? OFFLINE_PLACEHOLDER : state.agent?.enabled && state.agent.available ? AGENT_PLACEHOLDER : PLACEHOLDER;
   // The temporary toggle belongs to the not-yet-created chat: it is gone
   // once the first send has made a conversation, whatever kind it is.
   temporaryRow.hidden = Boolean(state.activeId) || state.temporary;
@@ -533,22 +533,23 @@ function renderAgent(s: ViewState): void {
   approvalCard.hidden = true;
   todoPanel.hidden = true;
   if (!agent) return;
-  agentBox.checked = agent.enabled && agent.available;
-  // Off and unavailable: greyed, with the reason beside it. On is always switchable off.
-  agentBox.disabled = !agent.available && !agent.enabled;
+  const on = agent.enabled && agent.available;
+  agentBox.checked = on;
+  // Unavailable: greyed, with the reason beside it; the composer chats meanwhile.
+  agentBox.disabled = !agent.available;
   agentLabel.title = agent.reason ?? "Let the model read, search and change files and run commands in the workspace";
   agentReason.textContent = agent.available ? "" : (agent.reason ?? "");
   agentReason.hidden = agent.available;
-  agentModeChip.hidden = !agent.enabled;
+  agentModeChip.hidden = !on;
   agentModeChip.textContent = agent.mode;
   agentModeChip.className = `mode-chip mode-${agent.mode}`;
   agentModeChip.title = `${agent.mode}: ${agent.modeSummary} — click or Shift+Tab to change`;
   agentModeChip.setAttribute("aria-label", `Approval mode ${agent.mode}`);
-  agentRoot.hidden = !agent.enabled || !agent.root;
+  agentRoot.hidden = !on || !agent.root;
   agentRoot.textContent = agent.root ? `in ${agent.root.name}` : "";
   agentRoot.title = agent.root ? `${agent.root.path}${agent.multiRoot ? " — click to pick another folder" : ""}` : "";
   agentRoot.disabled = !agent.multiRoot || agent.running;
-  if (!agent.enabled) return;
+  if (!on) return;
   renderAgentStatus(agent);
   renderApproval(agent.pending);
   renderTodos(agent);

@@ -29,3 +29,37 @@ jobs:
           name: vsix
           path: matterwave.vsix
           retention-days: 7
+
+  # The agent's tool host on each platform its shell, process-tree kill and
+  # path rules differ on: confinement, Stop ending `sleep 60` within 2 s,
+  # the caps, the approvals.
+  agent-tools:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec vitest run test/agent
+
+  # The agent suite in a real VS Code (downloaded into .vscode-test) against
+  # the scripted /v1 it serves itself; the deployment suite skips without its
+  # secrets.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: xvfb-run -a pnpm run test:e2e

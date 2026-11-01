@@ -1,5 +1,13 @@
-// The end-to-end test: the built extension inside a real VS Code, against a
-// real MatterWave deployment. This launcher does what the extension host
+// The end-to-end tests: the built extension inside a real VS Code. Two suites:
+//
+// - agent (always): the coding agent against a scripted fake /v1 that the
+//   suite serves from inside the extension host, in a scratch workspace
+//   folder this launcher creates -- the native diff, Accept, Reject, an
+//   edited proposal and undo, with no deployment and no credential.
+// - deployment: a real MatterWave deployment, skipped without its
+//   environment (below).
+//
+// For the deployment suite this launcher does what the extension host
 // cannot: it signs in as the standing e2e account the way the browser does,
 // approves a device login for the run as that account, hands the key it
 // minted to the suite in `./suite` (which runs inside the editor's extension
@@ -22,7 +30,8 @@
 // person signs it in, it works on every plan, and the session is the
 // browser's.
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
@@ -37,14 +46,13 @@ const baseUrl = (process.env.E2E_BASE_URL || "").replace(/\/+$/, "");
 const model = process.env.E2E_MODEL || "grt-nano";
 const caFile = process.env.E2E_CA_FILE ? path.resolve(process.env.E2E_CA_FILE) : "";
 
-if (!noAuth && (!email || !password)) {
-  console.log("vscode e2e: SKIPPED -- E2E_ADMIN_EMAIL / E2E_ADMIN_PASSWORD are not set.");
-  process.exit(0);
-}
-if (!baseUrl) {
-  console.log("vscode e2e: SKIPPED -- E2E_BASE_URL is not set.");
-  process.exit(0);
-}
+/** Why the deployment suite cannot run here, or null when it can. */
+const deploymentSkip =
+  !noAuth && (!email || !password)
+    ? "E2E_ADMIN_EMAIL / E2E_ADMIN_PASSWORD are not set"
+    : !baseUrl
+      ? "E2E_BASE_URL is not set"
+      : null;
 if (caFile && !existsSync(caFile)) {
   console.error(`vscode e2e: the CA file ${caFile} does not exist (E2E_CA_FILE).`);
   process.exit(1);
@@ -148,7 +156,7 @@ async function mintDeviceKey(jar, csrf) {
 async function buildSuite() {
   await esbuild.build({
     absWorkingDir: root,
-    entryPoints: ["e2e/suite/index.ts", "e2e/suite/chat.test.ts"],
+    entryPoints: ["e2e/suite/index.ts", "e2e/suite/chat.test.ts", "e2e/suite/agent.test.ts"],
     outdir: "dist/e2e",
     bundle: true,
     platform: "node",
@@ -162,8 +170,42 @@ async function buildSuite() {
   });
 }
 
+const LAUNCH_FLAGS = [
+  "--disable-extensions",
+  "--disable-workspace-trust",
+  "--skip-welcome",
+  "--skip-release-notes",
+  // On a Linux runner: the key goes into SecretStorage, and without a
+  // keyring the basic store is the one that works; under xvfb in a
+  // container there is no GPU and /dev/shm is small.
+  ...(process.platform === "linux" ? ["--password-store=basic", "--disable-gpu", "--disable-dev-shm-usage"] : []),
+];
+
+/** The agent suite: a scratch folder as the workspace, the fake /v1 inside the suite. */
+async function runAgentSuite() {
+  const workspace = mkdtempSync(path.join(tmpdir(), "mw-e2e-agent-"));
+  mkdirSync(path.join(workspace, "src"));
+  writeFileSync(path.join(workspace, "src", "greet.ts"), "");
+  try {
+    await runTests({
+      extensionDevelopmentPath: root,
+      extensionTestsPath: path.join(root, "dist", "e2e", "index.js"),
+      cachePath: path.join(root, ".vscode-test"),
+      launchArgs: [workspace, ...LAUNCH_FLAGS],
+      extensionTestsEnv: { ELECTRON_RUN_AS_NODE: undefined, E2E_SUITE: "agent", E2E_WORKSPACE: workspace },
+    });
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   await buildSuite();
+  await runAgentSuite();
+  if (deploymentSkip) {
+    console.log(`vscode e2e: deployment suite SKIPPED -- ${deploymentSkip}.`);
+    return;
+  }
   const jar = noAuth ? null : new CookieJar();
   const csrf = jar ? await signIn(jar) : null;
   const key = await mintDeviceKey(jar, csrf);
@@ -173,17 +215,9 @@ async function main() {
       extensionDevelopmentPath: root,
       extensionTestsPath: path.join(root, "dist", "e2e", "index.js"),
       cachePath: path.join(root, ".vscode-test"),
-      launchArgs: [
-        "--disable-extensions",
-        "--disable-workspace-trust",
-        "--skip-welcome",
-        "--skip-release-notes",
-        // On a Linux runner: the key goes into SecretStorage, and without a
-        // keyring the basic store is the one that works; under xvfb in a
-        // container there is no GPU and /dev/shm is small.
-        ...(process.platform === "linux" ? ["--password-store=basic", "--disable-gpu", "--disable-dev-shm-usage"] : []),
-      ],
+      launchArgs: LAUNCH_FLAGS,
       extensionTestsEnv: {
+        E2E_SUITE: "deployment",
         // Set in a terminal inside an editor; the editor under test must
         // start as an editor, not as a bare node.
         ELECTRON_RUN_AS_NODE: undefined,

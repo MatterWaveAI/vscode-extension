@@ -211,7 +211,12 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
     vscode.window.registerWebviewViewProvider(ChatViewProvider.viewId, view, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
-    tokens.onDidChange(() => void chat.refresh()),
+    tokens.onDidChange(() => {
+      // Another account: its instructions, and MatterWave's /mcp tools its key may use, are read afresh.
+      agent.resetAccount();
+      mcp.dispose();
+      void chat.refresh();
+    }),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("matterwave.baseUrl")) {
         chat.newChat();
