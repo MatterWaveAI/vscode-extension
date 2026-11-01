@@ -1,16 +1,17 @@
 /**
  * Vendored from the MatterWave TypeScript SDK (MatterWaveAI/typescript-sdk,
  * MIT, version 0.1.0) and trimmed to the surface this extension uses: the
- * request/retry core, `me()`, device login, and the conversation API with
- * its streaming frames. The v1 chat-completions surface, the native
- * org/keys/webhooks/library/shares clients and the environment-variable
- * fallbacks are left out.
+ * request/retry core, `me()`, device login, the conversation API with its
+ * streaming frames, and the reading half of `presets` (a composer offers the
+ * org's presets; it never writes them). The v1 chat-completions surface, the
+ * native org/keys/webhooks/library/shares/connections clients, the preset
+ * writes and the environment-variable fallbacks are left out.
  *
  * It is vendored, not depended on, because `@matterwave/sdk` is not
  * published to npm and this repository no longer sits beside the SDK's
  * source in the monorepo. If the package is published, this file and its
  * importers can move back to the dependency. Change both together:
- * upstream `src/{client,conversations,conversation-types,errors,frames,sse}.ts`.
+ * upstream `src/{client,conversations,conversation-types,connectors,connector-types,errors,frames,sse}.ts`.
  *
  * The extension's own client (`src/api/client.ts`) wraps this one; the
  * routes the SDK does not model (pin, archive, delete, share, feedback,
@@ -309,6 +310,61 @@ export interface CreateConversationParams {
    * its last message. Off, the key is omitted entirely.
    */
   temporary?: boolean;
+  /**
+   * One of the org's live presets (`presets.list()`), whose model,
+   * instructions and tools the conversation's turns answer with; null or
+   * left out is no preset.
+   */
+  preset_id?: string | null;
+}
+
+// --- presets (upstream connector-types.ts, trimmed) ---------------------------
+
+/**
+ * One of the org's agent presets: the model, instructions, tools and welcome
+ * message a conversation on it answers with. `tools` null is the platform's
+ * default set and an empty list none. `deleted_at` is set on a deleted one,
+ * which `presets.get` still answers for and the list never offers.
+ */
+export interface Preset {
+  id: string;
+  name: string;
+  description: string;
+  model: string;
+  instructions: string;
+  tools: string[] | null;
+  welcome_message: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+/** A tool a preset may name, with what it does. */
+export interface PresetTool {
+  name: string;
+  description: string;
+}
+
+/** The rules a preset is held to: how many the org may keep, and the longest name, description, instructions and welcome message. */
+export interface PresetLimits {
+  max_presets: number;
+  name_max_len: number;
+  description_max_len: number;
+  instructions_max_len: number;
+  welcome_max_len: number;
+}
+
+/**
+ * `GET /api/org/presets`: the org's live presets, the tools a preset may
+ * name, the limits, and `can_manage`, whether the caller may change them (an
+ * owner or admin).
+ */
+export interface PresetListing {
+  data: Preset[];
+  tools: PresetTool[];
+  limits: PresetLimits;
+  can_manage: boolean;
 }
 
 /**
@@ -901,6 +957,8 @@ export class MatterWave {
   readonly conversations: Conversations;
   /** Device login: a key for a person, approved in their browser. */
   readonly auth: Auth;
+  /** The org's agent presets, as any member reads them. */
+  readonly presets: Presets;
   private readonly apiKey: string | null;
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
@@ -917,6 +975,7 @@ export class MatterWave {
     this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
     this.conversations = new Conversations(this);
     this.auth = new Auth(this);
+    this.presets = new Presets(this);
   }
 
   /** `GET /api/me`: who the key (or device-login token) acts as. */
@@ -1252,8 +1311,13 @@ export class Conversations {
     return this.call("GET", `/api/conversations/search${query({ q, limit: params.limit })}`, undefined, options);
   }
 
-  /** `POST /api/conversations`. An untitled one is named from its first message. */
+  /**
+   * `POST /api/conversations`. An untitled one is named from its first
+   * message. `preset_id` puts it on one of the org's presets; null or left
+   * out is no preset.
+   */
   create(params: CreateConversationParams = {}, options: RequestOptions = {}): Promise<WithRequestId<Conversation>> {
+    if (params.preset_id === "") throw new MatterWaveConfigError("preset_id must be a preset's id, or null for no preset");
     return this.call("POST", "/api/conversations", defined({ ...params }), options);
   }
 
@@ -1440,5 +1504,37 @@ export class Auth {
   readonly device: DeviceAuth;
   constructor(client: MatterWave) {
     this.device = new DeviceAuth(client);
+  }
+}
+
+// --- presets (upstream connectors.ts, the reads) --------------------------------
+
+/**
+ * `/api/org/presets`: the org's agent presets. Any member reads them, an API
+ * key with `chat:read` included, which is what a picker needs.
+ */
+export class Presets {
+  constructor(private readonly client: MatterWave) {}
+
+  /** The live presets, the tools a preset may name, the limits, and whether the caller may change them (`can_manage`). */
+  list(options: RequestOptions = {}): Promise<WithRequestId<PresetListing>> {
+    return this.client.json<PresetListing>(
+      { method: "GET", path: "/api/org/presets", body: undefined, keyed: true, stream: false },
+      options,
+    );
+  }
+
+  /** One preset, a deleted one included (`deleted_at` says so). */
+  get(presetId: string, options: RequestOptions = {}): Promise<WithRequestId<Preset>> {
+    return this.client.json<Preset>(
+      {
+        method: "GET",
+        path: `/api/org/presets/${segment("presetId", presetId)}`,
+        body: undefined,
+        keyed: true,
+        stream: false,
+      },
+      options,
+    );
   }
 }
