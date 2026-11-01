@@ -104,6 +104,20 @@ export const window = {
     return Promise.resolve(document);
   },
   terminals: [] as unknown[],
+  /** Shell-integration and terminal events: a test fires them with `fire`. */
+  terminalListeners: { start: [], end: [], close: [] } as Record<"start" | "end" | "close", ((event: unknown) => void)[]>,
+  onDidStartTerminalShellExecution(listener: (event: unknown) => void) {
+    return listen(window.terminalListeners.start, listener);
+  },
+  onDidEndTerminalShellExecution(listener: (event: unknown) => void) {
+    return listen(window.terminalListeners.end, listener);
+  },
+  onDidCloseTerminal(listener: (event: unknown) => void) {
+    return listen(window.terminalListeners.close, listener);
+  },
+  fire(kind: "start" | "end" | "close", event: unknown): void {
+    for (const listener of [...window.terminalListeners[kind]]) listener(event);
+  },
   activeTextEditor: undefined as { document: { uri: Uri } } | undefined,
   /** What the folder pick answers: a folder's name, or undefined for Escape. */
   folderPickAnswer: undefined as string | undefined,
@@ -127,16 +141,42 @@ export const window = {
   },
 };
 
+function listen<T>(listeners: ((event: T) => void)[], listener: (event: T) => void): { dispose(): void } {
+  listeners.push(listener);
+  return {
+    dispose() {
+      const at = listeners.indexOf(listener);
+      if (at >= 0) listeners.splice(at, 1);
+    },
+  };
+}
+
+/** The editor's clipboard, in memory. */
+export const env = {
+  clipboard: {
+    text: "",
+    readText(): Promise<string> {
+      return Promise.resolve(env.clipboard.text);
+    },
+    writeText(value: string): Promise<void> {
+      env.clipboard.text = value;
+      return Promise.resolve();
+    },
+  },
+};
+
 export const commands = {
   executed: [] as string[],
   /** The arguments of each executeCommand, parallel to `executed`. */
   commandArgs: [] as unknown[][],
   /** Commands registered by `activate`, by id. */
   registered: new Map<string, (...args: unknown[]) => unknown>(),
-  executeCommand(id: string, ...rest: unknown[]): Promise<void> {
+  /** What a test makes a command do, by id. */
+  effects: new Map<string, (...args: unknown[]) => unknown>(),
+  async executeCommand(id: string, ...rest: unknown[]): Promise<unknown> {
     commands.executed.push(id);
     commands.commandArgs.push(rest);
-    return Promise.resolve();
+    return commands.effects.get(id)?.(...rest);
   },
   registerCommand(id: string, run: (...args: unknown[]) => unknown): { dispose(): void } {
     commands.registered.set(id, run);

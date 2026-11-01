@@ -4,6 +4,7 @@ import * as vscode from "vscode";
 import { applyToFile } from "../../src/apply";
 import { searchWorkspaceFiles } from "../../src/fileSearch";
 import { editorFolders, resolveNamedFile } from "../../src/targets";
+import { copyTerminalText, TerminalHistory, terminalText } from "../../src/terminalOutput";
 
 /**
  * The extension's edits inside a real editor, in the two-folder workspace
@@ -61,6 +62,65 @@ describe("finding a workspace file in a real editor", function () {
     assert.ok(underMany.every((uri) => uri.path.includes("/many/")));
     const shared = (await searchWorkspaceFiles("src/shared")).map((uri) => vscode.workspace.asRelativePath(uri, true));
     assert.deepEqual(shared.sort(), ["alpha/src/shared.ts", "beta/src/shared.ts"]);
+  });
+});
+
+async function waitFor<T>(what: string, check: () => T | undefined | null | false, ms = 30_000): Promise<T> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const value = check();
+    if (value) return value;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+describe("reading a terminal in a real editor", function () {
+  let history: TerminalHistory;
+  before(function () {
+    history = new TerminalHistory();
+  });
+  after(function () {
+    history.dispose();
+  });
+
+  it("keeps a command's output and exit code through shell integration", async function () {
+    const terminal = vscode.window.createTerminal({ name: "e2e shell" });
+    try {
+      terminal.show();
+      const integration = await waitFor("shell integration", () => terminal.shellIntegration, 45_000);
+      integration.executeCommand("echo mw-e2e-marker");
+      const record = await waitFor("the command to finish", () => {
+        const last = history.last(terminal);
+        return last?.done && last.output.includes("mw-e2e-marker") ? last : undefined;
+      });
+      assert.equal(record.exitCode, 0);
+      const text = await terminalText(history, terminal);
+      assert.match(text ?? "", /\$ echo mw-e2e-marker/);
+      assert.match(text ?? "", /\[exit code 0\]/);
+    } finally {
+      terminal.dispose();
+    }
+  });
+
+  it("copies the buffer of a terminal shell integration does not cover, and keeps the clipboard", async function () {
+    const write = new vscode.EventEmitter<string>();
+    const terminal = vscode.window.createTerminal({
+      name: "e2e plain",
+      pty: { onDidWrite: write.event, open: () => write.fire("plain-buffer-marker\r\n"), close: () => undefined },
+    });
+    try {
+      terminal.show();
+      await vscode.env.clipboard.writeText("what the person had copied");
+      // The pseudoterminal writes when it opens; give the renderer a moment to draw it.
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      const text = await copyTerminalText(terminal);
+      assert.match(text ?? "", /plain-buffer-marker/);
+      assert.equal(await vscode.env.clipboard.readText(), "what the person had copied");
+    } finally {
+      terminal.dispose();
+      write.dispose();
+    }
   });
 });
 

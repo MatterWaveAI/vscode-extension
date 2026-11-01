@@ -233,14 +233,53 @@ describe("@-mentions", () => {
     });
   });
 
-  it("sends nothing when the person backs out of a pick", async () => {
+  it("sends nothing, and creates no conversation, when the person backs out of a pick", async () => {
     const { controller, calls, webview } = await setup({}, { resolveMention: async () => null });
     await controller.refresh();
     await controller.send("Explain @file");
 
     expect(calls.some((c) => c.url === "/api/conversations/c_1/messages")).toBe(false);
+    expect(calls.some((c) => c.method === "POST" && c.url === "/api/conversations")).toBe(false);
+    expect(controller.activeConversationId()).toBeNull();
     expect(lastState(webview.posted).notice).toContain("the message was not sent");
     expect(lastState(webview.posted).transcript).toEqual([]);
+  });
+
+  it("resolves every mention before the conversation is created", async () => {
+    const order: string[] = [];
+    const { controller, calls } = await setup(
+      {},
+      {
+        resolveMention: async () => {
+          order.push(`pick after ${calls.filter((c) => c.method === "POST" && c.url === "/api/conversations").length} creates`);
+          return { filename: "x.txt", text: "x" };
+        },
+      },
+    );
+    await controller.refresh();
+    await controller.send("Explain @git");
+    expect(order).toEqual(["pick after 0 creates"]);
+    expect(calls.some((c) => c.url === "/api/conversations/c_1/messages")).toBe(true);
+  });
+
+  it("asks once per mention, so two @file mentions attach two files", async () => {
+    let n = 0;
+    const asked: string[] = [];
+    const { controller, calls } = await setup(
+      { "POST /api/attachments": () => json({ id: `att_${++n}`, filename: "x", content_type: "text/plain", size_bytes: 1 }, 201) },
+      {
+        resolveMention: async (mention) => {
+          const m = mention as { ordinal: number; of: number };
+          asked.push(`${m.ordinal}/${m.of}`);
+          return { filename: `f${m.ordinal}.ts`, text: `${m.ordinal}` };
+        },
+      },
+    );
+    await controller.refresh();
+    await controller.send("Compare @file with @file");
+    expect(asked).toEqual(["1/2", "2/2"]);
+    const send = calls.find((c) => c.url === "/api/conversations/c_1/messages");
+    expect(JSON.parse(String(send?.body)).attachment_ids).toEqual(["att_1", "att_2"]);
   });
 
   it("sends nothing when an upload fails, with the error banner", async () => {

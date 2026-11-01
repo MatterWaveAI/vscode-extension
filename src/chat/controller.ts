@@ -735,6 +735,15 @@ export class ChatController {
       const slash = parseSlashCommand(content);
       if (slash) return this.handleSlash(slash);
     }
+    // @-mentions resolve before anything is created, but only on a fresh
+    // send: a retry carries the attachment ids it uploaded the first time.
+    // Backing out of a pick then leaves no empty conversation behind.
+    let contexts: ResolvedContext[] = [];
+    if (attachmentIds.length === 0 && parseMentions(content).length > 0) {
+      const resolved = await this.resolveMentions(content);
+      if (resolved === null) return;
+      contexts = resolved;
+    }
     const id = await this.ensureConversation(temporary);
     if (!id) {
       // The composer has already let the text go; when the conversation
@@ -742,14 +751,12 @@ export class ChatController {
       if (this.error) this.failed = { content, attachmentIds, userMessageId: null, temporary };
       return;
     }
-    // @-mentions resolve and upload before the turn, but only on a fresh
-    // send: a retry carries the attachment ids it uploaded the first time.
-    // Prompt without a mention takes the exact path it always took.
+    // A prompt without a mention takes the exact path it always took.
     let mentionIds: string[] = [];
-    if (attachmentIds.length === 0 && parseMentions(content).length > 0) {
-      const resolved = await this.attachMentions(id, content);
-      if (resolved === null) return;
-      mentionIds = resolved;
+    if (contexts.length > 0) {
+      const uploaded = await this.uploadContexts(id, contexts);
+      if (uploaded === null) return;
+      mentionIds = uploaded;
     }
     return this.sendCore(content, [...attachmentIds, ...mentionIds], temporary, id);
   }
@@ -805,18 +812,16 @@ export class ChatController {
   }
 
   /**
-   * Upload every @-mention's context as an attachment, in the order the
-   * prompt names it. A mention the person backs out of -- or one that fails
-   * to upload -- sends nothing: the message was written expecting the
-   * context it names, and half a context is worse than none.
+   * Every @-mention's context, in the order the prompt names it, one pick
+   * per mention. A mention the person backs out of sends nothing: the
+   * message was written expecting the context it names, and half a context
+   * is worse than none.
    */
-  private async attachMentions(conversationId: string, content: string): Promise<string[] | null> {
-    const mentions = parseMentions(content);
-    if (mentions.length === 0) return [];
+  private async resolveMentions(content: string): Promise<ResolvedContext[] | null> {
     const resolve = this.deps.resolveMention;
     if (!resolve) return [];
-    const ids: string[] = [];
-    for (const mention of mentions) {
+    const parts: ResolvedContext[] = [];
+    for (const mention of parseMentions(content)) {
       let part: ResolvedContext | null;
       try {
         part = await resolve(mention);
@@ -829,6 +834,15 @@ export class ChatController {
         this.emit();
         return null;
       }
+      parts.push(part);
+    }
+    return parts;
+  }
+
+  /** Upload the resolved contexts into the conversation; one that fails sends nothing. */
+  private async uploadContexts(conversationId: string, parts: ResolvedContext[]): Promise<string[] | null> {
+    const ids: string[] = [];
+    for (const part of parts) {
       try {
         const saved = await this.deps.client.uploadAttachment(
           new Blob([part.text], { type: "text/plain" }),

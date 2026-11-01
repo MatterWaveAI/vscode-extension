@@ -24,7 +24,8 @@ import {
   mentionLabel,
   terminalContext,
 } from "./contextProviders";
-import type { Mention } from "./chat/mentions";
+import { mentionTitle, type Mention } from "./chat/mentions";
+import { TerminalHistory, terminalText } from "./terminalOutput";
 import { keyDetail } from "./keys";
 import { conversationToMarkdown, safeFilename } from "./chat/export";
 import type { ApiKeyListing, ImportRecord } from "./api/types";
@@ -101,6 +102,9 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
   const view = new ChatViewProvider(context.extensionUri);
   const prompts = new PromptLibrary(context.globalState);
   const checkpoints = new CheckpointStore(context.globalState);
+  // Listening from the start, so @terminal has the commands that ran since.
+  const terminals = new TerminalHistory();
+  context.subscriptions.push(terminals);
   const taps = new Set<(message: HostMessage) => void>();
 
   // The client reports request ids and reachability to the controller,
@@ -134,7 +138,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
     // Where a notification's link leads when it is not a conversation of
     // this deployment; only http(s) URLs the classifier accepted get here.
     openLink: (url) => void vscode.env.openExternal(vscode.Uri.parse(url)),
-    resolveMention: (mention) => resolveMention(mention),
+    resolveMention: (mention) => resolveMention(mention, terminals),
     prompts: { get: (name) => prompts.get(name) },
     applyCode: async ({ block }) => {
       await applyCodeBlockFlow(chat, checkpoints, block);
@@ -728,17 +732,18 @@ async function restoreCheckpoint(chat: ChatController, store: CheckpointStore): 
  * backing out -- the message names context it is not going to get, so the
  * controller sends nothing.
  */
-async function resolveMention(mention: Mention): Promise<{ filename: string; text: string } | null> {
+async function resolveMention(mention: Mention, history: TerminalHistory): Promise<{ filename: string; text: string } | null> {
+  const title = mentionTitle(mention);
   switch (mention.kind) {
     case "file": {
-      const picked = await pickWorkspaceFile(`@file — ${mentionLabel("file")}`);
+      const picked = await pickWorkspaceFile(`${title} — ${mentionLabel("file")}`);
       if (!picked) return null;
       const bytes = await vscode.workspace.fs.readFile(picked);
       return fileContext(relativePath(picked), new TextDecoder().decode(bytes));
     }
     case "folder": {
       const picked = await vscode.window.showOpenDialog({
-        title: "@folder — pick the folder whose tree is attached",
+        title: `${title} — pick the folder whose tree is attached`,
         canSelectFolders: true,
         canSelectFiles: false,
         canSelectMany: false,
@@ -758,18 +763,19 @@ async function resolveMention(mention: Mention): Promise<{ filename: string; tex
         return null;
       }
       const picked = await vscode.window.showQuickPick(
-        terminals.map((t) => ({ terminal: t, label: t.name })),
-        { title: "@terminal — pick the terminal whose output is attached", placeHolder: "Output since the terminal was opened" },
+        terminals.map((t) => {
+          const last = history.last(t);
+          return { terminal: t, label: t.name, description: last ? `last: ${last.command}` : undefined };
+        }),
+        { title: `${title} — pick the terminal whose output is attached`, placeHolder: "Its recent commands and their output" },
       );
       if (!picked) return null;
-      const buffer = readTerminalBuffer(picked.terminal);
-      if (buffer === null) {
-        void vscode.window.showWarningMessage(
-          `The output of “${picked.terminal.name}” could not be read. Run it again in a terminal with shell integration.`,
-        );
+      const text = await terminalText(history, picked.terminal);
+      if (text === null) {
+        void vscode.window.showWarningMessage(`“${picked.terminal.name}” has no output to attach yet.`);
         return null;
       }
-      return terminalContext(picked.terminal.name, buffer);
+      return terminalContext(picked.terminal.name, text);
     }
     case "git": {
       if (!vscode.workspace.workspaceFolders?.length) {
@@ -783,7 +789,7 @@ async function resolveMention(mention: Mention): Promise<{ filename: string; tex
           { range: "worktree" as const, label: "Working tree changes", detail: "git diff HEAD — staged and unstaged" },
           { range: "last" as const, label: "Last commit", detail: "git diff HEAD~1" },
         ],
-        { title: "@git — pick what is attached", placeHolder: "The diff the model is shown" },
+        { title: `${title} — pick what is attached`, placeHolder: "The diff the model is shown" },
       );
       if (!picked) return null;
       const diff = await runGit(root.uri.fsPath, picked.range === "worktree" ? ["diff", "HEAD"] : ["diff", "HEAD~1"]);
@@ -795,7 +801,7 @@ async function resolveMention(mention: Mention): Promise<{ filename: string; tex
     }
     case "docs": {
       const url = await vscode.window.showInputBox({
-        title: "@docs — fetch a page",
+        title: `${title} — fetch a page`,
         prompt: "An http(s) URL whose text is attached for this message.",
         ignoreFocusOut: true,
         validateInput: (value) => (/^https?:\/\/\S+$/.test(value.trim()) ? null : "An http(s) URL"),
@@ -831,17 +837,6 @@ async function readDirUnder(root: vscode.Uri, path: string): Promise<string[]> {
   const uri = path ? vscode.Uri.joinPath(root, ...path.split("/")) : root;
   const rows = await vscode.workspace.fs.readDirectory(uri);
   return rows.map(([name, type]) => (type & vscode.FileType.Directory ? `${name}/` : name));
-}
-
-/**
- * A terminal's buffer through the unofficial-but-ubiquitous `buffer`
- * property, the only read VS Code offers for output that arrived before the
- * mention was typed; null when the host exposes none (no shell
- * integration), which the flow above reports.
- */
-function readTerminalBuffer(terminal: vscode.Terminal): string | null {
-  const buffer = (terminal as unknown as { buffer?: { contents?: unknown } }).buffer;
-  return typeof buffer?.contents === "string" && buffer.contents.length > 0 ? buffer.contents : null;
 }
 
 /** One git invocation in the workspace root; null rather than a throw. */
