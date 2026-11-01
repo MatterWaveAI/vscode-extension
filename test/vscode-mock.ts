@@ -497,6 +497,39 @@ export class FakeQuickPick {
   }
 }
 
+export class CodeActionKind {
+  private constructor(readonly value: string) {}
+  static readonly Empty = new CodeActionKind("");
+  static readonly QuickFix = new CodeActionKind("quickfix");
+  static readonly Refactor = new CodeActionKind("refactor");
+  static readonly RefactorRewrite = new CodeActionKind("refactor.rewrite");
+  append(part: string): CodeActionKind {
+    return new CodeActionKind(this.value ? `${this.value}.${part}` : part);
+  }
+}
+
+export class CodeAction {
+  diagnostics?: unknown[];
+  command?: { command: string; title: string; arguments?: unknown[] };
+  constructor(
+    readonly title: string,
+    readonly kind?: CodeActionKind,
+  ) {}
+}
+
+/** Language features registered by `activate`, and the problems a test reports. */
+export const languages = {
+  codeActionProviders: [] as { selector: unknown; provider: unknown }[],
+  registerCodeActionsProvider(selector: unknown, provider: unknown): { dispose(): void } {
+    languages.codeActionProviders.push({ selector, provider });
+    return { dispose() {} };
+  },
+  diagnostics: new Map<string, unknown[]>(),
+  getDiagnostics(uri: Uri): unknown[] {
+    return languages.diagnostics.get(uri.toString()) ?? [];
+  },
+};
+
 /** An in-memory SecretStorage. */
 export class MemorySecrets {
   readonly values = new Map<string, string>();

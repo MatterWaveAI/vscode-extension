@@ -122,6 +122,26 @@
         "category": "MatterWave"
       },
       {
+        "command": "matterwave.fixProblem",
+        "title": "Fix Problem",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.explainCode",
+        "title": "Explain Code",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.generateTests",
+        "title": "Generate Tests",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.addDocs",
+        "title": "Add Docs",
+        "category": "MatterWave"
+      },
+      {
         "command": "matterwave.explainTerminalCommand",
         "title": "Explain Last Terminal Command",
         "category": "MatterWave"

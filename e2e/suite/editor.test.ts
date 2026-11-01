@@ -60,6 +60,32 @@ describe("activation in a real editor", function () {
   });
 });
 
+describe("the lightbulb in a real editor", function () {
+  it("offers a MatterWave Fix for a reported problem, and Explain, Tests and Docs for a selection", async function () {
+    await vscode.commands.executeCommand("matterwave.showLog");
+    const uri = vscode.Uri.joinPath(folder("alpha").uri, "src", "shared.ts");
+    await vscode.workspace.openTextDocument(uri);
+    const problems = vscode.languages.createDiagnosticCollection("e2e");
+    try {
+      const range = new vscode.Range(0, 7, 0, 12);
+      problems.set(uri, [new vscode.Diagnostic(range, "Unexpected const.", vscode.DiagnosticSeverity.Error)]);
+      const atProblem = await vscode.commands.executeCommand<vscode.CodeAction[]>("vscode.executeCodeActionProvider", uri, range);
+      const fix = atProblem.find((a) => a.title === "Fix with MatterWave: Unexpected const.");
+      assert.ok(fix, `offered: ${atProblem.map((a) => a.title).join(", ")}`);
+      assert.equal(fix.command?.command, "matterwave.fixProblem");
+
+      const selection = new vscode.Range(0, 0, 0, 20);
+      problems.clear();
+      const titles = (await vscode.commands.executeCommand<vscode.CodeAction[]>("vscode.executeCodeActionProvider", uri, selection)).map((a) => a.title);
+      for (const title of ["Explain with MatterWave", "Generate Tests with MatterWave", "Add Docs with MatterWave"]) {
+        assert.ok(titles.includes(title), `${title} in ${titles.join(", ")}`);
+      }
+    } finally {
+      problems.dispose();
+    }
+  });
+});
+
 describe("finding a workspace file in a real editor", function () {
   it("reaches a file past any fixed count by searching for it, whatever its case", async function () {
     const found = await searchWorkspaceFiles("FILE-0599");

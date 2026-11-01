@@ -14,6 +14,14 @@ import { applyToFile, registerApplyContentProvider } from "./apply";
 import { CheckpointStore, type Checkpoint } from "./checkpoints";
 import { snapshotFolder } from "./snapshotFiles";
 import { requireTrust } from "./trust";
+import {
+  CODE_ACTION_COMMANDS,
+  DOCS_INSTRUCTION,
+  EXPLAIN_QUESTION,
+  fixInstruction,
+  MatterWaveCodeActions,
+  TESTS_QUESTION,
+} from "./codeActions";
 import type { CodeBlock } from "./chat/codeBlocks";
 import { fitReplacement, inlineEditPrompt, replacementFromAnswer, selectedLines } from "./inlineEdit";
 import {
@@ -197,6 +205,21 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
     await signInWithApiKey(client, tokens);
   });
   command("matterwave.openChat", () => view.reveal());
+  context.subscriptions.push(
+    vscode.languages.registerCodeActionsProvider("*", new MatterWaveCodeActions(), {
+      providedCodeActionKinds: MatterWaveCodeActions.providedCodeActionKinds,
+    }),
+    vscode.commands.registerCommand(CODE_ACTION_COMMANDS.fix, (uri, range, instruction) =>
+      fixProblem(chat, checkpoints, uri, range, instruction),
+    ),
+    vscode.commands.registerCommand(CODE_ACTION_COMMANDS.explain, (uri, range) => askAboutCode(chat, view, EXPLAIN_QUESTION, uri, range)),
+    vscode.commands.registerCommand(CODE_ACTION_COMMANDS.tests, (uri, range) => askAboutCode(chat, view, TESTS_QUESTION, uri, range)),
+    vscode.commands.registerCommand(CODE_ACTION_COMMANDS.docs, async (uri, range) => {
+      if (!(await requireTrust("Add Docs"))) return;
+      const at = await codeAt(uri, range);
+      if (at) await editLines(chat, checkpoints, at.document, at.range, DOCS_INSTRUCTION, "Add docs");
+    }),
+  );
   command("matterwave.explainTerminalCommand", () => terminalCommand("explain", terminals, chat, view));
   command("matterwave.fixTerminalCommand", () => terminalCommand("fix", terminals, chat, view));
   command("matterwave.showLog", () => log.show(true));
@@ -444,6 +467,70 @@ async function askAboutFile(chat: ChatController, view: ChatViewProvider): Promi
 }
 
 /**
+ * The code a lightbulb action (or its command, run from the palette) is
+ * about: the document and range the action carried, else the active
+ * editor's selection. Null, with a word, when there is none.
+ */
+async function codeAt(uri: unknown, range: unknown): Promise<{ document: vscode.TextDocument; range: vscode.Range } | null> {
+  if (uri instanceof vscode.Uri && range instanceof vscode.Range) {
+    return { document: await vscode.workspace.openTextDocument(uri), range };
+  }
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.selection.isEmpty) {
+    void vscode.window.showInformationMessage("Select some code first.");
+    return null;
+  }
+  return { document: editor.document, range: editor.selection };
+}
+
+/** A question about the code at hand, asked in the chat with the code fenced beside it. */
+async function askAboutCode(chat: ChatController, view: ChatViewProvider, question: string, uri: unknown, range: unknown): Promise<void> {
+  const at = await codeAt(uri, range);
+  if (!at) return;
+  const content = selectionContent({
+    question,
+    code: at.document.getText(at.range),
+    languageId: at.document.languageId,
+    path: relativePath(at.document.uri),
+    startLine: at.range.start.line + 1,
+    endLine: at.range.end.line + 1,
+  });
+  if (!fitsContentCap(content)) {
+    void vscode.window.showWarningMessage(
+      `The code is too long to send inline (over ${MAX_CONTENT_CHARS.toLocaleString()} characters). Select less of it.`,
+    );
+    return;
+  }
+  await view.reveal();
+  await chat.sendText(content);
+}
+
+/**
+ * Fix a problem the editor reports: the action carries the problem's range
+ * and the instruction naming it; from the palette, the first problem the
+ * selection (or the cursor's line) touches.
+ */
+async function fixProblem(chat: ChatController, checkpoints: CheckpointStore, uri: unknown, range: unknown, instruction: unknown): Promise<void> {
+  if (!(await requireTrust("Fix with MatterWave"))) return;
+  if (uri instanceof vscode.Uri && range instanceof vscode.Range && typeof instruction === "string") {
+    await editLines(chat, checkpoints, await vscode.workspace.openTextDocument(uri), range, instruction, "Fix");
+    return;
+  }
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    void vscode.window.showInformationMessage("Open the file with the problem first.");
+    return;
+  }
+  const at = editor.selection.isEmpty ? editor.document.lineAt(editor.selection.active.line).range : editor.selection;
+  const problem = vscode.languages.getDiagnostics(editor.document.uri).find((d) => d.range.intersection(at) !== undefined);
+  if (!problem) {
+    void vscode.window.showInformationMessage("No problem is reported where the cursor is.");
+    return;
+  }
+  await editLines(chat, checkpoints, editor.document, problem.range, fixInstruction(problem), "Fix");
+}
+
+/**
  * Explain or fix the last command of the active terminal, as shell
  * integration saw it run: the command, its output and its exit code go to
  * the chat. A fix's proposed command can be put on the terminal's prompt,
@@ -626,8 +713,25 @@ async function inlineEdit(chat: ChatController, checkpoints: CheckpointStore): P
     ignoreFocusOut: true,
   });
   if (!instruction?.trim()) return;
+  await editLines(chat, checkpoints, document, selection, instruction, "Inline edit");
+}
+
+/**
+ * The lines `range` touches, rewritten as `instruction` asks: the model's
+ * one block of code, fitted back over those lines and applied through the
+ * reviewed diff, with a checkpoint named `label`. Inline edit and the
+ * lightbulb's Fix and Add Docs all end here.
+ */
+async function editLines(
+  chat: ChatController,
+  checkpoints: CheckpointStore,
+  document: vscode.TextDocument,
+  range: vscode.Range,
+  instruction: string,
+  label: string,
+): Promise<void> {
   // Whole lines, so the model sees (and answers with) each line's indentation.
-  const { first, last } = selectedLines(selection.start, selection.end);
+  const { first, last } = selectedLines(range.start, range.end);
   const lines = new vscode.Range(
     new vscode.Position(first, 0),
     last + 1 < document.lineCount ? new vscode.Position(last + 1, 0) : document.lineAt(last).range.end,
@@ -643,7 +747,7 @@ async function inlineEdit(chat: ChatController, checkpoints: CheckpointStore): P
     endLine: last + 1,
   });
   const answer = await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: "MatterWave is editing the selection…" },
+    { location: vscode.ProgressLocation.Notification, title: `MatterWave is editing ${path}…` },
     () => chat.ask(prompt),
   );
   const replacement = replacementFromAnswer(answer ?? "");
@@ -662,9 +766,9 @@ async function inlineEdit(chat: ChatController, checkpoints: CheckpointStore): P
   const start = document.offsetAt(lines.start);
   const end = document.offsetAt(lines.end);
   await applyToFile(document.uri, full.slice(0, start) + fitReplacement(original, replacement) + full.slice(end), {
-    title: `${path} — inline edit`,
+    title: `${path} — ${label.toLowerCase()}`,
     detail: "The selected lines become exactly the code on the right.",
-    onSnapshot: (snapshot) => recordCheckpoint(chat, checkpoints, document.uri, snapshot, "Inline edit"),
+    onSnapshot: (snapshot) => recordCheckpoint(chat, checkpoints, document.uri, snapshot, label),
   });
 }
 
