@@ -584,3 +584,32 @@ describe("fork, report, search, folders and announcements", () => {
     expect(JSON.parse(String(calls[4]?.body))).toEqual({ name: "Renamed" });
   });
 });
+
+describe("key options and the account routes", () => {
+  it("mints a key with its scopes and expiry, renames one, and reads the account's state", async () => {
+    const { api, calls } = client({
+      "POST /api/keys": () => json({ id: "k_1", name: "CI", prefix: "mw_abcdefgh", key: "mw_abcdefgh_example" }, 201),
+      "PATCH /api/keys/k_1": () => json({ id: "k_1", name: "CI runner" }),
+      "GET /api/me/enforcement": () => json({ state: "none" }),
+      "POST /api/me/export": () => json({ id: "e_1", status: "pending" }, 202),
+      "GET /api/me/export/e_1": () => json({ id: "e_1", status: "ready", download_url: "/api/me/export/e_1/download?expires=1&sig=x" }),
+      "GET /api/attachments/limits/me": () => json({ max_upload_bytes: 1, quota_bytes: 2, quota_used_bytes: 0, quota_remaining_bytes: 2 }),
+    });
+    await api.createKey("CI", { scopes: ["chat:read"], expiresInDays: 90 });
+    await api.createKey("Plain");
+    await api.renameKey("k_1", "CI runner");
+    expect(await api.enforcement()).toEqual({ state: "none" });
+    expect((await api.startExport()).id).toBe("e_1");
+    expect((await api.exportStatus("e_1")).download_url).toContain("/download");
+    expect((await api.attachmentLimits()).max_upload_bytes).toBe(1);
+    expect(JSON.parse(String(calls[0]?.body))).toEqual({ name: "CI", scopes: ["chat:read"], expires_in_days: 90 });
+    expect(JSON.parse(String(calls[1]?.body))).toEqual({ name: "Plain" });
+    expect(JSON.parse(String(calls[2]?.body))).toEqual({ name: "CI runner" });
+    expect(calls.map((c) => `${c.method} ${c.url}`).slice(3)).toEqual([
+      "GET /api/me/enforcement",
+      "POST /api/me/export",
+      "GET /api/me/export/e_1",
+      "GET /api/attachments/limits/me",
+    ]);
+  });
+});

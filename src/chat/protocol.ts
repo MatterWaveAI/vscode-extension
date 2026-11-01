@@ -92,6 +92,8 @@ export interface UsageView {
   state: "ok" | "warn" | "overage" | "exhausted";
   resetsAt: string;
   planName: string;
+  /** The person's own spending cap this period, in US dollars at list price; null when none applies. */
+  memberCap: { spentUsd: number; capUsd: number; exhausted: boolean } | null;
 }
 
 export interface ViewState {

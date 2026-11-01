@@ -13,15 +13,18 @@ import { ApiError, detailOf, parseRetryAfter } from "./errors";
 import type {
   Announcement,
   ApiKeyCreated,
+  AccountExport,
   ApiKeyListing,
   Attachment,
   BudgetStatus,
+  AttachmentLimits,
   ContextUsage,
   Conversation,
   ConversationDetail,
   ConversationInstructions,
   DeviceAuthorization,
   DevicePoll,
+  Enforcement,
   Entitlements,
   FeedbackReason,
   FeedbackRow,
@@ -190,9 +193,44 @@ export class MatterWaveClient {
     return this.json("GET", "/api/keys");
   }
 
-  /** Mint a key; `key` is in this answer and nowhere else, ever. */
-  createKey(name: string): Promise<ApiKeyCreated> {
-    return this.json("POST", "/api/keys", { name });
+  /**
+   * Mint a key; `key` is in this answer and nowhere else, ever. Scopes left
+   * out are the API's default (chat:read, chat:write); no expiry is a key
+   * that does not expire.
+   */
+  createKey(name: string, options: { scopes?: string[]; expiresInDays?: number } = {}): Promise<ApiKeyCreated> {
+    return this.json("POST", "/api/keys", {
+      name,
+      ...(options.scopes ? { scopes: options.scopes } : {}),
+      ...(options.expiresInDays ? { expires_in_days: options.expiresInDays } : {}),
+    });
+  }
+
+  /** A new name for a key; its secret, scopes and expiry stay as they are. */
+  renameKey(id: string, name: string): Promise<ApiKeyListing> {
+    return this.json("PATCH", `/api/keys/${encodeURIComponent(id)}`, { name });
+  }
+
+  // --- account ---------------------------------------------------------------
+
+  /** `GET /api/me/enforcement`: what moderation applies to the caller now; `state: "none"` for nearly everyone. */
+  enforcement(): Promise<Enforcement> {
+    return this.json("GET", "/api/me/enforcement");
+  }
+
+  /** `POST /api/me/export`: queue an export of everything this account has stored. */
+  startExport(): Promise<AccountExport> {
+    return this.json("POST", "/api/me/export", {});
+  }
+
+  /** Where an export stands; `download_url` (a path on the deployment) once it is ready. */
+  exportStatus(id: string): Promise<AccountExport> {
+    return this.json("GET", `/api/me/export/${encodeURIComponent(id)}`);
+  }
+
+  /** `GET /api/attachments/limits/me`: the largest upload, and what remains of the caller's storage. */
+  attachmentLimits(): Promise<AttachmentLimits> {
+    return this.json("GET", "/api/attachments/limits/me");
   }
 
   /** A new secret for the same key; the old one keeps working while `previous_valid_until` says. */

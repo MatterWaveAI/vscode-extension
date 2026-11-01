@@ -303,6 +303,34 @@ export interface ShareRow {
 
 // --- library ------------------------------------------------------------------
 
+/** What moderation applies to the caller, as `GET /api/me/enforcement` says it. */
+export interface Enforcement {
+  /** "none", or the rung that applies (e.g. "warned", "rate_limited"). */
+  state: string;
+  /** The reason written for the person. */
+  reason?: string | null;
+  since?: string | null;
+  /** When it ends; null for an action without an end. */
+  expires_at?: string | null;
+  /** The web app's page for an appeal, as a path. */
+  appeal_path?: string | null;
+}
+
+/** An account export job: its status, and a path to download it once ready. */
+export interface AccountExport {
+  id: string;
+  status: string;
+  download_url?: string | null;
+}
+
+/** `GET /api/attachments/limits/me`. */
+export interface AttachmentLimits {
+  max_upload_bytes: number;
+  quota_bytes: number;
+  quota_used_bytes: number;
+  quota_remaining_bytes: number;
+}
+
 /** One hit of `GET /api/search`: the conversation, the highlighted snippet, and the message that matched (null for a title). */
 export interface SearchHit extends Conversation {
   snippet: string;

@@ -286,7 +286,8 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
   command("matterwave.askAboutSelection", () => askAboutSelection(chat, view));
   command("matterwave.askAboutFile", () => askAboutFile(chat, view));
   command("matterwave.inlineEdit", () => inlineEdit(chat, checkpoints));
-  command("matterwave.pickModel", () => pickModel(chat));
+  command("matterwave.pickModel", () => pickModel(chat, client));
+  command("matterwave.account", () => showAccount(client));
   command("matterwave.compactNow", async () => {
     if (!chat.hasConversation()) {
       void vscode.window.showInformationMessage("Open a conversation to compact it.");
@@ -1447,7 +1448,8 @@ async function manageTags(client: MatterWaveClient, chat: ChatController): Promi
   }
 }
 
-async function pickModel(chat: ChatController): Promise<void> {  let models;
+async function pickModel(chat: ChatController, client: MatterWaveClient): Promise<void> {
+  let models;
   try {
     models = await chat.loadModels();
   } catch (error) {
@@ -1468,12 +1470,106 @@ async function pickModel(chat: ChatController): Promise<void> {  let models;
   }
   if (picked.row.kind === "model") {
     const plan = picked.row.model.upgrade_to;
-    void vscode.window.showInformationMessage(
+    const answer = await vscode.window.showInformationMessage(
       plan
         ? `${picked.row.model.label || picked.row.model.id} is not on your plan. ${plan} includes it.`
         : `${picked.row.model.label || picked.row.model.id} is not on your plan.`,
+      PLANS_ACTION,
     );
+    if (answer === PLANS_ACTION) openPlans(client.baseUrl);
   }
+}
+
+const PLANS_ACTION = "See Plans";
+
+/**
+ * The web app's billing pane, where an owner or admin changes the plan.
+ * Changing it is a browser session's job: checkout will not start for a
+ * key, which is what this editor holds.
+ */
+function openPlans(base: string): void {
+  void vscode.env.openExternal(vscode.Uri.parse(`${base}/settings/billing`));
+}
+
+/**
+ * The account at a glance -- the plan and allowance, the person's own cap,
+ * any moderation that applies -- with what can be done from here: export
+ * everything the account holds, or see the plans.
+ */
+async function showAccount(client: MatterWaveClient): Promise<void> {
+  const [usage, budget, enforcement] = await Promise.all([
+    client.usage().catch(() => null),
+    client.budget().catch(() => null),
+    client.enforcement().catch(() => null),
+  ]);
+  type Row = vscode.QuickPickItem & { action?: "export" | "plans" | "appeal" };
+  const rows: Row[] = [];
+  if (usage) {
+    rows.push({
+      label: `$(graph) ${usage.plan.name} plan`,
+      description: `${usage.used.toLocaleString()} of ${usage.included.toLocaleString()} tokens (${Math.round(usage.percent)}%)`,
+      detail: `Resets ${new Date(usage.resets_at).toLocaleDateString()}${usage.exhausted ? " · allowance used up" : usage.in_overage ? " · in overage" : ""}`,
+    });
+  }
+  if (budget && budget.member_cap !== null) {
+    rows.push({
+      label: "$(credit-card) Your spending cap",
+      description: `$${(budget.member_spent / 1_000_000).toFixed(2)} of $${(budget.member_cap / 1_000_000).toFixed(2)} this period`,
+      detail: budget.member_exhausted ? "Reached: your requests are refused until the period resets or the cap is raised." : undefined,
+    });
+  }
+  if (enforcement && enforcement.state !== "none") {
+    rows.push({
+      label: `$(warning) Account ${enforcement.state.replace(/_/g, " ")}`,
+      description: enforcement.expires_at ? `until ${new Date(enforcement.expires_at).toLocaleString()}` : undefined,
+      detail: enforcement.reason ?? undefined,
+      ...(enforcement.appeal_path ? { action: "appeal" as const } : {}),
+    });
+  } else if (enforcement) {
+    rows.push({ label: "$(pass) No moderation action applies to your account" });
+  }
+  rows.push(
+    { label: "", kind: vscode.QuickPickItemKind.Separator },
+    { label: "$(cloud-download) Export my data…", detail: "Everything this account has stored, as one JSON file", action: "export" },
+    { label: "$(link-external) See plans", detail: "Change the plan in the web app (owner or admin)", action: "plans" },
+  );
+  const picked = await vscode.window.showQuickPick(rows, { title: "MatterWave account", placeHolder: "Pick an action" });
+  if (picked?.action === "export") await exportAccount(client);
+  else if (picked?.action === "plans") openPlans(client.baseUrl);
+  else if (picked?.action === "appeal" && enforcement?.appeal_path) {
+    void vscode.env.openExternal(vscode.Uri.parse(`${client.baseUrl}${enforcement.appeal_path}`));
+  }
+}
+
+/**
+ * Queue an export of the account and wait for it, then open the download
+ * in the browser. The platform also says so in-app and by mail, so
+ * cancelling the wait loses nothing.
+ */
+async function exportAccount(client: MatterWaveClient): Promise<void> {
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: "Exporting your data…", cancellable: true },
+    async (_progress, cancel) => {
+      try {
+        let record = await client.startExport();
+        while (!record.download_url && record.status !== "failed" && !cancel.isCancellationRequested) {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          record = await client.exportStatus(record.id);
+        }
+        if (cancel.isCancellationRequested) {
+          void vscode.window.showInformationMessage("The export goes on: you will get a notification and an email when it is ready.");
+          return;
+        }
+        if (record.status === "failed" || !record.download_url) {
+          void vscode.window.showErrorMessage("The export failed. Try again later.");
+          return;
+        }
+        void vscode.env.openExternal(vscode.Uri.parse(`${client.baseUrl}${record.download_url}`));
+      } catch (error) {
+        void vscode.window.showErrorMessage(`The export could not be started: ${describe(error)}`);
+      }
+    },
+  );
 }
 
 function describe(error: unknown): string {
@@ -1655,12 +1751,26 @@ async function manageApiKeys(client: MatterWaveClient): Promise<void> {
     }
     const action = await vscode.window.showQuickPick(
       [
+        { id: "rename", label: "Rename", detail: "A new name; the secret, scopes and expiry stay as they are" },
         { id: "rotate", label: "Rotate", detail: "A new secret for the same key; the old one keeps working while the grace window is open" },
         { id: "revoke", label: "Revoke", detail: "The key stops working at once; this cannot be undone" },
       ],
       { title: `${picked.key.name || picked.key.prefix} (${picked.key.prefix})`, placeHolder: "What to do with this key" },
     );
-    if (action?.id === "rotate") {
+    if (action?.id === "rename") {
+      const renamed = await vscode.window.showInputBox({
+        title: `Rename “${picked.key.name || picked.key.prefix}”`,
+        value: picked.key.name,
+        ignoreFocusOut: true,
+        validateInput: (value) => (value.trim() ? null : "A key must have a name."),
+      });
+      if (renamed === undefined || renamed.trim() === picked.key.name) continue;
+      try {
+        await client.renameKey(picked.key.id, renamed.trim());
+      } catch (error) {
+        void vscode.window.showErrorMessage(`The key could not be renamed: ${describe(error)}`);
+      }
+    } else if (action?.id === "rotate") {
       const answer = await vscode.window.showInformationMessage(
         `Rotate “${picked.key.name || picked.key.prefix}”? A new secret replaces the old one after its grace window.`,
         { modal: true },
@@ -1691,6 +1801,16 @@ async function manageApiKeys(client: MatterWaveClient): Promise<void> {
   }
 }
 
+/** The scopes a key can carry, as the API knows them; the first two are its default. */
+const KEY_SCOPES = [
+  { label: "chat:read", detail: "Read conversations and models", byDefault: true },
+  { label: "chat:write", detail: "Start conversations and send messages", byDefault: true },
+  { label: "usage:read", detail: "Read the organisation's usage", byDefault: false },
+  { label: "keys:manage", detail: "Create, rotate and revoke keys", byDefault: false },
+  { label: "webhooks:manage", detail: "Manage the organisation's webhooks", byDefault: false },
+  { label: "conversations:import", detail: "Add conversations to the account (an edge box's pairing key)", byDefault: false },
+];
+
 async function createKeyFlow(client: MatterWaveClient): Promise<void> {
   const name = await vscode.window.showInputBox({
     title: "New MatterWave API key",
@@ -1700,8 +1820,28 @@ async function createKeyFlow(client: MatterWaveClient): Promise<void> {
     validateInput: (value) => (value.trim() ? null : "A key must have a name."),
   });
   if (name === undefined) return;
+  // What the key may do: the API's default (read and send chats) ticked, the
+  // rest offered; a key is never stronger than the account minting it.
+  const scopes = await vscode.window.showQuickPick(
+    KEY_SCOPES.map((scope) => ({ ...scope, picked: scope.byDefault })),
+    { title: `What may “${name.trim()}” do?`, placeHolder: "The key's scopes", canPickMany: true, ignoreFocusOut: true },
+  );
+  if (!scopes || scopes.length === 0) return;
+  const expiry = await vscode.window.showQuickPick(
+    [
+      { days: 30, label: "30 days" },
+      { days: 90, label: "90 days" },
+      { days: 365, label: "One year" },
+      { days: 0, label: "Never", detail: "The key works until it is revoked" },
+    ],
+    { title: `When does “${name.trim()}” expire?`, placeHolder: "Its lifetime", ignoreFocusOut: true },
+  );
+  if (!expiry) return;
   try {
-    const created = await client.createKey(name.trim());
+    const created = await client.createKey(name.trim(), {
+      scopes: scopes.map((s) => s.label),
+      ...(expiry.days ? { expiresInDays: expiry.days } : {}),
+    });
     await vscode.env.clipboard.writeText(created.key);
     await secretCopiedNotice(`The key “${created.name || created.prefix}” was copied to the clipboard.`);
   } catch (error) {

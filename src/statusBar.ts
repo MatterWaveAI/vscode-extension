@@ -38,7 +38,10 @@ function allowanceLine(usage: UsageView): string {
         : usage.state === "warn"
           ? "running low"
           : null;
-  return state ? `${balance} — ${state}` : balance;
+  const allowance = state ? `${balance} — ${state}` : balance;
+  const cap = usage.memberCap;
+  if (!cap) return allowance;
+  return `${allowance}\nYour cap: $${cap.spentUsd.toFixed(2)} of $${cap.capUsd.toFixed(2)}${cap.exhausted ? " — reached" : ""}`;
 }
 
 export class StatusBar implements vscode.Disposable {

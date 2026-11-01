@@ -225,6 +225,11 @@
         "category": "MatterWave"
       },
       {
+        "command": "matterwave.account",
+        "title": "Account",
+        "category": "MatterWave"
+      },
+      {
         "command": "matterwave.manageApiKeys",
         "title": "Manage API Keys",
         "category": "MatterWave"

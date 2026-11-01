@@ -183,7 +183,7 @@ describe("ask about file", () => {
     await controller.refresh();
     await controller.askAboutFile("Explain this file.", "export const a = 1;\n", "src/a.ts");
 
-    const upload = calls.find((c) => c.url.startsWith("/api/attachments"));
+    const upload = calls.find((c) => c.method === "POST" && c.url.startsWith("/api/attachments"));
     const file = (upload?.body as FormData).get("file") as File;
     expect(file.name).toBe("src/a.ts");
     expect(file.type).toBe("text/plain");
@@ -528,6 +528,46 @@ describe("conversation list paging", () => {
     await controller.refresh();
     expect(controller.snapshot().conversations.map((c) => c.id)).toEqual(["c_1"]);
     expect(controller.snapshot().moreConversations).toBe(true);
+  });
+});
+
+describe("budget and attachment limits", () => {
+  const BUDGET = {
+    period_start: "2026-10-01",
+    included_tokens: 5_000_000,
+    tokens_used: 4_000_000,
+    remaining_tokens: 1_000_000,
+    overage_enabled: false,
+    overage_cap_micros: 0,
+    overage_micros: 0,
+    member_default_cap_micros: null,
+    member_cap: 10_000_000,
+    member_spent: 3_200_000,
+    member_exhausted: false,
+  };
+
+  it("carries the person's own cap beside the allowance", async () => {
+    const { controller } = await setup({ "GET /api/budget": () => json(BUDGET) });
+    await controller.refresh();
+    expect(controller.snapshot().usage?.memberCap).toEqual({ spentUsd: 3.2, capUsd: 10, exhausted: false });
+  });
+
+  it("sends nothing larger than the deployment takes, and says so before uploading", async () => {
+    const limits = { max_upload_bytes: 10, quota_bytes: 1_000_000, quota_used_bytes: 0, quota_remaining_bytes: 1_000_000 };
+    const { controller, calls, webview } = await setup({ "GET /api/attachments/limits/me": () => json(limits) });
+    await controller.refresh();
+    await controller.askAboutFile("Explain.", "far more than ten bytes of text", "src/big.ts");
+    expect(calls.some((c) => c.method === "POST" && c.url.startsWith("/api/attachments"))).toBe(false);
+    expect(calls.some((c) => c.method === "POST" && c.url === "/api/conversations")).toBe(false);
+    expect(lastState(webview.posted).notice).toBe("src/big.ts was not sent. That is 1 KB; this deployment takes at most 1 KB per upload.");
+  });
+
+  it("names what is left of the person's storage when that is what is short", async () => {
+    const limits = { max_upload_bytes: 10 * 1024 * 1024, quota_bytes: 100 * 1024 * 1024, quota_used_bytes: 100 * 1024 * 1024 - 5, quota_remaining_bytes: 5 };
+    const { controller, webview } = await setup({ "GET /api/attachments/limits/me": () => json(limits) });
+    await controller.refresh();
+    await controller.askAboutFile("Explain.", "more than five bytes", "a.ts");
+    expect(lastState(webview.posted).notice).toContain("of your 100 MB attachment storage is left");
   });
 });
 
@@ -1498,6 +1538,7 @@ describe("notifications and usage", () => {
       state: "warn",
       resetsAt: USAGE.resets_at,
       planName: "Team",
+      memberCap: null,
     });
     // The status bar learns both, for its badge and its tooltip line.
     expect(statuses.at(-1)).toMatchObject({ unreadNotifications: 1, usage: state.usage });

@@ -615,7 +615,7 @@ describe("the chat webview", () => {
     post({
       type: "state",
       state: state({
-        usage: { used: 1_200_000, included: 5_000_000, percent: 24, state: "overage", resetsAt: "2026-11-01T00:00:00+00:00", planName: "Team" },
+        usage: { used: 1_200_000, included: 5_000_000, percent: 24, state: "overage", resetsAt: "2026-11-01T00:00:00+00:00", planName: "Team", memberCap: null },
       }),
     });
     const line = document.querySelector(".meta .usage") as HTMLElement;
@@ -624,7 +624,7 @@ describe("the chat webview", () => {
     expect(line.title).toContain("1,200,000 of 5,000,000");
     expect(line.title).toContain("Team plan");
     // Plain sailing is unmarked; the other states say what they are.
-    post({ type: "state", state: state({ usage: { used: 10, included: 5_000, percent: 0.2, state: "ok", resetsAt: "2026-11-01T00:00:00+00:00", planName: "Team" } }) });
+    post({ type: "state", state: state({ usage: { used: 10, included: 5_000, percent: 0.2, state: "ok", resetsAt: "2026-11-01T00:00:00+00:00", planName: "Team", memberCap: null } }) });
     const plain = document.querySelector(".meta .usage") as HTMLElement;
     expect(plain.textContent).toBe("10 / 5k tokens · 0%");
     expect(plain.className).not.toContain("warn");

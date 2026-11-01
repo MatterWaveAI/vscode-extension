@@ -2,7 +2,7 @@ import type { ConversationFrame } from "../lib/matterwaveClient";
 import type { MatterWaveClient } from "../api/client";
 import { ApiError } from "../api/errors";
 import { isUntrustedCertificate } from "../api/transport";
-import type { Announcement, Conversation, ConversationInstructions, FeedbackReason, Library, Message, ModelInfo, NotificationRow, Part, UsageReport } from "../api/types";
+import type { Announcement, BudgetStatus, Conversation, ConversationInstructions, FeedbackReason, Library, Message, ModelInfo, NotificationRow, Part, UsageReport } from "../api/types";
 import { fileAttachment } from "../context";
 import { classifyNotificationLink } from "../links";
 import { parseMentions, type Mention } from "./mentions";
@@ -765,7 +765,9 @@ export class ChatController {
 
   private async loadUsage(): Promise<void> {
     try {
-      this.usage = usageViewOf(await this.deps.client.usage());
+      // The cap is a second read, and a deployment without it still shows the allowance.
+      const [report, budget] = await Promise.all([this.deps.client.usage(), this.deps.client.budget().catch(() => null)]);
+      this.usage = usageViewOf(report, budget);
     } catch {
       // A deployment without the route still chats; the line just stays off.
       this.usage = null;
@@ -939,8 +941,32 @@ export class ChatController {
     return parts;
   }
 
+  /**
+   * Why an upload of `bytes` would be refused, from the deployment's own
+   * limits -- the largest upload, and what remains of the person's storage
+   * -- or null when it fits. Read fresh each time; a deployment that does
+   * not say lets the upload go and its own refusal stand.
+   */
+  private async uploadRefusal(bytes: number): Promise<string | null> {
+    const limits = await this.deps.client.attachmentLimits().catch(() => null);
+    if (!limits) return null;
+    if (bytes > limits.max_upload_bytes) {
+      return `That is ${megabytes(bytes)}; this deployment takes at most ${megabytes(limits.max_upload_bytes)} per upload.`;
+    }
+    if (bytes > limits.quota_remaining_bytes) {
+      return `That is ${megabytes(bytes)}, and ${megabytes(limits.quota_remaining_bytes)} of your ${megabytes(limits.quota_bytes)} attachment storage is left. Delete attachments in the web app to make room.`;
+    }
+    return null;
+  }
+
   /** Upload the resolved contexts into the conversation; one that fails sends nothing. */
   private async uploadContexts(conversationId: string, parts: ResolvedContext[]): Promise<string[] | null> {
+    const refusal = await this.uploadRefusal(parts.reduce((sum, part) => sum + new Blob([part.text]).size, 0));
+    if (refusal) {
+      this.notice = `The context was not attached, so the message was not sent. ${refusal}`;
+      this.emit();
+      return null;
+    }
     const ids: string[] = [];
     for (const part of parts) {
       try {
@@ -1048,9 +1074,15 @@ export class ChatController {
    * bytes, so the shape the conversation records is the file's own.
    */
   async askAboutFile(question: string, text: string, path: string): Promise<void> {
+    const { blob, filename } = fileAttachment(text, path);
+    const tooLarge = await this.uploadRefusal(blob.size);
+    if (tooLarge) {
+      this.notice = `${path} was not sent. ${tooLarge}`;
+      this.emit();
+      return;
+    }
     const id = await this.ensureConversation();
     if (!id) return;
-    const { blob, filename } = fileAttachment(text, path);
     let attachmentId: string;
     try {
       const attachment = await this.deps.client.uploadAttachment(blob, filename, id);
@@ -1070,7 +1102,7 @@ export class ChatController {
   async sendAttachment(question: string, attachment: { blob: Blob; filename: string }): Promise<void> {
     // Before anything is sent: a model the API says cannot see images gets a
     // refusal that names what to pick instead, not a 422 after the upload.
-    const refusal = this.visionRefusal();
+    const refusal = this.visionRefusal() ?? (await this.uploadRefusal(attachment.blob.size));
     if (refusal) {
       this.notice = refusal;
       this.emit();
@@ -1514,7 +1546,7 @@ function messageText(m: Message): string {
 }
 
 /** The usage report as the line reads it: the three states folded into one. */
-function usageViewOf(report: UsageReport): UsageView {
+function usageViewOf(report: UsageReport, budget: BudgetStatus | null): UsageView {
   const state = report.exhausted ? "exhausted" : report.in_overage ? "overage" : report.warn ? "warn" : "ok";
   return {
     used: report.used,
@@ -1523,6 +1555,10 @@ function usageViewOf(report: UsageReport): UsageView {
     state,
     resetsAt: report.resets_at,
     planName: report.plan.name,
+    memberCap:
+      budget && budget.member_cap !== null
+        ? { spentUsd: budget.member_spent / 1_000_000, capUsd: budget.member_cap / 1_000_000, exhausted: budget.member_exhausted }
+        : null,
   };
 }
 
@@ -1537,6 +1573,13 @@ export function answerUsageOf(tokens: { prompt: number; completion: number; mode
   const costUsd =
     typeof input === "number" && typeof output === "number" ? (tokens.prompt * input + tokens.completion * output) / 1_000_000 : null;
   return { promptTokens: tokens.prompt, completionTokens: tokens.completion, costUsd };
+}
+
+/** A byte count as people read it: "512 KB", "4.2 MB". */
+function megabytes(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  const mb = bytes / (1024 * 1024);
+  return `${Number.isInteger(mb) ? mb : mb.toFixed(1)} MB`;
 }
 
 function errorView(kind: StreamErrorKind, requestId: string | null): ErrorView {

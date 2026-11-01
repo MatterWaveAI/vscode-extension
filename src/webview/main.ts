@@ -414,9 +414,16 @@ function usageLine(usage: UsageView): HTMLElement {
           : "";
   return el("span", {
     className: `usage${usage.state === "ok" ? "" : " warn"}`,
-    text: `${compactTokens(usage.used)} / ${compactTokens(usage.included)} tokens · ${pct}%${suffix}`,
+    text: `${compactTokens(usage.used)} / ${compactTokens(usage.included)} tokens · ${pct}%${suffix}${capLine(usage)}`,
     title: `${usage.used.toLocaleString()} of ${usage.included.toLocaleString()} tokens used on the ${usage.planName} plan; resets ${new Date(usage.resetsAt).toLocaleDateString()}`,
   });
+}
+
+/** The person's own cap, when one applies: what they spent of it, and whether it has stopped them. */
+function capLine(usage: UsageView): string {
+  const cap = usage.memberCap;
+  if (!cap) return "";
+  return ` · your cap $${cap.spentUsd.toFixed(2)} of $${cap.capUsd.toFixed(2)}${cap.exhausted ? " (reached)" : ""}`;
 }
 
 /** 1234567 as "1.2M", 12345 as "12.3k", the rest as itself: a line, not a column. */
