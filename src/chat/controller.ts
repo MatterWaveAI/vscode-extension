@@ -2,7 +2,7 @@ import { CONNECTOR_CONVERSATION_CODE, type ConversationFrame } from "../lib/matt
 import type { MatterWaveClient } from "../api/client";
 import { ApiError } from "../api/errors";
 import { isUntrustedCertificate } from "../api/transport";
-import type { Announcement, BudgetStatus, Conversation, ConversationInstructions, ConversationSource, FeedbackReason, Library, Message, ModelInfo, NotificationRow, Part, UsageReport } from "../api/types";
+import type { Announcement, BudgetStatus, Conversation, ConversationInstructions, ConversationSource, FeedbackReason, Library, Message, ModelInfo, NotificationRow, Part, Preset, UsageReport } from "../api/types";
 import { connectorNoticeText } from "./connectorSource";
 import { fileAttachment } from "../context";
 import { classifyNotificationLink } from "../links";
@@ -56,9 +56,9 @@ export interface ChatDeps {
   post: (message: HostMessage) => void;
   isSignedIn: () => Promise<boolean>;
   rememberedModel: { get(): string | null; set(id: string): void };
-  /** Editor-side actions the webview can ask for: the model QuickPick, sign-in, the clipboard, saving and sharing. */
+  /** Editor-side actions the webview can ask for: the model and preset QuickPicks, sign-in, the clipboard, saving and sharing. */
   runCommand: (
-    command: "pickModel" | "signIn" | "copyRequestId" | "exportConversation" | "shareConversation",
+    command: "pickModel" | "choosePreset" | "signIn" | "copyRequestId" | "exportConversation" | "shareConversation",
   ) => void;
   /** Open a URL in the browser: where a notification's link leads when it is not a conversation. */
   openLink?: (url: string) => void;
@@ -143,6 +143,9 @@ export class ChatController {
   private live: Message | null = null;
   private models: ModelInfo[] = [];
   private model: ModelInfo | null = null;
+  private presets: Preset[] = [];
+  private selectedPresetId: string | null = null;
+  private retiredPreset: Preset | null = null;
   private meter: Meter | null = null;
   private error: ErrorView | null = null;
   private notice: string | null = null;
@@ -256,6 +259,9 @@ export class ChatController {
         return this.send(CONTINUE_PROMPT);
       case "compact":
         return this.compact();
+      case "pickPreset":
+        this.deps.runCommand("choosePreset");
+        return;
       case "pickModel":
       case "signIn":
       case "copyRequestId":
@@ -282,6 +288,9 @@ export class ChatController {
       this.searchQuery = null;
       this.searchCursor = null;
       this.announcements = [];
+      this.presets = [];
+      this.selectedPresetId = null;
+      this.retiredPreset = null;
       this.activeId = null;
       this.path = [];
       this.tree = [];
@@ -317,7 +326,14 @@ export class ChatController {
       this.conversationsCursor = conversations.nextCursor;
       this.archivedCursor = archived.nextCursor;
       // These are best-effort: a deployment without the route still chats.
-      await Promise.all([this.loadNotifications(), this.loadUsage(), this.loadLibrary(), this.loadAnnouncements(), this.loadPromptNames()]);
+      await Promise.all([
+        this.loadPresets(),
+        this.loadNotifications(),
+        this.loadUsage(),
+        this.loadLibrary(),
+        this.loadAnnouncements(),
+        this.loadPromptNames(),
+      ]);
       if (this.activeId) await this.loadConversation(this.activeId);
     });
     this.emit();
@@ -338,6 +354,8 @@ export class ChatController {
   newChat(): void {
     this.detachTurn();
     this.activeId = null;
+    this.selectedPresetId = null;
+    this.retiredPreset = null;
     this.path = [];
     this.tree = [];
     this.live = null;
@@ -370,8 +388,35 @@ export class ChatController {
     if (detail.temporary !== undefined && detail.temporary !== null) this.temporary = detail.temporary === true;
     this.source = detail.source ?? null;
     this.instructions = instructionsViewOf(detail.instructions);
+    const pid = detail.preset?.id ?? detail.preset_id ?? null;
+    await this.resolveConversationPreset(pid, detail.preset?.name ?? null);
     await Promise.all([this.loadMeter(id), this.loadFeedback(id)]);
     this.prefetchImages(id);
+  }
+
+  private async resolveConversationPreset(pid: string | null, fallbackName: string | null): Promise<void> {
+    this.selectedPresetId = pid;
+    if (!pid || this.presets.some((p) => p.id === pid)) {
+      this.retiredPreset = null;
+      return;
+    }
+    try {
+      this.retiredPreset = await this.deps.client.preset(pid);
+    } catch {
+      this.retiredPreset = {
+        id: pid,
+        name: fallbackName || pid,
+        description: "",
+        model: this.model?.id ?? "",
+        instructions: "",
+        tools: null,
+        welcome_message: null,
+        created_by: "",
+        created_at: "",
+        updated_at: "",
+        deleted_at: "retired",
+      };
+    }
   }
 
   // --- image previews ---------------------------------------------------------
@@ -449,7 +494,7 @@ export class ChatController {
 
   private async loadMeter(id: string): Promise<void> {
     try {
-      const usage = await this.deps.client.context(id, this.model?.id);
+      const usage = await this.deps.client.context(id, this.effectiveModel()?.id);
       this.meter = { usedTokens: usage.used_tokens, contextWindow: usage.context_window, compactable: usage.compactable };
     } catch {
       // A deployment without the context route still chats; the meter just
@@ -947,7 +992,8 @@ export class ChatController {
       content,
     };
     this.path = [...this.path, optimistic];
-    const body = { content, ...(this.model ? { model: this.model.id } : {}), ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}) };
+    const activeModel = this.effectiveModel();
+    const body = { content, ...(activeModel ? { model: activeModel.id } : {}), ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}) };
     await this.runTurn(id, (signal) => this.deps.client.sendMessage(id, body, signal), { content, attachmentIds, userMessageId: null, temporary });
   }
 
@@ -1026,14 +1072,16 @@ export class ChatController {
   async edit(messageId: string, content: string): Promise<void> {
     if (this.abort || !this.activeId || this.refuseConnectorTurn()) return;
     const id = this.activeId;
-    const body = { content, ...(this.model ? { model: this.model.id } : {}) };
+    const activeModel = this.effectiveModel();
+    const body = { content, ...(activeModel ? { model: activeModel.id } : {}) };
     await this.runTurn(id, (signal) => this.deps.client.editMessage(id, messageId, body, signal), { content, attachmentIds: [], userMessageId: messageId, temporary: this.temporary });
   }
 
   async regenerate(messageId: string): Promise<void> {
     if (this.abort || !this.activeId || this.refuseConnectorTurn()) return;
     const id = this.activeId;
-    const body = this.model ? { model: this.model.id } : {};
+    const activeModel = this.effectiveModel();
+    const body = activeModel ? { model: activeModel.id } : {};
     const at = this.path.findIndex((m) => m.id === messageId);
     if (at >= 0) this.path = this.path.slice(0, at);
     await this.runTurn(id, (signal) => this.deps.client.regenerate(id, messageId, body, signal), null);
@@ -1166,7 +1214,7 @@ export class ChatController {
    * an unknown model pass: the server's own 422 stays the backstop.
    */
   private visionRefusal(): string | null {
-    const model = this.model;
+    const model = this.effectiveModel();
     if (!model || model.supports_vision !== false) return null;
     const capable = this.models
       .filter((m) => m.supports_vision === true)
@@ -1188,11 +1236,14 @@ export class ChatController {
       const conv = await this.deps.client.createConversation({
         ...(this.model ? { model: this.model.id } : {}),
         ...(temporary ? { temporary: true } : {}),
+        ...(this.selectedPresetId ? { preset_id: this.selectedPresetId } : {}),
       });
       this.temporary = temporary;
       // A temporary conversation appears in no list, so it never joins the sidebar.
       if (!temporary) this.conversations = [conv, ...this.conversations];
       this.activeId = conv.id;
+      const pid = conv.preset?.id ?? conv.preset_id ?? this.selectedPresetId;
+      await this.resolveConversationPreset(pid ?? null, conv.preset?.name ?? null);
       this.path = [];
       this.tree = [];
       this.instructions = null;
@@ -1306,7 +1357,7 @@ export class ChatController {
       }
       case "context": {
         const prompt = frame.prompt_tokens;
-        if (prompt !== null) this.turnTokens = { prompt, completion: frame.completion_tokens ?? 0, model: this.model };
+        if (prompt !== null) this.turnTokens = { prompt, completion: frame.completion_tokens ?? 0, model: this.effectiveModel() };
         this.meter = {
           usedTokens: prompt === null ? null : prompt + (frame.completion_tokens ?? 0),
           contextWindow: frame.context_window ?? this.meter?.contextWindow ?? null,
@@ -1399,7 +1450,7 @@ export class ChatController {
     if (!this.activeId || this.abort) return;
     const id = this.activeId;
     try {
-      await this.deps.client.compact(id, this.model?.id);
+      await this.deps.client.compact(id, this.effectiveModel()?.id);
       this.notice = "Earlier turns were summarised. Use Show originals on the divider to read them.";
       await this.loadConversation(id);
     } catch (error) {
@@ -1417,7 +1468,85 @@ export class ChatController {
   }
 
   currentModel(): ModelInfo | null {
+    return this.effectiveModel();
+  }
+
+  activePreset(): Preset | null {
+    const pid = this.selectedPresetId;
+    if (!pid) return null;
+    const live = this.presets.find((p) => p.id === pid);
+    if (live) return live;
+    if (this.retiredPreset && this.retiredPreset.id === pid) return this.retiredPreset;
+    return null;
+  }
+
+  effectiveModel(): ModelInfo | null {
+    const preset = this.activePreset();
+    if (preset?.model) {
+      return (
+        this.models.find((m) => m.id === preset.model) ?? {
+          id: preset.model,
+          label: preset.model,
+          included: true,
+          upgrade_to: null,
+          partner: false,
+          research_preview: false,
+          context_window: null,
+        }
+      );
+    }
     return this.model;
+  }
+
+  availablePresets(): readonly Preset[] {
+    return this.presets;
+  }
+
+  retiredConversationPreset(): Preset | null {
+    return this.retiredPreset && this.retiredPreset.id === this.selectedPresetId ? this.retiredPreset : null;
+  }
+
+  async loadPresets(): Promise<readonly Preset[]> {
+    try {
+      const list = await this.deps.client.presets();
+      this.presets = list.data;
+    } catch {
+      // A deployment without the route or an account outside an org has no presets.
+    }
+    return this.presets;
+  }
+
+  async setPreset(presetId: string | null): Promise<boolean> {
+    if (
+      presetId !== null &&
+      !this.presets.some((p) => p.id === presetId) &&
+      !(this.retiredPreset && this.retiredPreset.id === presetId && this.selectedPresetId === presetId)
+    ) {
+      return false;
+    }
+    const conversationId = this.activeId;
+    if (conversationId) {
+      try {
+        const updated = await this.deps.client.updateConversation(conversationId, { preset_id: presetId });
+        this.replaceRow(updated);
+        const pid = updated.preset?.id ?? updated.preset_id ?? null;
+        await this.resolveConversationPreset(pid, updated.preset?.name ?? null);
+        if (pid === null && updated.default_model) {
+          const own = this.models.find((m) => m.id === updated.default_model);
+          if (own) this.model = own;
+        }
+        await this.loadMeter(conversationId);
+      } catch (error) {
+        this.fail(error);
+        this.emit();
+        return false;
+      }
+    } else {
+      this.selectedPresetId = presetId;
+      if (presetId === null) this.retiredPreset = null;
+    }
+    this.emit();
+    return true;
   }
 
   async loadModels(): Promise<readonly ModelInfo[]> {
@@ -1429,6 +1558,7 @@ export class ChatController {
 
   /**
    * Only an included model is accepted; the picker never offers another, and this holds if it did.
+   * When a preset is in force on the conversation, its model is fixed and a change is refused.
    *
    * The pick is remembered twice: in the editor (the model every new
    * conversation starts with) and, when a conversation is open, on the
@@ -1438,6 +1568,13 @@ export class ChatController {
    * its model anyway.
    */
   setModel(model: ModelInfo): boolean {
+    const preset = this.activePreset();
+    if (preset) {
+      const fixedLabel = this.effectiveModel()?.label ?? preset.model;
+      this.notice = `Model is fixed to ${fixedLabel} by the ${preset.name} preset; choose No preset to change it.`;
+      this.emit();
+      return false;
+    }
     if (!model.included) return false;
     this.model = model;
     this.deps.rememberedModel.set(model.id);
@@ -1487,6 +1624,9 @@ export class ChatController {
   }
 
   snapshot(): ViewState {
+    const effective = this.effectiveModel();
+    const preset = this.activePreset();
+    const welcome = preset?.welcome_message?.trim() ? preset.welcome_message.trim() : null;
     return {
       signedIn: this.signedIn,
       offline: this.offline,
@@ -1502,7 +1642,9 @@ export class ChatController {
       activeId: this.activeId,
       transcript: transcriptOf(this.path, this.tree),
       live: this.live,
-      model: this.model ? { id: this.model.id, label: this.model.label || this.model.id } : null,
+      model: effective ? { id: effective.id, label: effective.label || effective.id } : null,
+      preset: preset ? { id: preset.id, name: preset.name, welcomeMessage: welcome } : null,
+      hasPresets: this.presets.length > 0 || preset !== null,
       meter: this.meter,
       streaming: this.abort !== null,
       error: this.error,

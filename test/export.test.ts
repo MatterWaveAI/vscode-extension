@@ -29,6 +29,8 @@ function view(transcript: Message[]): ViewState {
     transcript: transcript.map((m) => ({ message: m, siblingIndex: 1, siblingCount: 1 })),
     live: null,
     model: { id: "partner-x", label: "Partner X" },
+    preset: null,
+    hasPresets: false,
     meter: null,
     source: null,
     streaming: false,

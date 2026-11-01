@@ -116,6 +116,10 @@ export interface ViewState {
   /** The assistant message being streamed, assembled from frames. */
   live: Message | null;
   model: { id: string; label: string } | null;
+  /** The org preset in force on the conversation, or null when answering with the person's own picks. */
+  preset: { id: string; name: string; welcomeMessage: string | null } | null;
+  /** True when the org has live presets or the open conversation is on one, so the preset button is shown. */
+  hasPresets: boolean;
   meter: Meter | null;
   streaming: boolean;
   error: ErrorView | null;
@@ -219,6 +223,7 @@ export type WebviewMessage =
   | { type: "continue" }
   | { type: "compact" }
   | { type: "pickModel" }
+  | { type: "pickPreset" }
   | { type: "signIn" }
   | { type: "copyRequestId" };
 
@@ -226,7 +231,7 @@ const WEBVIEW_TYPES = new Set<WebviewMessage["type"]>([
   "ready", "reconnect", "newChat", "openConversation", "searchConversations", "renameConversation",
   "deleteConversation", "pinConversation", "archiveConversation", "exportConversation", "shareConversation",
   "send", "stop", "retry", "edit", "regenerate", "rateMessage", "setInstructions", "switchBranch", "continue",
-  "compact", "pickModel", "signIn", "copyRequestId", "refreshNotifications", "readNotification", "readAllNotifications",
+  "compact", "pickModel", "pickPreset", "signIn", "copyRequestId", "refreshNotifications", "readNotification", "readAllNotifications",
   "openNotification", "loadMoreNotifications", "setNotificationsUnreadOnly", "applyCodeBlock", "loadMoreConversations",
   "forkConversation", "reportMessage", "dismissAnnouncement", "copyCodeBlock", "insertCodeBlock", "openLink",
 ]);

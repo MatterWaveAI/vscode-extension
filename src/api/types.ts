@@ -15,10 +15,15 @@ import type { Conversation, ConversationMessage, ConversationWithMessages, Devic
 export type {
   Conversation,
   ConversationInstructions,
+  ConversationPreset,
   ConversationSource,
   DeviceCode as DeviceAuthorization,
   DeviceToken,
   Me,
+  Preset,
+  PresetLimits,
+  PresetListing,
+  PresetTool,
   UserInstructions,
 } from "../lib/matterwaveClient";
 

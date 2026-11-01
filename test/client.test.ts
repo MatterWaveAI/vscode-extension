@@ -612,4 +612,42 @@ describe("key options and the account routes", () => {
       "GET /api/attachments/limits/me",
     ]);
   });
+
+  it("lists and fetches presets, and sends preset_id on conversation create and update", async () => {
+    const preset = {
+      id: "preset_review",
+      name: "Code Review",
+      description: "Careful diff review.",
+      model: "grt-large",
+      system_prompt: "Check edge cases.",
+      temperature: 0.2,
+      tools: [],
+      knowledge_source_ids: [],
+      welcome_message: "Paste a diff.",
+      limits: {},
+      created_at: "2026-10-18T10:00:00+00:00",
+      updated_at: "2026-10-18T10:00:00+00:00",
+    };
+    const { api, calls } = client({
+      "GET /api/org/presets": () => json({ data: [preset] }),
+      "GET /api/org/presets/preset_old": () => json({ ...preset, id: "preset_old", name: "Legacy Preset" }),
+      "POST /api/conversations": () => json({ ...CONVERSATION, preset_id: "preset_review" }, 201),
+      "PATCH /api/conversations/c_1": () => json(CONVERSATION),
+    });
+    expect((await api.presets()).data).toEqual([preset]);
+    expect((await api.preset("preset_old")).name).toBe("Legacy Preset");
+    await api.createConversation({ preset_id: "preset_review" });
+    await api.updateConversation("c_1", { preset_id: "preset_review" });
+    await api.updateConversation("c_1", { preset_id: null });
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      "GET /api/org/presets",
+      "GET /api/org/presets/preset_old",
+      "POST /api/conversations",
+      "PATCH /api/conversations/c_1",
+      "PATCH /api/conversations/c_1",
+    ]);
+    expect(JSON.parse(String(calls[2]?.body))).toEqual({ preset_id: "preset_review" });
+    expect(JSON.parse(String(calls[3]?.body))).toEqual({ preset_id: "preset_review" });
+    expect(JSON.parse(String(calls[4]?.body))).toEqual({ preset_id: null });
+  });
 });

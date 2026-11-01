@@ -32,6 +32,8 @@ function state(over: Partial<ViewState>): ViewState {
     transcript: [],
     live: null,
     model: { id: "grt-small", label: "GRT Small" },
+    preset: null,
+    hasPresets: false,
     meter: { usedTokens: 16384, contextWindow: 32768, compactable: true },
     streaming: false,
     error: null,
@@ -894,5 +896,30 @@ describe("image previews", () => {
   it("shows who is acting in the meta line", () => {
     post({ type: "state", state: state({ identity: "Ada" }) });
     expect(document.querySelector(".meta .identity")?.textContent).toBe("Ada");
+  });
+
+  it("hides the preset button when the organisation has no presets and none is active, and shows it with welcome text when set", () => {
+    post({ type: "state", state: state({ preset: null, hasPresets: false, transcript: [] }) });
+    expect(document.querySelector(".bar button.preset")).toBeNull();
+    expect(document.querySelector(".transcript p")?.textContent).toContain("Ask about your code");
+
+    post({ type: "state", state: state({ preset: null, hasPresets: true, transcript: [] }) });
+    const noPresetBtn = document.querySelector<HTMLButtonElement>(".bar button.preset");
+    expect(noPresetBtn?.textContent).toBe("No preset");
+    noPresetBtn?.click();
+    expect(sent.at(-1)).toEqual({ type: "pickPreset" });
+
+    post({
+      type: "state",
+      state: state({
+        preset: { id: "preset_review", name: "Code Review", welcomeMessage: "Paste a diff or name a file to review." },
+        hasPresets: true,
+        transcript: [],
+      }),
+    });
+    const presetBtn = document.querySelector<HTMLButtonElement>(".bar button.preset");
+    expect(presetBtn?.textContent).toBe("Code Review");
+    expect(document.querySelector<HTMLButtonElement>(".bar button")?.title).toBe("Set by the Code Review preset");
+    expect(document.querySelector(".transcript p.welcome")?.textContent).toBe("Paste a diff or name a file to review.");
   });
 });

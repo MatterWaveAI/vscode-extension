@@ -376,6 +376,8 @@ export interface UpdateConversationParams {
   default_model?: string | null;
   /** The person's name for the conversation, 1-200 characters once trimmed. */
   title?: string;
+  /** The org preset the conversation answers with; `null` clears it back to no preset. */
+  preset_id?: string | null;
 }
 
 export interface SendMessageParams {
@@ -1333,9 +1335,11 @@ export class Conversations {
 
   /**
    * `PATCH /api/conversations/{id}`: rename the conversation, set the model
-   * its turns use when a turn names none, or both.
+   * its turns use when a turn names none, set or clear its org preset, or a
+   * combination.
    *
    * `default_model: null` clears the model back to the deployment's default;
+   * `preset_id: null` clears the preset back to the conversation's own picks;
    * a key left out is left alone on the server, which reads an empty body as
    * "nothing to update" -- refused here before the request is made.
    */
@@ -1344,11 +1348,15 @@ export class Conversations {
     params: UpdateConversationParams,
     options: RequestOptions = {},
   ): Promise<WithRequestId<Conversation>> {
+    if (params.preset_id === "") {
+      throw new MatterWaveConfigError("preset_id must be a preset's id, or null for no preset");
+    }
     const body: Record<string, unknown> = {};
     if (params.default_model !== undefined) body.default_model = params.default_model;
     if (params.title !== undefined) body.title = params.title;
+    if (params.preset_id !== undefined) body.preset_id = params.preset_id;
     if (Object.keys(body).length === 0) {
-      throw new MatterWaveConfigError("update needs a title or a default_model");
+      throw new MatterWaveConfigError("update needs a title, a default_model, or a preset_id");
     }
     return this.call("PATCH", conversationPath(conversationId), body, options);
   }

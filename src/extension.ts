@@ -292,6 +292,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
   command("matterwave.askAboutFile", () => askAboutFile(chat, view));
   command("matterwave.inlineEdit", () => inlineEdit(chat, checkpoints));
   command("matterwave.pickModel", () => pickModel(chat, client));
+  command("matterwave.choosePreset", () => choosePreset(chat));
   command("matterwave.account", () => showAccount(client));
   command("matterwave.compactNow", async () => {
     if (!chat.hasConversation()) {
@@ -1487,13 +1488,23 @@ async function pickModel(chat: ChatController, client: MatterWaveClient): Promis
     void vscode.window.showErrorMessage(`The model list could not be loaded: ${describe(error)}`);
     return;
   }
-  const items: PickItem[] = pickerRows(models, chat.currentModel()?.id ?? null).map((row) =>
+  const activePreset = chat.activePreset();
+  const current = chat.currentModel();
+  const fixedLabel = current?.label ?? activePreset?.model ?? "";
+  const items: PickItem[] = pickerRows(models, current?.id ?? null).map((row) =>
     row.kind === "heading"
       ? { label: row.label, kind: vscode.QuickPickItemKind.Separator, row }
       : { label: row.label, description: row.description, row },
   );
-  const picked = await vscode.window.showQuickPick(items, { title: "MatterWave model", matchOnDescription: true });
+  const picked = await vscode.window.showQuickPick(items, {
+    title: activePreset ? `Model fixed to ${fixedLabel} by the ${activePreset.name} preset` : "MatterWave model",
+    matchOnDescription: true,
+  });
   if (!picked) return;
+  if (activePreset) {
+    if (current) chat.setModel(current);
+    return;
+  }
   const model = resolvePick(picked.row);
   if (model) {
     chat.setModel(model);
@@ -1509,6 +1520,57 @@ async function pickModel(chat: ChatController, client: MatterWaveClient): Promis
     );
     if (answer === PLANS_ACTION) openPlans(client.baseUrl);
   }
+}
+
+interface PresetPickItem extends vscode.QuickPickItem {
+  presetId: string | null;
+}
+
+async function choosePreset(chat: ChatController): Promise<void> {
+  let presets;
+  try {
+    presets = await chat.loadPresets();
+  } catch (error) {
+    void vscode.window.showErrorMessage(`The presets could not be loaded: ${describe(error)}`);
+    return;
+  }
+  const active = chat.activePreset();
+  const retired = chat.retiredConversationPreset();
+  if (presets.length === 0 && !active) {
+    void vscode.window.showInformationMessage("Your organisation has no presets configured.");
+    return;
+  }
+  const items: PresetPickItem[] = [
+    {
+      label: "No preset",
+      description: active === null ? "current" : undefined,
+      detail: "Your own model and instructions.",
+      presetId: null,
+    },
+  ];
+  for (const preset of presets) {
+    items.push({
+      label: preset.name,
+      description: active?.id === preset.id ? `${preset.model} · current` : preset.model,
+      detail: preset.description || undefined,
+      presetId: preset.id,
+    });
+  }
+  if (retired && active?.id === retired.id && !presets.some((p) => p.id === retired.id)) {
+    items.push({
+      label: retired.name,
+      description: `${retired.model} · retired · current`,
+      detail: "No longer offered; this conversation keeps it.",
+      presetId: retired.id,
+    });
+  }
+  const picked = await vscode.window.showQuickPick(items, {
+    title: "MatterWave preset",
+    matchOnDescription: true,
+    matchOnDetail: true,
+  });
+  if (!picked) return;
+  await chat.setPreset(picked.presetId);
 }
 
 const PLANS_ACTION = "See Plans";
