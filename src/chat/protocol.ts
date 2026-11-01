@@ -86,6 +86,84 @@ export interface UsageView {
   planName: string;
 }
 
+/** An approval the agent is waiting on: a change under review in the diff editor, or a command. */
+export interface AgentPendingView {
+  id: string;
+  kind: "edit" | "shell" | "mcp" | "web" | "tool";
+  tool: string;
+  title: string;
+  /** Shown whole: the command, the URL, the arguments. */
+  detail: string;
+  /** For a change: the file, root-relative, and its unified diff. */
+  path: string | null;
+  diff: string | null;
+}
+
+export interface AgentTodoView {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
+export interface AgentMcpView {
+  name: string;
+  state: "connected" | "failed" | "starting";
+  tools: number;
+  hidden: number;
+  error: string | null;
+}
+
+/** One finished (or running) agent run, for the usage panel. */
+export interface AgentRunView {
+  startedAt: string;
+  prompt: string;
+  status: "running" | "done" | "stopped" | "step_cap" | "token_cap" | "error";
+  steps: number;
+  toolCalls: number;
+  promptTokens: number;
+  completionTokens: number;
+  tokens: number;
+  durationMs: number;
+}
+
+/** The period's allowance and the caller's spend, from `/api/budget`, in the units the panel shows. */
+export interface BudgetView {
+  includedTokens: number;
+  tokensUsed: number;
+  overageDollars: number;
+  overageCapDollars: number;
+  memberSpentDollars: number;
+  memberCapDollars: number | null;
+}
+
+/** The coding agent's part of the view: the toggle and why it is off, the mode, the root, the run. */
+export interface AgentView {
+  enabled: boolean;
+  available: boolean;
+  /** Why the toggle is greyed out, when it is. */
+  reason: string | null;
+  mode: "plan" | "ask" | "auto-edit" | "yolo";
+  /** The order Shift+Tab cycles: yolo is in it only once this session allowed it. */
+  modes: ("plan" | "ask" | "auto-edit" | "yolo")[];
+  modeSummary: string;
+  root: { name: string; path: string } | null;
+  multiRoot: boolean;
+  running: boolean;
+  /** What the run is doing now, in a few words. */
+  status: string | null;
+  /** The tail of a running command's output. */
+  output: string | null;
+  pending: AgentPendingView | null;
+  todos: AgentTodoView[];
+  contextFiles: string[];
+  contextNotice: string | null;
+  mcp: AgentMcpView[];
+  steps: number;
+  maxSteps: number;
+  tokens: number;
+  maxTokens: number;
+  runs: AgentRunView[];
+}
+
 export interface ViewState {
   signedIn: boolean;
   offline: boolean;
@@ -121,6 +199,10 @@ export interface ViewState {
   unreadNotifications: number;
   /** The org's allowance this period, or null when the API did not say. */
   usage: UsageView | null;
+  /** The coding agent, or null in an editor that has none wired (a test). */
+  agent: AgentView | null;
+  /** The caller's budget, read when the usage panel opens; null until then or when the API did not say. */
+  budget: BudgetView | null;
 }
 
 export type HostMessage =
@@ -129,7 +211,9 @@ export type HostMessage =
   | { type: "part"; index: number; part: Part }
   | { type: "delta"; index: number; field: "text"; text: string }
   /** An image attachment's bytes as a `data:` URI, fetched by the host for one transcript part. */
-  | { type: "imageData"; attachmentId: string; dataUri: string };
+  | { type: "imageData"; attachmentId: string; dataUri: string }
+  /** Open one of the view's panels (MatterWave: Show Usage). */
+  | { type: "showPanel"; panel: "usage" };
 
 export type WebviewMessage =
   | { type: "ready" }
@@ -172,7 +256,20 @@ export type WebviewMessage =
   | { type: "compact" }
   | { type: "pickModel" }
   | { type: "signIn" }
-  | { type: "copyRequestId" };
+  | { type: "copyRequestId" }
+  /** The agent toggle in the composer. */
+  | { type: "agentToggle"; on: boolean }
+  /** A mode picked from the chip; yolo still needs the host's confirm. */
+  | { type: "agentSetMode"; mode: string }
+  /** Shift+Tab in the composer. */
+  | { type: "agentCycleMode" }
+  /** Accept or reject the approval the agent waits on. */
+  | { type: "agentDecide"; id: string; accept: boolean }
+  /** Bring the change under review back into view. */
+  | { type: "agentShowDiff"; id: string }
+  | { type: "agentPickRoot" }
+  /** The usage panel opened: read the budget. */
+  | { type: "refreshUsage" };
 
 const WEBVIEW_TYPES = new Set<WebviewMessage["type"]>([
   "ready", "reconnect", "newChat", "openConversation", "searchConversations", "renameConversation",
@@ -180,7 +277,10 @@ const WEBVIEW_TYPES = new Set<WebviewMessage["type"]>([
   "send", "stop", "retry", "edit", "regenerate", "rateMessage", "setInstructions", "switchBranch", "continue",
   "compact", "pickModel", "signIn", "copyRequestId", "refreshNotifications", "readNotification", "readAllNotifications",
   "openNotification", "loadMoreNotifications", "setNotificationsUnreadOnly", "applyCodeBlock",
+  "agentToggle", "agentSetMode", "agentCycleMode", "agentDecide", "agentShowDiff", "agentPickRoot", "refreshUsage",
 ]);
+
+const AGENT_MODES = new Set(["plan", "ask", "auto-edit", "yolo"]);
 
 const FEEDBACK_REASON_SET = new Set<string>(FEEDBACK_REASONS);
 const MAX_COMMENT_CHARS = 2000;
@@ -268,6 +368,16 @@ export function parseWebviewMessage(raw: unknown): WebviewMessage | null {
       )
         ? (msg as WebviewMessage)
         : null;
+    case "agentToggle":
+      return typeof msg.on === "boolean" ? { type: "agentToggle", on: msg.on } : null;
+    case "agentSetMode":
+      return typeof msg.mode === "string" && AGENT_MODES.has(msg.mode) ? { type: "agentSetMode", mode: msg.mode } : null;
+    case "agentDecide":
+      return str("id") && (msg.id as string).length <= 100 && typeof msg.accept === "boolean"
+        ? { type: "agentDecide", id: msg.id as string, accept: msg.accept }
+        : null;
+    case "agentShowDiff":
+      return str("id") && (msg.id as string).length <= 100 ? { type: "agentShowDiff", id: msg.id as string } : null;
     default:
       return { type: msg.type } as WebviewMessage;
   }

@@ -100,6 +100,11 @@ export interface ModelInfo {
   partner: boolean;
   research_preview: boolean;
   supports_vision?: boolean | null;
+  /**
+   * Whether the model can call tools, which the coding agent needs. Absent
+   * on a deployment that predates the flag, which reads as able.
+   */
+  supports_tools?: boolean | null;
   context_window: number | null;
 }
 

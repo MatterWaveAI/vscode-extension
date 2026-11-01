@@ -41,6 +41,8 @@ function state(over: Partial<ViewState>): ViewState {
     notificationsUnreadOnly: false,
     notificationsComplete: true,
     usage: null,
+    agent: null,
+    budget: null,
     ...over,
   };
 }
@@ -668,5 +670,120 @@ describe("image previews", () => {
   it("shows who is acting in the meta line", () => {
     post({ type: "state", state: state({ identity: "Ada" }) });
     expect(document.querySelector(".meta .identity")?.textContent).toBe("Ada");
+  });
+});
+
+describe("agent mode in the view", () => {
+  function agent(over: Partial<NonNullable<ViewState["agent"]>> = {}): NonNullable<ViewState["agent"]> {
+    return {
+      enabled: true,
+      available: true,
+      reason: null,
+      mode: "ask",
+      modes: ["plan", "ask", "auto-edit"],
+      modeSummary: "The user approves each file change and each command.",
+      root: { name: "app", path: "/work/app" },
+      multiRoot: false,
+      running: false,
+      status: null,
+      output: null,
+      pending: null,
+      todos: [],
+      contextFiles: [],
+      contextNotice: null,
+      mcp: [],
+      steps: 0,
+      maxSteps: 40,
+      tokens: 0,
+      maxTokens: 500000,
+      runs: [],
+      ...over,
+    };
+  }
+  const buttonNamed = (label: string) => Array.from(document.querySelectorAll("button")).find((b) => b.textContent === label);
+
+  it("greys the toggle out with the reason when the agent cannot run", () => {
+    post({ type: "state", state: state({ agent: agent({ enabled: false, available: false, reason: "GRT Tiny cannot call tools." }) }) });
+    const box = document.querySelector<HTMLInputElement>("#agent-mode")!;
+    expect(box.disabled).toBe(true);
+    expect(box.checked).toBe(false);
+    expect(document.querySelector(".agent-reason")?.textContent).toBe("GRT Tiny cannot call tools.");
+    expect(document.querySelector<HTMLElement>(".mode-chip")!.hidden).toBe(true);
+  });
+
+  it("shows the mode at all times while on, cycles it on click and on Shift+Tab, and names the root", () => {
+    post({ type: "state", state: state({ agent: agent({ mode: "auto-edit" }) }) });
+    const chip = document.querySelector<HTMLButtonElement>(".mode-chip")!;
+    expect(chip.hidden).toBe(false);
+    expect(chip.textContent).toBe("auto-edit");
+    expect(document.querySelector(".agent-bar .root")?.textContent).toBe("in app");
+    chip.click();
+    expect(sent.at(-1)).toEqual({ type: "agentCycleMode" });
+    const input = document.querySelector<HTMLTextAreaElement>(".composer textarea")!;
+    sent.length = 0;
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true, cancelable: true }));
+    expect(sent).toEqual([{ type: "agentCycleMode" }]);
+    expect(input.placeholder).toContain("Shift+Tab changes the mode");
+    // The mode stays visible mid-run too.
+    post({ type: "state", state: state({ streaming: true, agent: agent({ running: true, status: "run_shell npm test", output: "PASS", steps: 3, tokens: 12000 }) }) });
+    expect(chip.hidden).toBe(false);
+    expect(document.querySelector(".agent-status")?.textContent).toContain("run_shell npm test — step 3/40");
+    expect(document.querySelector(".agent-status pre.output")?.textContent).toBe("PASS");
+  });
+
+  it("does not take Shift+Tab while the agent is off", () => {
+    post({ type: "state", state: state({ agent: agent({ enabled: false }) }) });
+    sent.length = 0;
+    const input = document.querySelector<HTMLTextAreaElement>(".composer textarea")!;
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true, cancelable: true }));
+    expect(sent).toEqual([]);
+  });
+
+  it("asks about a change with its diff, and about a command shown whole", () => {
+    post({
+      type: "state",
+      state: state({
+        agent: agent({
+          pending: { id: "a1", kind: "edit", tool: "edit", title: "Change src/a.ts", detail: "src/a.ts", path: "src/a.ts", diff: "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n" },
+        }),
+      }),
+    });
+    expect(document.querySelector(".approval .who")?.textContent).toBe("Change src/a.ts");
+    expect(document.querySelector(".approval pre.diff .add")?.textContent).toBe("+new\n");
+    buttonNamed("Accept")!.click();
+    expect(sent.at(-1)).toEqual({ type: "agentDecide", id: "a1", accept: true });
+    buttonNamed("Show diff")!.click();
+    expect(sent.at(-1)).toEqual({ type: "agentShowDiff", id: "a1" });
+    const command = "npm test -- --runInBand && rm -rf /tmp/really/long/path/that/is/not/shortened";
+    post({ type: "state", state: state({ agent: agent({ pending: { id: "a2", kind: "shell", tool: "run_shell", title: "Run a command", detail: command, path: null, diff: null } }) }) });
+    expect(document.querySelector(".approval pre.command")?.textContent).toBe(command);
+    buttonNamed("Reject")!.click();
+    expect(sent.at(-1)).toEqual({ type: "agentDecide", id: "a2", accept: false });
+  });
+
+  it("shows the plan's checklist", () => {
+    post({
+      type: "state",
+      state: state({ agent: agent({ todos: [{ content: "Read the code", status: "completed" }, { content: "Write the test", status: "in_progress" }, { content: "Run it", status: "pending" }] }) }),
+    });
+    expect(document.querySelector(".todos .who")?.textContent).toBe("Plan · 1/3 done");
+    expect(Array.from(document.querySelectorAll(".todos .todo")).map((n) => n.textContent)).toEqual(["☑ Read the code", "◐ Write the test", "☐ Run it"]);
+  });
+
+  it("opens the usage panel with this session's runs and the budget", () => {
+    post({
+      type: "state",
+      state: state({
+        agent: agent({ runs: [{ startedAt: "2026-10-31T10:00:00Z", prompt: "Fix the bug", status: "done", steps: 4, toolCalls: 3, promptTokens: 9000, completionTokens: 1000, tokens: 10000, durationMs: 12000 }] }),
+        budget: { includedTokens: 5_000_000, tokensUsed: 1_000_000, overageDollars: 0, overageCapDollars: 50, memberSpentDollars: 1.25, memberCapDollars: null },
+      }),
+    });
+    sent.length = 0;
+    buttonNamed("Usage")!.click();
+    expect(sent).toEqual([{ type: "refreshUsage" }]);
+    const panel = document.querySelector(".usage-panel")!;
+    expect(panel.textContent).toContain("Agent runs this session: 1, 10,000 tokens");
+    expect(panel.textContent).toContain("4 steps · 3 tools");
+    expect(panel.textContent).toContain("your spend $1.25");
   });
 });

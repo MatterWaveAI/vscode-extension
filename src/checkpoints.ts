@@ -87,3 +87,19 @@ function prune(rows: Checkpoint[], justRecorded: string | null): Checkpoint[] {
   for (const row of rows) (row.conversationId === justRecorded ? thisChat : others).push(row);
   return [...thisChat.slice(0, MAX_CHECKPOINTS_PER_CHAT), ...others];
 }
+
+/**
+ * What restoring to before `pickedId` writes: every file that checkpoint or
+ * any later one (in `rows`, newest first) touched, back to its contents
+ * before the earliest of those changes. Restoring to before the first of two
+ * applied edits so brings both files back, not just the one picked. Null
+ * content is a file that did not exist then, so restoring removes it.
+ */
+export function restorePlan(rows: readonly Checkpoint[], pickedId: string): { path: string; content: string | null; label: string }[] {
+  const at = rows.findIndex((row) => row.id === pickedId);
+  if (at < 0) return [];
+  const plan = new Map<string, { path: string; content: string | null; label: string }>();
+  // Newest to the picked one; an older row of the same path overwrites, so its content wins.
+  for (const row of rows.slice(0, at + 1)) plan.set(row.path, { path: row.path, content: row.content, label: row.label });
+  return [...plan.values()].sort((a, b) => a.path.localeCompare(b.path));
+}

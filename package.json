@@ -1,7 +1,7 @@
 {
   "name": "matterwave",
   "displayName": "MatterWave",
-  "description": "Chat with your organisation's MatterWave models from the editor.",
+  "description": "Chat with your organisation's MatterWave models from the editor, or let the coding agent read, change and test the workspace with your approval.",
   "version": "0.3.0",
   "publisher": "matterwave",
   "private": false,
@@ -36,6 +36,105 @@
           "default": "",
           "description": "Path to a PEM file holding the certificate authority that signed the deployment's TLS certificate, for a deployment behind a private CA. Trusted in addition to the system's authorities. Empty uses the system's authorities alone.",
           "scope": "application"
+        },
+        "matterwave.agent.defaultMode": {
+          "type": "string",
+          "enum": [
+            "plan",
+            "ask",
+            "auto-edit"
+          ],
+          "enumDescriptions": [
+            "Read and search only: no file changes, no commands.",
+            "Every file change and every command needs your approval (the default).",
+            "File changes are applied without asking; commands still ask."
+          ],
+          "default": "ask",
+          "description": "The agent's approval mode in a new workspace. Yolo (nothing asks) is not a default: it is allowed per session, from the mode chip, /approval-mode or Shift+Tab, after a confirm.",
+          "scope": "window"
+        },
+        "matterwave.agent.maxSteps": {
+          "type": "integer",
+          "default": 40,
+          "minimum": 1,
+          "maximum": 500,
+          "description": "The most model calls one agent run makes before it stops and says so.",
+          "scope": "window"
+        },
+        "matterwave.agent.maxTokens": {
+          "type": "integer",
+          "default": 500000,
+          "minimum": 1000,
+          "description": "The most tokens one agent run spends (prompt and completion, every step) before it stops and says so.",
+          "scope": "window"
+        },
+        "matterwave.agent.editorContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "Send the active file's name, the selection (up to 8,000 characters) and the recently opened files' names with each agent prompt. Files the deny list covers are never sent.",
+          "scope": "window"
+        },
+        "matterwave.agent.webFetch": {
+          "type": "boolean",
+          "default": true,
+          "description": "Offer the agent web_fetch. Every fetch asks first in the plan, ask and auto-edit modes (plan does not offer it at all).",
+          "scope": "window"
+        },
+        "matterwave.agent.matterwaveMcp": {
+          "type": "boolean",
+          "default": true,
+          "description": "Offer the agent MatterWave's own MCP server (/mcp on matterwave.baseUrl, signed in as this editor): your conversations and models as tools.",
+          "scope": "window"
+        },
+        "matterwave.agent.mcpServers": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "MCP servers the agent may use, by name. Each is `{ \"command\": \"...\", \"args\": [...], \"env\": {...} }` (stdio) or `{ \"url\": \"https://...\", \"headers\": {...} }` (HTTP), with an optional `\"tools\": [...]` allow-list (only those tools reach the model), `\"trust\": true` (its tools run without asking outside plan mode) and `\"disabled\": true`. Workspace settings apply only in a trusted folder.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string"
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "cwd": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              },
+              "headers": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "tools": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "trust": {
+                "type": "boolean"
+              },
+              "disabled": {
+                "type": "boolean"
+              }
+            }
+          },
+          "scope": "window"
         }
       }
     },
@@ -163,6 +262,53 @@
         "command": "matterwave.importHistory",
         "title": "Import ChatGPT or Claude History",
         "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.agent.toggle",
+        "title": "Toggle Agent Mode",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.agent.setMode",
+        "title": "Set Agent Approval Mode",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.agent.cycleMode",
+        "title": "Cycle Agent Approval Mode",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.agent.accept",
+        "title": "Accept the Agent's Change",
+        "category": "MatterWave",
+        "icon": "$(check)"
+      },
+      {
+        "command": "matterwave.agent.reject",
+        "title": "Reject the Agent's Change",
+        "category": "MatterWave",
+        "icon": "$(close)"
+      },
+      {
+        "command": "matterwave.agent.pickRoot",
+        "title": "Pick the Agent's Root Folder",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.agent.init",
+        "title": "Draft MATTERWAVE.md (/init)",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.agent.resume",
+        "title": "Resume an Agent Run",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.showUsage",
+        "title": "Show Usage",
+        "category": "MatterWave"
       }
     ],
     "menus": {
@@ -189,6 +335,28 @@
           "when": "editorHasSelection",
           "group": "matterwave@3"
         }
+      ],
+      "editor/title": [
+        {
+          "command": "matterwave.agent.reject",
+          "when": "matterwave.agentReviewing && isInDiffEditor",
+          "group": "navigation@1"
+        },
+        {
+          "command": "matterwave.agent.accept",
+          "when": "matterwave.agentReviewing && isInDiffEditor",
+          "group": "navigation@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "matterwave.agent.accept",
+          "when": "matterwave.agentReviewing"
+        },
+        {
+          "command": "matterwave.agent.reject",
+          "when": "matterwave.agentReviewing"
+        }
       ]
     },
     "keybindings": [
@@ -206,7 +374,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "pnpm run build && node e2e/run.mjs",
-    "package": "pnpm run build && vsce package --no-dependencies --skip-license --allow-missing-repository"
+    "package": "pnpm run build && vsce package --no-dependencies --skip-license --allow-missing-repository",
+    "sdk:check": "node scripts/sdk-agent.mjs --check",
+    "sdk:sync": "node scripts/sdk-agent.mjs --sync"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
@@ -230,5 +400,14 @@
     "onlyBuiltDependencies": [
       "esbuild"
     ]
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "The coding agent (its file and shell tools, MATTERWAVE.md, project commands, subagents and MCP servers) stays off until the folder is trusted. Chat works either way.",
+      "restrictedConfigurations": [
+        "matterwave.agent.mcpServers"
+      ]
+    }
   }
 }

@@ -300,6 +300,12 @@ export interface Me {
   org_name: string | null;
   org_role: string | null;
   state?: string | null;
+  /**
+   * The org switch for local agent tools (the coding agent's file and shell
+   * tools, run on the person's machine). Absent on a deployment that
+   * predates it, which reads as allowed.
+   */
+  local_agent_tools?: boolean | null;
 }
 
 /**
@@ -462,6 +468,17 @@ export interface ModerationBlockFrame extends FrameBase {
   request_id: string | null;
 }
 
+/**
+ * The server is folding earlier turns before the model is asked, which can
+ * take a while: the turn opens with this so the client has something to show
+ * for the first token's wait. `detail` is the sentence to show; `compaction`
+ * or `notice` follows.
+ */
+export interface CompactingFrame extends FrameBase {
+  event: "compacting";
+  detail: string;
+}
+
 /** Earlier messages were folded into `message`, a `system` message with one `summary` part. */
 export interface CompactionFrame extends FrameBase {
   event: "compaction";
@@ -509,6 +526,7 @@ export type ConversationFrame =
   | DoneFrame
   | ErrorFrame
   | ModerationBlockFrame
+  | CompactingFrame
   | CompactionFrame
   | ContextFrame
   | NoticeFrame
@@ -577,6 +595,8 @@ export function frameFromEvent(event: string, data: unknown, id: string | null =
         code: optStr(d.code),
         request_id: optStr(d.request_id),
       };
+    case "compacting":
+      return { event, id, detail: String(d.detail ?? "") };
     case "compaction":
       return {
         event,

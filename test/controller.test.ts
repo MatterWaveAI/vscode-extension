@@ -1105,7 +1105,7 @@ describe("slash commands", () => {
     await controller.send("/nosuch");
 
     expect(calls.some((c) => c.url === "/api/conversations/c_1/messages")).toBe(false);
-    expect(lastState(webview.posted).notice).toContain("No prompt named “/nosuch”");
+    expect(lastState(webview.posted).notice).toContain("No command or prompt named “/nosuch”");
   });
 
   it("lets //esc carry a literal slash command as the message", async () => {

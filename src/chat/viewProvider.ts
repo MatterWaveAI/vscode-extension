@@ -163,4 +163,31 @@ img.image-preview { display: block; max-width: 100%; max-height: 320px; margin-t
 .convos-list .empty { margin: 2px 0; font-size: 90%; opacity: .7; }
 .convos details.archived summary { cursor: pointer; font-size: 90%; opacity: .8; }
 button.rated { font-weight: 600; text-decoration: underline; }
+button.secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+.agent-bar { display: flex; gap: 6px; align-items: center; font-size: 90%; flex-wrap: wrap; }
+.agent-bar .agent-reason { opacity: .75; font-size: 95%; }
+.agent-bar .root { opacity: .85; color: var(--vscode-foreground); }
+.mode-chip { font-size: 85%; padding: 0 6px; border-radius: 8px; }
+.mode-chip.mode-plan { background: var(--vscode-charts-blue, #3794ff); }
+.mode-chip.mode-auto-edit { background: var(--vscode-charts-orange, #d18616); }
+.mode-chip.mode-yolo { background: var(--vscode-inputValidation-errorBorder, #be1100); }
+.agent-status .line { font-size: 90%; opacity: .9; }
+.agent-status .dim { opacity: .7; }
+.agent-status pre.output { max-height: 120px; overflow: auto; font-size: 85%; margin: 2px 0; background: var(--vscode-textCodeBlock-background); padding: 4px; white-space: pre-wrap; }
+.approval { border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-panel-border)); background: var(--vscode-inputValidation-warningBackground, transparent); border-radius: 4px; padding: 6px; display: flex; flex-direction: column; gap: 4px; }
+.approval .who { font-weight: 600; }
+.approval .hint { font-size: 90%; opacity: .8; }
+.approval pre.command { white-space: pre-wrap; word-break: break-all; background: var(--vscode-textCodeBlock-background); padding: 4px; margin: 0; font-family: var(--vscode-editor-font-family); }
+pre.diff { max-height: 220px; overflow: auto; margin: 0; padding: 4px; background: var(--vscode-textCodeBlock-background); font-family: var(--vscode-editor-font-family); font-size: 90%; }
+pre.diff .add { color: var(--vscode-gitDecoration-addedResourceForeground, #81b88b); }
+pre.diff .del { color: var(--vscode-gitDecoration-deletedResourceForeground, #c74e39); }
+pre.diff .hunk { opacity: .7; }
+.todos { display: flex; flex-direction: column; gap: 1px; font-size: 90%; border-left: 2px solid var(--vscode-panel-border); padding-left: 6px; }
+.todos .who { font-weight: 600; }
+.todos .completed { opacity: .6; text-decoration: line-through; }
+.todos .in_progress { font-weight: 600; }
+.usage-panel { display: flex; flex-direction: column; gap: 4px; padding: 8px; border-bottom: 1px solid var(--vscode-panel-border); font-size: 90%; }
+.usage-panel .runs { max-height: 160px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.usage-panel .run { opacity: .9; }
+.usage-panel .row { display: flex; gap: 6px; justify-content: flex-end; }
 `;
