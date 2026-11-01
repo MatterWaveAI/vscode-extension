@@ -87,3 +87,14 @@ describe("parseWebviewMessage", () => {
     expect(parseWebviewMessage(null)).toBeNull();
   });
 });
+
+describe("the fork, report and announcement intents", () => {
+  it("lets them through with their ids, and drops them without", () => {
+    expect(parseWebviewMessage({ type: "forkConversation", messageId: "m_1" })).toEqual({ type: "forkConversation", messageId: "m_1" });
+    expect(parseWebviewMessage({ type: "reportMessage", messageId: "m_1", extra: 1 })).toEqual({ type: "reportMessage", messageId: "m_1" });
+    expect(parseWebviewMessage({ type: "dismissAnnouncement", id: "an_1" })).toEqual({ type: "dismissAnnouncement", id: "an_1" });
+    expect(parseWebviewMessage({ type: "forkConversation" })).toBeNull();
+    expect(parseWebviewMessage({ type: "reportMessage", messageId: "x".repeat(65) })).toBeNull();
+    expect(parseWebviewMessage({ type: "dismissAnnouncement", id: 3 })).toBeNull();
+  });
+});

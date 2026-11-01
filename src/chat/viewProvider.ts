@@ -129,6 +129,8 @@ details pre { white-space: pre-wrap; }
 .notice, .error { margin: 6px 8px; padding: 6px 8px; border-radius: 4px; }
 .notice { background: var(--vscode-inputValidation-infoBackground); border: 1px solid var(--vscode-inputValidation-infoBorder); }
 .error { background: var(--vscode-inputValidation-errorBackground); border: 1px solid var(--vscode-inputValidation-errorBorder); }
+.announcement.warning { background: var(--vscode-inputValidation-warningBackground); border-color: var(--vscode-inputValidation-warningBorder); }
+.announcement.critical { background: var(--vscode-inputValidation-errorBackground); border-color: var(--vscode-inputValidation-errorBorder); }
 .error .title { font-weight: 600; }
 .cut { margin-top: 4px; font-size: 90%; display: flex; gap: 6px; align-items: center; opacity: .9; }
 img.image-preview { display: block; max-width: 100%; max-height: 320px; margin-top: 4px; border-radius: 4px; border: 1px solid var(--vscode-panel-border); }

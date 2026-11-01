@@ -134,6 +134,17 @@ export interface ViewState {
   usage: UsageView | null;
   /** Tokens and cost of the answers this session streamed, by message id; empty while the setting hides them. */
   answerUsage: Record<string, AnswerUsage>;
+  /** The deployment's announcements the person has not dismissed, most severe first. */
+  announcements: AnnouncementView[];
+}
+
+/** One announcement as its banner shows it. */
+export interface AnnouncementView {
+  id: string;
+  message: string;
+  severity: "info" | "warning" | "critical";
+  link: string | null;
+  dismissible: boolean;
 }
 
 export type HostMessage =
@@ -158,6 +169,11 @@ export type WebviewMessage =
   | { type: "archiveConversation"; id: string; archived: boolean }
   /** The next page of the list, or of the archive. */
   | { type: "loadMoreConversations"; archived: boolean }
+  /** A new conversation from the open one's path down to this message. */
+  | { type: "forkConversation"; messageId: string }
+  /** Report this message (the editor asks what kind, and for a note). */
+  | { type: "reportMessage"; messageId: string }
+  | { type: "dismissAnnouncement"; id: string }
   /** The web app's same conversation, as a Markdown file. */
   | { type: "exportConversation" }
   | { type: "shareConversation" }
@@ -195,6 +211,7 @@ const WEBVIEW_TYPES = new Set<WebviewMessage["type"]>([
   "send", "stop", "retry", "edit", "regenerate", "rateMessage", "setInstructions", "switchBranch", "continue",
   "compact", "pickModel", "signIn", "copyRequestId", "refreshNotifications", "readNotification", "readAllNotifications",
   "openNotification", "loadMoreNotifications", "setNotificationsUnreadOnly", "applyCodeBlock", "loadMoreConversations",
+  "forkConversation", "reportMessage", "dismissAnnouncement",
 ]);
 
 const FEEDBACK_REASON_SET = new Set<string>(FEEDBACK_REASONS);
@@ -241,6 +258,11 @@ export function parseWebviewMessage(raw: unknown): WebviewMessage | null {
       return id() && typeof msg.archived === "boolean" ? (msg as WebviewMessage) : null;
     case "loadMoreConversations":
       return typeof msg.archived === "boolean" ? { type: "loadMoreConversations", archived: msg.archived } : null;
+    case "forkConversation":
+    case "reportMessage":
+      return str("messageId") && (msg.messageId as string).length <= 64 ? { type: msg.type, messageId: msg.messageId as string } : null;
+    case "dismissAnnouncement":
+      return id() && (msg.id as string).length <= 64 ? { type: "dismissAnnouncement", id: msg.id as string } : null;
     case "send":
       return str("content") && (msg.temporary === undefined || typeof msg.temporary === "boolean")
         ? (msg as WebviewMessage)

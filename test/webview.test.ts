@@ -45,6 +45,7 @@ function state(over: Partial<ViewState>): ViewState {
     notificationsComplete: true,
     usage: null,
     answerUsage: {},
+    announcements: [],
     ...over,
   };
 }
@@ -270,11 +271,11 @@ describe("the chat webview", () => {
     lists[0]?.dispatchEvent(new Event("scroll"));
     expect(sent).toEqual([{ type: "loadMoreConversations", archived: false }]);
 
-    // No more rows, no button; and none during a search.
+    // No more rows, no button; a search with more hits pages the same way.
     post({ type: "state", state: state({ moreConversations: false }) });
     expect(Array.from(lists[0]?.querySelectorAll("button") ?? []).some((b) => b.textContent === "Load more")).toBe(false);
     post({ type: "state", state: state({ moreConversations: true, searchResults: [] }) });
-    expect(Array.from(lists[0]?.querySelectorAll("button") ?? []).some((b) => b.textContent === "Load more")).toBe(false);
+    expect(Array.from(lists[0]?.querySelectorAll("button") ?? []).some((b) => b.textContent === "Load more")).toBe(true);
   });
 
   it("offers Load more under the archive on its own", () => {
@@ -316,6 +317,42 @@ describe("the chat webview", () => {
     // Colours come from the editor's theme variables, which a test page does not have.
     const results = await axe.run(document, { rules: { "color-contrast": { enabled: false } } });
     expect(results.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.html).join(" | ")}`)).toEqual([]);
+  });
+
+  it("offers Fork on a message and Report on an answer, and sends their intents", () => {
+    post({ type: "state", state: state({ transcript: [assistantEntry("a1")] }) });
+    const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>(".msg .actions button"));
+    sent.length = 0;
+    buttons.find((b) => b.textContent === "Fork")?.click();
+    buttons.find((b) => b.textContent === "Report")?.click();
+    expect(sent).toEqual([
+      { type: "forkConversation", messageId: "a1" },
+      { type: "reportMessage", messageId: "a1" },
+    ]);
+    // A temporary conversation cannot be forked, so it is not offered.
+    post({ type: "state", state: state({ temporary: true, transcript: [assistantEntry("a1")] }) });
+    expect(Array.from(document.querySelectorAll(".msg .actions button")).some((b) => b.textContent === "Fork")).toBe(false);
+  });
+
+  it("shows an announcement with Open and Dismiss, and no Dismiss on one that may not be", () => {
+    post({
+      type: "state",
+      state: state({
+        announcements: [
+          { id: "an_1", message: "Maintenance at 02:00 UTC.", severity: "warning", link: "https://mw.test/status", dismissible: true },
+          { id: "an_2", message: "Read the new terms.", severity: "critical", link: null, dismissible: false },
+        ],
+      }),
+    });
+    const banners = Array.from(document.querySelectorAll<HTMLElement>(".announcement"));
+    expect(banners.map((b) => b.className)).toEqual(["notice announcement warning", "notice announcement critical"]);
+    sent.length = 0;
+    banners[0]?.querySelectorAll("button").forEach((b) => b.click());
+    expect(sent).toEqual([
+      { type: "openNotification", id: "an_1", url: "https://mw.test/status" },
+      { type: "dismissAnnouncement", id: "an_1" },
+    ]);
+    expect(banners[1]?.querySelectorAll("button")).toHaveLength(0);
   });
 
   it("shows an answer's tokens and cost under it, and nothing for one without a count", () => {
@@ -387,13 +424,13 @@ describe("the chat webview", () => {
       }),
     });
     const thumbs = () => Array.from(document.querySelectorAll<HTMLButtonElement>(".msg .actions button"));
-    expect(thumbs().map((b) => b.textContent)).toEqual(["Like", "Dislike", "Regenerate"]);
+    expect(thumbs().map((b) => b.textContent)).toEqual(["Like", "Dislike", "Regenerate", "Report", "Fork"]);
     thumbs()
       .find((b) => b.textContent === "Like")
       ?.click();
     expect(sent.at(-1)).toEqual({ type: "rateMessage", messageId: "a1", rating: 1 });
     // The webview's own copy of the rating shows immediately, without a round-trip.
-    expect(thumbs().map((b) => b.textContent)).toEqual(["Liked", "Dislike", "Regenerate"]);
+    expect(thumbs().map((b) => b.textContent)).toEqual(["Liked", "Dislike", "Regenerate", "Report", "Fork"]);
     thumbs()
       .find((b) => b.textContent === "Liked")
       ?.click();

@@ -11,6 +11,7 @@ import {
 } from "../lib/matterwaveClient";
 import { ApiError, detailOf, parseRetryAfter } from "./errors";
 import type {
+  Announcement,
   ApiKeyCreated,
   ApiKeyListing,
   Attachment,
@@ -33,6 +34,7 @@ import type {
   NotificationListing,
   NotificationRow,
   OrgInstructions,
+  SearchHit,
   SendBody,
   ShareRow,
   TagRow,
@@ -242,6 +244,42 @@ export class MatterWaveClient {
   }
 
   /**
+   * `GET /api/search`: titles and messages, ranked by relevance and
+   * recency, a page at a time; `nextCursor` is null on the last page.
+   */
+  async search(query: string, cursor?: string | null): Promise<{ data: SearchHit[]; nextCursor: string | null }> {
+    const params = new URLSearchParams({ q: query });
+    if (cursor) params.set("cursor", cursor);
+    const page = await this.json<{ data: SearchHit[]; next_cursor: string | null }>("GET", `/api/search?${params}`);
+    return { data: page.data, nextCursor: page.next_cursor ?? null };
+  }
+
+  /** Copy the path down to `messageId` into a new conversation of the caller's; a temporary one answers 409. */
+  forkConversation(id: string, messageId: string, title?: string): Promise<Conversation> {
+    return this.json("POST", `/api/conversations/${encodeURIComponent(id)}/fork`, {
+      message_id: messageId,
+      ...(title ? { title } : {}),
+    });
+  }
+
+  /**
+   * Report a conversation, or one message in it: `unsafe` goes to review,
+   * `unhelpful` to the product backlog. The note is the reporter's own words.
+   */
+  async reportConversation(id: string, report: { kind: "unsafe" | "unhelpful"; messageId?: string; note?: string }): Promise<void> {
+    await this.json("POST", `/api/conversations/${encodeURIComponent(id)}/report`, {
+      kind: report.kind,
+      ...(report.messageId ? { message_id: report.messageId } : {}),
+      ...(report.note ? { note: report.note } : {}),
+    });
+  }
+
+  /** `GET /api/announcements`: the deployment's notices inside their window, most severe first. */
+  announcements(): Promise<{ data: Announcement[] }> {
+    return this.json("GET", "/api/announcements");
+  }
+
+  /**
    * Create the conversation. `temporary` is fixed at creation, and the key
    * rides only when the chat is temporary: off, it is omitted entirely, so
    * the server's default (a kept conversation) governs.
@@ -409,6 +447,16 @@ export class MatterWaveClient {
     return this.json("PUT", `/api/library/conversations/${encodeURIComponent(conversationId)}/tags`, {
       tag_ids: tagIds,
     });
+  }
+
+  /** `PATCH /api/library/folders/{id}`: a new name; one the caller already uses answers 409. */
+  renameFolder(id: string, name: string): Promise<FolderRow> {
+    return this.json("PATCH", `/api/library/folders/${encodeURIComponent(id)}`, { name });
+  }
+
+  /** Delete a folder; its conversations go back to the main list, nothing else is deleted. */
+  async deleteFolder(id: string): Promise<void> {
+    await this.json("DELETE", `/api/library/folders/${encodeURIComponent(id)}`);
   }
 
   /** Take a tag off every conversation that carries it; a gone or foreign one is one 404. */

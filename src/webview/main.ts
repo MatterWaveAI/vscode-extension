@@ -1,6 +1,6 @@
 import type { FeedbackReason, Message, Part } from "../api/types";
 import { appendDelta, setPart } from "../chat/assemble";
-import type { FeedbackSummary, HostMessage, NotificationView, TranscriptEntry, UsageView, ViewState, WebviewMessage } from "../chat/protocol";
+import type { AnnouncementView, FeedbackSummary, HostMessage, NotificationView, TranscriptEntry, UsageView, ViewState, WebviewMessage } from "../chat/protocol";
 import { trustedImageDataUri } from "../chat/images";
 import { parseCodeBlocks } from "../chat/codeBlocks";
 import { renderMarkdown } from "./markdown";
@@ -115,7 +115,7 @@ function askForMore(archived: boolean): void {
 }
 for (const [list, archived] of [[convoList, false], [archivedList, true]] as const) {
   list.addEventListener("scroll", () => {
-    const more = archived ? state?.moreArchived : state?.moreConversations && !state.searchResults;
+    const more = archived ? state?.moreArchived : state?.moreConversations;
     if (more && list.scrollHeight - list.scrollTop - list.clientHeight < 24) askForMore(archived);
   });
 }
@@ -267,7 +267,8 @@ function renderConversations(s: ViewState): void {
   } else {
     convoList.replaceChildren(...rows.map((row) => conversationRow(row, s)));
   }
-  if (!s.searchResults && s.moreConversations) convoList.append(loadMoreRow(false));
+  // During a search the end of the list is the end of its hits, paged the same way.
+  if (s.moreConversations) convoList.append(loadMoreRow(false));
   // The archive folds away, and never during a search: the results are what is asked about.
   archivedBlock.open = archivedBlock.open && !s.searchResults;
   archivedBlock.hidden = s.searchResults !== null || s.archivedConversations.length === 0;
@@ -433,6 +434,7 @@ function compactTokens(n: number): string {
 
 function renderBanners(s: ViewState): void {
   const nodes: Node[] = [];
+  for (const a of s.announcements) nodes.push(announcementBanner(a));
   if (s.temporary) nodes.push(el("div", { className: "notice", text: TEMPORARY_NOTICE }));
   if (s.notice) nodes.push(el("div", { className: "notice", text: s.notice }));
   if (s.error) {
@@ -450,6 +452,20 @@ function renderBanners(s: ViewState): void {
     );
   }
     banners.replaceChildren(...nodes);
+}
+
+/** One of the deployment's announcements: its words, where it leads, and Dismiss when it may be. */
+function announcementBanner(a: AnnouncementView): HTMLElement {
+  const actions = el("div", { className: "actions" });
+  if (a.link) {
+    const link = a.link;
+    // The host decides where it goes, as for a notification's link.
+    actions.appendChild(button("Open", () => send({ type: "openNotification", id: a.id, url: link }), { className: "link", title: "Open where this leads" }));
+  }
+  if (a.dismissible) {
+    actions.appendChild(button("Dismiss", () => send({ type: "dismissAnnouncement", id: a.id }), { className: "link", title: "Hide this announcement" }));
+  }
+  return el("div", { className: `notice announcement ${a.severity}` }, [el("div", { text: a.message }), actions]);
 }
 
 /** The per-chat instructions editor: the conversation's own text, or "use mine". */
@@ -593,6 +609,18 @@ function renderEntry(entry: TranscriptEntry, isLast: boolean, streaming: boolean
         }, { className: `link${fb?.rating === -1 ? " rated" : ""}`, title: feedbackTitle(fb) }),
       );
       actions.appendChild(button("Regenerate", () => send({ type: "regenerate", messageId: m.id }), { className: "link" }));
+      actions.appendChild(
+        button("Report", () => send({ type: "reportMessage", messageId: m.id }), { className: "link", title: "Report this answer as unsafe or unhelpful" }),
+      );
+    }
+    // A temporary conversation cannot be forked: the API refuses, so the action is not offered.
+    if (!state?.temporary) {
+      actions.appendChild(
+        button("Fork", () => send({ type: "forkConversation", messageId: m.id }), {
+          className: "link",
+          title: "Start a new conversation from the turns down to here",
+        }),
+      );
     }
     node.appendChild(actions);
   }

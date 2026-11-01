@@ -1,4 +1,4 @@
-import type { ConversationMessage, ConversationWithMessages, DeviceToken } from "../lib/matterwaveClient";
+import type { Conversation, ConversationMessage, ConversationWithMessages, DeviceToken } from "../lib/matterwaveClient";
 
 /**
  * The wire shapes of the `/api` routes this extension reads. What the
@@ -302,6 +302,23 @@ export interface ShareRow {
 }
 
 // --- library ------------------------------------------------------------------
+
+/** One hit of `GET /api/search`: the conversation, the highlighted snippet, and the message that matched (null for a title). */
+export interface SearchHit extends Conversation {
+  snippet: string;
+  message_id: string | null;
+}
+
+/** One of the deployment's announcements, as `GET /api/announcements` lists it. */
+export interface Announcement {
+  id: string;
+  message: string;
+  severity: "info" | "warning" | "critical";
+  link: string | null;
+  starts_at: string;
+  ends_at: string | null;
+  dismissible: boolean;
+}
 
 /** One folder of the caller's library, as `Folder.to_dict` writes it. */
 export interface FolderRow {

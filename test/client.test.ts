@@ -551,3 +551,36 @@ describe("the request log", () => {
     expect(requestLogLine(entries[0] as RequestLogEntry)).toMatch(/^GET \/api\/models -> failed: connect ECONNREFUSED 10\.0\.0\.1:443 in \d+ ms$/);
   });
 });
+
+describe("fork, report, search, folders and announcements", () => {
+  it("sends each to its route with the body the API takes", async () => {
+    const { api, calls } = client({
+      "POST /api/conversations/c_1/fork": () => json(CONVERSATION, 201),
+      "POST /api/conversations/c_1/report": () => json({ id: "r_1" }, 201),
+      "GET /api/search": () => json({ data: [], query: "a b", next_cursor: "n2" }),
+      "PATCH /api/library/folders/f_1": () => json({ id: "f_1", name: "Renamed", position: 0, created_at: "", updated_at: "" }),
+      "DELETE /api/library/folders/f_1": () => new Response(null, { status: 204 }),
+      "GET /api/announcements": () => json({ data: [] }),
+    });
+    await api.forkConversation("c_1", "m_9");
+    await api.reportConversation("c_1", { kind: "unsafe", messageId: "m_9", note: "It told me to." });
+    await api.reportConversation("c_1", { kind: "unhelpful" });
+    expect(await api.search("a b", "n1")).toEqual({ data: [], nextCursor: "n2" });
+    await api.renameFolder("f_1", "Renamed");
+    await api.deleteFolder("f_1");
+    await api.announcements();
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      "POST /api/conversations/c_1/fork",
+      "POST /api/conversations/c_1/report",
+      "POST /api/conversations/c_1/report",
+      "GET /api/search?q=a+b&cursor=n1",
+      "PATCH /api/library/folders/f_1",
+      "DELETE /api/library/folders/f_1",
+      "GET /api/announcements",
+    ]);
+    expect(JSON.parse(String(calls[0]?.body))).toEqual({ message_id: "m_9" });
+    expect(JSON.parse(String(calls[1]?.body))).toEqual({ kind: "unsafe", message_id: "m_9", note: "It told me to." });
+    expect(JSON.parse(String(calls[2]?.body))).toEqual({ kind: "unhelpful" });
+    expect(JSON.parse(String(calls[4]?.body))).toEqual({ name: "Renamed" });
+  });
+});

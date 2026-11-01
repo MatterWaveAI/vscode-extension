@@ -210,6 +210,16 @@
         "category": "MatterWave"
       },
       {
+        "command": "matterwave.manageFolders",
+        "title": "Manage Folders",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.reportConversation",
+        "title": "Report Conversation",
+        "category": "MatterWave"
+      },
+      {
         "command": "matterwave.customInstructions",
         "title": "Edit Custom Instructions",
         "category": "MatterWave"

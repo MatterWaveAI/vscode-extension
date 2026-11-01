@@ -531,6 +531,97 @@ describe("conversation list paging", () => {
   });
 });
 
+describe("fork, report, ranked search and announcements", () => {
+  const hit = (id: string) => ({ ...CONVERSATION, id, title: id, snippet: `in ${id}`, message_id: null });
+
+  it("pages the ranked search on its cursor while the box holds a query", async () => {
+    const { controller } = await setup();
+    const calls = manage(controller, {
+      "GET /api/search": (call) =>
+        call.url.includes("cursor=s2")
+          ? json({ data: [hit("c_3"), hit("c_1")], query: "clock", next_cursor: null })
+          : json({ data: [hit("c_1"), hit("c_2")], query: "clock", next_cursor: "s2" }),
+    });
+    await controller.refresh();
+    await controller.handle({ type: "searchConversations", query: "clock" });
+    expect(controller.snapshot().moreConversations).toBe(true);
+    await controller.handle({ type: "loadMoreConversations", archived: false });
+    expect(controller.snapshot().searchResults?.map((h) => h.id)).toEqual(["c_1", "c_2", "c_3"]);
+    expect(controller.snapshot().moreConversations).toBe(false);
+    expect(calls.find((c) => c.url.includes("cursor=s2"))?.url).toBe("/api/search?q=clock&cursor=s2");
+  });
+
+  it("forks at a message into a new conversation, which opens", async () => {
+    const forked = { ...CONVERSATION, id: "c_fork", title: "Fork of New chat" };
+    const { controller } = await setup();
+    const calls = manage(controller, {
+      "POST /api/conversations/c_1/fork": () => json(forked, 201),
+      "GET /api/conversations/c_fork": () => json({ ...forked, messages: [USER] }),
+      "GET /api/conversations/c_fork/tree": () => json({ ...forked, messages: [USER] }),
+      "GET /api/conversations/c_1": () => json({ ...CONVERSATION, messages: [USER, DONE] }),
+      "GET /api/conversations/c_1/tree": () => json({ ...CONVERSATION, messages: [USER, DONE] }),
+    });
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    await controller.handle({ type: "forkConversation", messageId: "m_asst" });
+    expect(JSON.parse(String(calls.find((c) => c.url.endsWith("/fork"))?.body))).toEqual({ message_id: "m_asst" });
+    expect(controller.activeConversationId()).toBe("c_fork");
+    expect(controller.snapshot().conversations[0]?.id).toBe("c_fork");
+    expect(controller.snapshot().notice).toContain("Forked into “Fork of New chat”");
+  });
+
+  it("says why a temporary conversation cannot be forked, in the API's words", async () => {
+    const { controller } = await setup();
+    manage(controller, {
+      "POST /api/conversations/c_1/fork": () => json({ detail: "A temporary chat can't be forked." }, 409),
+      "GET /api/conversations/c_1": () => json({ ...CONVERSATION, messages: [USER, DONE] }),
+      "GET /api/conversations/c_1/tree": () => json({ ...CONVERSATION, messages: [USER, DONE] }),
+    });
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    await controller.handle({ type: "forkConversation", messageId: "m_asst" });
+    expect(controller.activeConversationId()).toBe("c_1");
+    expect(controller.snapshot().notice).toBe("A temporary chat can't be forked.");
+  });
+
+  it("hands a report of a message to the editor's report flow", async () => {
+    const { controller } = await setup();
+    const reported: unknown[] = [];
+    controller["deps"].report = (target) => void reported.push(target);
+    manage(controller, {
+      "GET /api/conversations/c_1": () => json({ ...CONVERSATION, messages: [USER, DONE] }),
+      "GET /api/conversations/c_1/tree": () => json({ ...CONVERSATION, messages: [USER, DONE] }),
+    });
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    await controller.handle({ type: "reportMessage", messageId: "m_asst" });
+    expect(reported).toEqual([{ conversationId: "c_1", messageId: "m_asst" }]);
+  });
+
+  it("shows the deployment's announcements until one is dismissed, and keeps an undismissible one", async () => {
+    const dismissed = new Set<string>();
+    const { controller } = await setup();
+    controller["deps"].dismissedAnnouncements = { has: (id) => dismissed.has(id), add: (id) => void dismissed.add(id) };
+    manage(controller, {
+      "GET /api/announcements": () =>
+        json({
+          data: [
+            { id: "an_1", message: "Maintenance at 02:00 UTC.", severity: "warning", link: null, starts_at: "2026-10-31T00:00:00Z", ends_at: null, dismissible: true },
+            { id: "an_2", message: "Read the new terms.", severity: "info", link: "https://mw.test/terms", starts_at: "2026-10-31T00:00:00Z", ends_at: null, dismissible: false },
+          ],
+        }),
+    });
+    await controller.refresh();
+    expect(controller.snapshot().announcements.map((a) => a.id)).toEqual(["an_1", "an_2"]);
+    await controller.handle({ type: "dismissAnnouncement", id: "an_1" });
+    await controller.handle({ type: "dismissAnnouncement", id: "an_2" });
+    expect(controller.snapshot().announcements).toEqual([
+      { id: "an_2", message: "Read the new terms.", severity: "info", link: "https://mw.test/terms", dismissible: false },
+    ]);
+    expect([...dismissed]).toEqual(["an_1"]);
+  });
+});
+
 describe("conversation management", () => {
   it("renames through PATCH, trimmed, and the sidebar row follows", async () => {
     const { controller } = await setup();
@@ -610,18 +701,18 @@ describe("conversation management", () => {
     await controller.refresh();
     let query = "";
     const calls = manage(controller, {
-      "GET /api/conversations/search": (call) => {
+      "GET /api/search": (call) => {
         query = String(new URL(`https://mw.test${call.url}`).searchParams.get("q"));
-        return json({ data: [{ ...CONVERSATION, snippet: "the clock struck" }], query });
+        return json({ data: [{ ...CONVERSATION, snippet: "the clock struck", message_id: "m_1" }], query, next_cursor: null });
       },
     });
     await controller.handle({ type: "searchConversations", query: "clock" });
     expect(query).toBe("clock");
     expect(controller.snapshot().searchResults).toEqual([{ id: "c_1", title: "New chat", pinned: false, archived: false, badge: null, snippet: "the clock struck" }]);
-    const searches = calls.filter((c) => c.url.startsWith("/api/conversations/search")).length;
+    const searches = calls.filter((c) => c.url.startsWith("/api/search")).length;
     await controller.handle({ type: "searchConversations", query: "   " });
     expect(controller.snapshot().searchResults).toBeNull();
-    expect(calls.filter((c) => c.url.startsWith("/api/conversations/search")).length).toBe(searches);
+    expect(calls.filter((c) => c.url.startsWith("/api/search")).length).toBe(searches);
   });
 
   it("badges a row with its folder and tags from one library read per refresh", async () => {
@@ -936,7 +1027,7 @@ describe("temporary chats", () => {
     const temporary = { ...CONVERSATION, id: "c_temp", temporary: true };
     manage(controller, {
       "GET /api/conversations": () => json({ data: [temporary, CONVERSATION], filter: "default" }),
-      "GET /api/conversations/search": () => json({ data: [{ ...temporary, snippet: "leaked" }], query: "x" }),
+      "GET /api/search": () => json({ data: [{ ...temporary, snippet: "leaked", message_id: null }], query: "x", next_cursor: null }),
     });
     await controller.refresh();
     expect(controller.snapshot().conversations.map((c) => c.id)).toEqual(["c_1"]);

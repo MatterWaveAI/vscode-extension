@@ -53,6 +53,8 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 const MODEL_KEY = "matterwave.model";
+/** The announcements this person dismissed, by id. */
+const DISMISSED_KEY = "matterwave.dismissedAnnouncements";
 /** Set once the server prompt has been shown, whatever was answered: it is a first-run question, not a nag. */
 const SERVER_PROMPTED_KEY = "matterwave.serverPrompted";
 
@@ -176,6 +178,15 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
     },
     onStatus: (status) => statusBar.update(status),
     showAnswerUsage: () => vscode.workspace.getConfiguration("matterwave").get<boolean>("showAnswerUsage") !== false,
+    report: (target) => reportFlow(client, target),
+    dismissedAnnouncements: {
+      has: (id) => (context.globalState.get<string[]>(DISMISSED_KEY) ?? []).includes(id),
+      add: (id) => {
+        // The newest few hundred are plenty: an announcement ends long before that.
+        const kept = (context.globalState.get<string[]>(DISMISSED_KEY) ?? []).filter((d) => d !== id);
+        void context.globalState.update(DISMISSED_KEY, [id, ...kept].slice(0, 200));
+      },
+    },
   });
   view.attach(chat);
 
@@ -327,6 +338,15 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
   command("matterwave.manageShares", () => manageShares(client));
   command("matterwave.organizeConversation", () => organizeConversation(client, chat));
   command("matterwave.manageTags", () => manageTags(client, chat));
+  command("matterwave.manageFolders", () => manageFolders(client, chat));
+  command("matterwave.reportConversation", () => {
+    const conversationId = chat.activeConversationId();
+    if (!conversationId) {
+      void vscode.window.showInformationMessage("Open the conversation to report it.");
+      return;
+    }
+    return reportFlow(client, { conversationId });
+  });
   command("matterwave.customInstructions", () => editCustomInstructions(client));
   command("matterwave.manageApiKeys", () => manageApiKeys(client));
   command("matterwave.switchAccount", () => switchAccount(tokens));
@@ -1277,6 +1297,105 @@ async function pickTags(client: MatterWaveClient, library: Library, conversation
       carried.add(tag.id);
     } catch (error) {
       void vscode.window.showErrorMessage(`The tag could not be created: ${describe(error)}`);
+    }
+  }
+}
+
+/**
+ * Report a conversation, or one answer in it: what kind of problem (unsafe
+ * goes to review, unhelpful to the product team), an optional note in the
+ * reporter's words, and a word that it was received.
+ */
+async function reportFlow(client: MatterWaveClient, target: { conversationId: string; messageId?: string }): Promise<void> {
+  const kind = await vscode.window.showQuickPick(
+    [
+      { reportKind: "unsafe" as const, label: "Unsafe", detail: "Harmful, dangerous or illegal content: it goes to review" },
+      { reportKind: "unhelpful" as const, label: "Unhelpful", detail: "Wrong, refused without reason, or off the point: it goes to the product team" },
+    ],
+    { title: target.messageId ? "Report this answer" : "Report this conversation", placeHolder: "What is wrong with it?" },
+  );
+  if (!kind) return;
+  const note = await vscode.window.showInputBox({
+    title: "Anything to add? (optional)",
+    prompt: "Your own words go with the report. Escape sends it without a note.",
+    ignoreFocusOut: true,
+    validateInput: (value) => (value.length > 2000 ? `At most 2,000 characters (now ${value.length.toLocaleString()}).` : null),
+  });
+  try {
+    await client.reportConversation(target.conversationId, {
+      kind: kind.reportKind,
+      ...(target.messageId ? { messageId: target.messageId } : {}),
+      ...(note?.trim() ? { note: note.trim() } : {}),
+    });
+    void vscode.window.showInformationMessage("Report sent. Thank you for saying so.");
+  } catch (error) {
+    void vscode.window.showErrorMessage(`The report could not be sent: ${describe(error)}`);
+  }
+}
+
+/**
+ * Every folder this person has, to rename or delete, looping like Manage
+ * Tags so several can be seen to in a sitting. Deleting a folder puts its
+ * conversations back in the main list; it deletes nothing else.
+ */
+async function manageFolders(client: MatterWaveClient, chat: ChatController): Promise<void> {
+  for (;;) {
+    let library;
+    try {
+      library = await client.listLibrary();
+    } catch (error) {
+      void vscode.window.showErrorMessage(`The folders could not be loaded: ${describe(error)}`);
+      return;
+    }
+    if (library.folders.length === 0) {
+      void vscode.window.showInformationMessage("No folders yet. Create one with MatterWave: Organize.");
+      return;
+    }
+    const conversations = await client.allConversations().catch(() => []);
+    const filed = (id: string) => conversations.filter((c) => c.folder_id === id).length;
+    const picked = await vscode.window.showQuickPick(
+      library.folders.map((folder) => {
+        const n = filed(folder.id);
+        return { folder, label: folder.name, description: n === 0 ? "empty" : `${n} conversation${n === 1 ? "" : "s"}` };
+      }),
+      { title: "MatterWave folders", placeHolder: "Pick a folder to rename or delete" },
+    );
+    if (!picked) return;
+    const action = await vscode.window.showQuickPick(
+      [
+        { id: "rename", label: "Rename", detail: "Give the folder a new name" },
+        { id: "delete", label: "Delete", detail: "Its conversations go back to the main list; nothing else is deleted" },
+      ],
+      { title: picked.folder.name, placeHolder: "What to do with this folder" },
+    );
+    if (action?.id === "rename") {
+      const name = await vscode.window.showInputBox({
+        title: `Rename “${picked.folder.name}”`,
+        value: picked.folder.name,
+        ignoreFocusOut: true,
+        validateInput: (value) => (value.trim() ? null : "A folder needs a name."),
+      });
+      if (name === undefined || name.trim() === picked.folder.name) continue;
+      try {
+        await client.renameFolder(picked.folder.id, name.trim());
+        void chat.refresh();
+      } catch (error) {
+        void vscode.window.showErrorMessage(`The folder could not be renamed: ${describe(error)}`);
+      }
+    } else if (action?.id === "delete") {
+      const answer = await vscode.window.showInformationMessage(
+        `Delete the folder “${picked.folder.name}”? Its conversations go back to the main list.`,
+        { modal: true },
+        "Delete",
+      );
+      if (answer !== "Delete") continue;
+      try {
+        await client.deleteFolder(picked.folder.id);
+        void vscode.window.showInformationMessage(`The folder “${picked.folder.name}” was deleted.`);
+        void chat.refresh();
+      } catch (error) {
+        void vscode.window.showErrorMessage(`The folder could not be deleted: ${describe(error)}`);
+      }
     }
   }
 }

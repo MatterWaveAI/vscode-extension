@@ -2,7 +2,7 @@ import type { ConversationFrame } from "../lib/matterwaveClient";
 import type { MatterWaveClient } from "../api/client";
 import { ApiError } from "../api/errors";
 import { isUntrustedCertificate } from "../api/transport";
-import type { Conversation, ConversationInstructions, FeedbackReason, Library, Message, ModelInfo, NotificationRow, Part, UsageReport } from "../api/types";
+import type { Announcement, Conversation, ConversationInstructions, FeedbackReason, Library, Message, ModelInfo, NotificationRow, Part, UsageReport } from "../api/types";
 import { fileAttachment } from "../context";
 import { classifyNotificationLink } from "../links";
 import { parseMentions, type Mention } from "./mentions";
@@ -78,6 +78,10 @@ export interface ChatDeps {
   onStatus?: (status: StatusInfo) => void;
   /** Whether answers show their tokens and cost (the matterwave.showAnswerUsage setting); on when absent. */
   showAnswerUsage?: () => boolean;
+  /** Report a conversation or one message of it: the editor asks what kind, and for a note. */
+  report?: (target: { conversationId: string; messageId?: string }) => Promise<void> | void;
+  /** The announcements this person dismissed, kept by the editor across restarts. */
+  dismissedAnnouncements?: { has(id: string): boolean; add(id: string): void };
 }
 
 /** One @-mention's context, as the attachment upload takes it. */
@@ -123,6 +127,11 @@ export class ChatController {
   private loadingMore = false;
   /** Non-null while the sidebar's search box holds a query. */
   private searchResults: (Conversation & { snippet: string })[] | null = null;
+  /** The query the results are for, and where its next page starts (null once every hit is on hand). */
+  private searchQuery: string | null = null;
+  private searchCursor: string | null = null;
+  /** The deployment's announcements in their window, before the person's dismissals. */
+  private announcements: Announcement[] = [];
   private activeId: string | null = null;
   private path: Message[] = [];
   private tree: Message[] = [];
@@ -188,6 +197,13 @@ export class ChatController {
         return this.archiveConversation(message.id, message.archived);
       case "loadMoreConversations":
         return this.loadMoreConversations(message.archived);
+      case "forkConversation":
+        return this.forkConversation(message.messageId);
+      case "reportMessage":
+        if (this.activeId) await this.deps.report?.({ conversationId: this.activeId, messageId: message.messageId });
+        return;
+      case "dismissAnnouncement":
+        return this.dismissAnnouncement(message.id);
       case "exportConversation":
       case "shareConversation":
         this.deps.runCommand(message.type);
@@ -250,6 +266,9 @@ export class ChatController {
       this.conversationsCursor = null;
       this.archivedCursor = null;
       this.searchResults = null;
+      this.searchQuery = null;
+      this.searchCursor = null;
+      this.announcements = [];
       this.activeId = null;
       this.path = [];
       this.tree = [];
@@ -285,7 +304,7 @@ export class ChatController {
       this.conversationsCursor = conversations.nextCursor;
       this.archivedCursor = archived.nextCursor;
       // These are best-effort: a deployment without the route still chats.
-      await Promise.all([this.loadNotifications(), this.loadUsage(), this.loadLibrary()]);
+      await Promise.all([this.loadNotifications(), this.loadUsage(), this.loadLibrary(), this.loadAnnouncements()]);
       if (this.activeId) await this.loadConversation(this.activeId);
     });
     this.emit();
@@ -316,6 +335,8 @@ export class ChatController {
     this.instructions = null;
     this.feedback = new Map();
     this.searchResults = null;
+    this.searchQuery = null;
+    this.searchCursor = null;
     this.emit();
   }
 
@@ -423,6 +444,8 @@ export class ChatController {
    * a pin or an archive since -- is not listed twice.
    */
   async loadMoreConversations(archived: boolean): Promise<void> {
+    // While the box holds a search, the end of the list is the end of its hits.
+    if (!archived && this.searchResults !== null) return this.loadMoreSearch();
     const cursor = archived ? this.archivedCursor : this.conversationsCursor;
     if (!cursor || this.loadingMore) return;
     this.loadingMore = true;
@@ -450,14 +473,67 @@ export class ChatController {
     const q = query.trim();
     if (!q) {
       this.searchResults = null;
+      this.searchQuery = null;
+      this.searchCursor = null;
       this.emit();
       return;
     }
     await this.guard(async () => {
-      // The server keeps temporary conversations out of search; the filter
-      // holds if a row ever leaks through.
-      this.searchResults = (await this.deps.client.searchConversations(q)).filter(notTemporary);
+      // Ranked over titles and messages, a page at a time. The server keeps
+      // temporary conversations out of search; the filter holds if a row
+      // ever leaks through.
+      const page = await this.deps.client.search(q);
+      this.searchResults = page.data.filter(notTemporary);
+      this.searchQuery = q;
+      this.searchCursor = page.nextCursor;
     });
+    this.emit();
+  }
+
+  /** The next page of the search the box holds, after the hits on hand. */
+  private async loadMoreSearch(): Promise<void> {
+    const query = this.searchQuery;
+    const cursor = this.searchCursor;
+    if (!query || !cursor || this.loadingMore) return;
+    this.loadingMore = true;
+    try {
+      const page = await this.deps.client.search(query, cursor);
+      if (this.searchQuery !== query) return;
+      const onHand = new Set((this.searchResults ?? []).map((hit) => hit.id));
+      this.searchResults = [...(this.searchResults ?? []), ...page.data.filter((hit) => notTemporary(hit) && !onHand.has(hit.id))];
+      this.searchCursor = page.nextCursor;
+    } catch (error) {
+      this.fail(error);
+    } finally {
+      this.loadingMore = false;
+    }
+    this.emit();
+  }
+
+  /**
+   * Fork the open conversation at a message: the path down to it becomes a
+   * new conversation of the caller's, which opens. A temporary
+   * conversation cannot be forked; the API's 409 says so in its words.
+   */
+  async forkConversation(messageId: string): Promise<void> {
+    const id = this.activeId;
+    if (!id || this.abort) return;
+    let forked: Conversation | null = null;
+    await this.guard(async () => {
+      try {
+        forked = await this.deps.client.forkConversation(id, messageId);
+      } catch (error) {
+        if (!this.surfaceConflictNotice(error)) throw error;
+      }
+    });
+    const opened = forked as Conversation | null;
+    if (!opened) {
+      this.emit();
+      return;
+    }
+    this.conversations = [opened, ...this.conversations.filter((c) => c.id !== opened.id)];
+    await this.openConversation(opened.id);
+    this.notice = `Forked into “${opened.title || "a new conversation"}”: the original is unchanged.`;
     this.emit();
   }
 
@@ -694,6 +770,23 @@ export class ChatController {
       // A deployment without the route still chats; the line just stays off.
       this.usage = null;
     }
+  }
+
+  /** The deployment's announcements; a deployment without the route shows none. */
+  private async loadAnnouncements(): Promise<void> {
+    try {
+      this.announcements = (await this.deps.client.announcements()).data;
+    } catch {
+      this.announcements = [];
+    }
+  }
+
+  /** Hide one announcement for good; one the deployment marks as not dismissible stays. */
+  dismissAnnouncement(id: string): void {
+    const row = this.announcements.find((a) => a.id === id);
+    if (!row?.dismissible) return;
+    this.deps.dismissedAnnouncements?.add(id);
+    this.emit();
   }
 
   /** The library for the rows' badges; a failed read loses the badges, nothing else. */
@@ -1313,7 +1406,10 @@ export class ChatController {
       identity: this.identity,
       conversations: this.conversations.map((c) => conversationSummary(c, this.library)),
       archivedConversations: this.archived.map((c) => conversationSummary(c, this.library)),
-      moreConversations: this.conversationsCursor !== null,
+      moreConversations: this.searchResults !== null ? this.searchCursor !== null : this.conversationsCursor !== null,
+      announcements: this.announcements
+        .filter((a) => !(this.deps.dismissedAnnouncements?.has(a.id) ?? false))
+        .map((a) => ({ id: a.id, message: a.message, severity: a.severity, link: a.link, dismissible: a.dismissible })),
       moreArchived: this.archivedCursor !== null,
       searchResults: this.searchResults?.map((hit): SearchHitView => ({ ...conversationSummary(hit, this.library), snippet: hit.snippet })) ?? null,
       activeId: this.activeId,
