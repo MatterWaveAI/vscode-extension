@@ -94,6 +94,7 @@ describe("CheckpointStore", () => {
 describe("snapshot and restore round-trip", () => {
   beforeEach(() => {
     workspace.files.clear();
+    workspace.documents.clear();
     window.informationAnswers.length = 0;
     commands.executed.length = 0;
     commands.commandArgs.length = 0;

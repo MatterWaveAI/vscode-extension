@@ -1,14 +1,23 @@
-// The end-to-end test: the built extension inside a real VS Code, against a
-// real MatterWave deployment. This launcher does what the extension host
-// cannot: it signs in as the standing e2e account the way the browser does,
-// approves a device login for the run as that account, hands the key it
-// minted to the suite in `./suite` (which runs inside the editor's extension
-// host, under mocha), and revokes the key whatever the run did.
+// The end-to-end tests: the built extension inside a real VS Code, in two
+// suites under `./suite` (each runs inside the editor's extension host,
+// under mocha).
+//
+// The editor suite always runs. It needs no deployment: it opens a
+// two-folder workspace made for the run and checks what the vscode mock the
+// unit tests use cannot show -- edits through the editor's buffer, undo,
+// files created on the editor's file service, which folder a path lands in.
+//
+// The deployment suite runs against a real MatterWave deployment. For it
+// this launcher does what the extension host cannot: it signs in as the
+// standing e2e account the way the browser does, approves a device login
+// for the run as that account, hands the key it minted to the suite, and
+// revokes the key whatever the run did.
 //
 //   E2E_ADMIN_EMAIL / E2E_ADMIN_PASSWORD   the account; without them the
-//                                          test is skipped, not failed
-//   E2E_BASE_URL                           the deployment; without it the test
-//                                          is skipped
+//                                          deployment suite is skipped, not
+//                                          failed
+//   E2E_BASE_URL                           the deployment; without it the
+//                                          deployment suite is skipped
 //   E2E_CA_FILE                            the deployment's CA, for a private one,
 //                                          trusted by both this process and the
 //                                          extension host (optional)
@@ -22,7 +31,8 @@
 // person signs it in, it works on every plan, and the session is the
 // browser's.
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
@@ -37,14 +47,14 @@ const baseUrl = (process.env.E2E_BASE_URL || "").replace(/\/+$/, "");
 const model = process.env.E2E_MODEL || "grt-nano";
 const caFile = process.env.E2E_CA_FILE ? path.resolve(process.env.E2E_CA_FILE) : "";
 
-if (!noAuth && (!email || !password)) {
-  console.log("vscode e2e: SKIPPED -- E2E_ADMIN_EMAIL / E2E_ADMIN_PASSWORD are not set.");
-  process.exit(0);
-}
-if (!baseUrl) {
-  console.log("vscode e2e: SKIPPED -- E2E_BASE_URL is not set.");
-  process.exit(0);
-}
+/** Why the deployment suite cannot run, or null when it can. */
+const deploymentSkipped =
+  !noAuth && (!email || !password)
+    ? "E2E_ADMIN_EMAIL / E2E_ADMIN_PASSWORD are not set"
+    : !baseUrl
+      ? "E2E_BASE_URL is not set"
+      : null;
+
 if (caFile && !existsSync(caFile)) {
   console.error(`vscode e2e: the CA file ${caFile} does not exist (E2E_CA_FILE).`);
   process.exit(1);
@@ -148,7 +158,7 @@ async function mintDeviceKey(jar, csrf) {
 async function buildSuite() {
   await esbuild.build({
     absWorkingDir: root,
-    entryPoints: ["e2e/suite/index.ts", "e2e/suite/chat.test.ts"],
+    entryPoints: ["e2e/suite/index.ts", "e2e/suite/chat.test.ts", "e2e/suite/editor.test.ts"],
     outdir: "dist/e2e",
     bundle: true,
     platform: "node",
@@ -162,8 +172,59 @@ async function buildSuite() {
   });
 }
 
+/** The editor's flags for every suite. */
+const LAUNCH_ARGS = [
+  "--disable-extensions",
+  "--disable-workspace-trust",
+  "--skip-welcome",
+  "--skip-release-notes",
+  // On a Linux runner: the key goes into SecretStorage, and without a
+  // keyring the basic store is the one that works; under xvfb in a
+  // container there is no GPU and /dev/shm is small.
+  ...(process.platform === "linux" ? ["--password-store=basic", "--disable-gpu", "--disable-dev-shm-usage"] : []),
+];
+
+/**
+ * A two-folder workspace for the editor suite, made fresh for the run: two
+ * roots so a path that names neither can be told from one that names the
+ * second, and LF endings so what a test writes is what it reads back on
+ * every platform.
+ */
+function editorWorkspace(dir) {
+  for (const folder of ["alpha", "beta"]) {
+    mkdirSync(path.join(dir, folder, "src"), { recursive: true });
+    writeFileSync(path.join(dir, folder, "src", "shared.ts"), `export const where = "${folder}";\n`);
+  }
+  const file = path.join(dir, "e2e.code-workspace");
+  writeFileSync(
+    file,
+    JSON.stringify({ folders: [{ path: "alpha" }, { path: "beta" }], settings: { "files.eol": "\n", "files.autoSave": "off" } }, null, 2),
+  );
+  return file;
+}
+
+async function runEditorSuite() {
+  const dir = mkdtempSync(path.join(tmpdir(), "mw-vscode-e2e-"));
+  try {
+    await runTests({
+      extensionDevelopmentPath: root,
+      extensionTestsPath: path.join(root, "dist", "e2e", "index.js"),
+      cachePath: path.join(root, ".vscode-test"),
+      launchArgs: [editorWorkspace(dir), ...LAUNCH_ARGS],
+      extensionTestsEnv: { ELECTRON_RUN_AS_NODE: undefined, E2E_SUITE: "editor" },
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   await buildSuite();
+  await runEditorSuite();
+  if (deploymentSkipped) {
+    console.log(`vscode e2e: the deployment suite is SKIPPED -- ${deploymentSkipped}.`);
+    return;
+  }
   const jar = noAuth ? null : new CookieJar();
   const csrf = jar ? await signIn(jar) : null;
   const key = await mintDeviceKey(jar, csrf);
@@ -173,20 +234,12 @@ async function main() {
       extensionDevelopmentPath: root,
       extensionTestsPath: path.join(root, "dist", "e2e", "index.js"),
       cachePath: path.join(root, ".vscode-test"),
-      launchArgs: [
-        "--disable-extensions",
-        "--disable-workspace-trust",
-        "--skip-welcome",
-        "--skip-release-notes",
-        // On a Linux runner: the key goes into SecretStorage, and without a
-        // keyring the basic store is the one that works; under xvfb in a
-        // container there is no GPU and /dev/shm is small.
-        ...(process.platform === "linux" ? ["--password-store=basic", "--disable-gpu", "--disable-dev-shm-usage"] : []),
-      ],
+      launchArgs: LAUNCH_ARGS,
       extensionTestsEnv: {
         // Set in a terminal inside an editor; the editor under test must
         // start as an editor, not as a bare node.
         ELECTRON_RUN_AS_NODE: undefined,
+        E2E_SUITE: "deployment",
         NODE_EXTRA_CA_CERTS: caFile || undefined,
         // The extension's fetch trusts its own matterwave.caFile, not the
         // host's NODE_EXTRA_CA_CERTS: the suite sets the setting from this.

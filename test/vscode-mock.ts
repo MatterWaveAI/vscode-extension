@@ -166,15 +166,57 @@ export const workspace = {
     }
     return value.replace(/^file:\/\//, "").replace(/^\//, "");
   },
-  openTextDocument(uri: Uri): Promise<{ uri: Uri }> {
-    if (!workspace.files.has(uri.toString())) return Promise.reject(new Error(`no document ${uri.toString()}`));
-    return Promise.resolve({ uri });
+  /** The open documents: a buffer over a file, which may hold unsaved edits. */
+  documents: new Map<string, TextDocument>(),
+  get textDocuments(): TextDocument[] {
+    return Array.from(workspace.documents.values());
+  },
+  openTextDocument(uri: Uri): Promise<TextDocument> {
+    const key = uri.toString();
+    const open = workspace.documents.get(key);
+    if (open) return Promise.resolve(open);
+    const bytes = workspace.files.get(key);
+    if (!bytes) return Promise.reject(new Error(`no document ${key}`));
+    const document = new TextDocument(uri, new TextDecoder().decode(bytes));
+    workspace.documents.set(key, document);
+    return Promise.resolve(document);
+  },
+  /** The edits a test's code applied, in order; `applyEditAnswer` false makes the editor refuse. */
+  appliedEdits: [] as WorkspaceEdit[],
+  applyEditAnswer: true,
+  async applyEdit(edit: WorkspaceEdit): Promise<boolean> {
+    workspace.appliedEdits.push(edit);
+    if (!workspace.applyEditAnswer) return false;
+    for (const op of edit.operations) {
+      const key = op.uri.toString();
+      if (op.kind === "createFile") {
+        if (workspace.files.has(key) && !op.ignoreIfExists) return false;
+        if (!workspace.files.has(key)) workspace.files.set(key, new Uint8Array());
+        continue;
+      }
+      if (op.kind === "deleteFile") {
+        workspace.files.delete(key);
+        workspace.documents.delete(key);
+        continue;
+      }
+      const document = await workspace.openTextDocument(op.uri);
+      document.splice(op.range, op.text);
+    }
+    return true;
   },
   fs: {
     async readFile(uri: Uri): Promise<Uint8Array> {
       const bytes = workspace.files.get(uri.toString());
       if (!bytes) throw new Error(`file not found: ${uri.toString()}`);
       return bytes;
+    },
+    async stat(uri: Uri): Promise<{ type: number; size: number }> {
+      const bytes = workspace.files.get(uri.toString());
+      if (!bytes) throw new Error(`file not found: ${uri.toString()}`);
+      return { type: 1, size: bytes.byteLength };
+    },
+    async delete(uri: Uri): Promise<void> {
+      workspace.files.delete(uri.toString());
     },
     async writeFile(uri: Uri, content: Uint8Array): Promise<void> {
       workspace.files.set(uri.toString(), new Uint8Array(content));
@@ -197,6 +239,120 @@ export const workspace = {
     },
   },
 };
+
+export enum EndOfLine {
+  LF = 1,
+  CRLF = 2,
+}
+
+export class Position {
+  constructor(
+    readonly line: number,
+    readonly character: number,
+  ) {}
+}
+
+export class Range {
+  constructor(
+    readonly start: Position,
+    readonly end: Position,
+  ) {}
+  get isEmpty(): boolean {
+    return this.start.line === this.end.line && this.start.character === this.end.character;
+  }
+}
+
+export class Selection extends Range {
+  get isEmptySelection(): boolean {
+    return this.isEmpty;
+  }
+}
+
+/**
+ * A document over a file: its text may run ahead of the file's bytes (the
+ * unsaved edits a test makes with `type`), and `save` writes it back.
+ */
+export class TextDocument {
+  private dirty = false;
+  constructor(
+    readonly uri: Uri,
+    private text: string,
+    readonly languageId = "plaintext",
+  ) {}
+  get isDirty(): boolean {
+    return this.dirty;
+  }
+  get eol(): EndOfLine {
+    return this.text.includes("\r\n") ? EndOfLine.CRLF : EndOfLine.LF;
+  }
+  get lineCount(): number {
+    return this.text.split("\n").length;
+  }
+  getText(range?: Range): string {
+    if (!range) return this.text;
+    return this.text.slice(this.offsetAt(range.start), this.offsetAt(range.end));
+  }
+  lineAt(line: number): { text: string; range: Range; rangeIncludingLineBreak: Range; firstNonWhitespaceCharacterIndex: number } {
+    const lines = this.text.split("\n");
+    const raw = lines[line] ?? "";
+    const text = raw.replace(/\r$/, "");
+    const last = line >= lines.length - 1;
+    return {
+      text,
+      range: new Range(new Position(line, 0), new Position(line, text.length)),
+      rangeIncludingLineBreak: new Range(new Position(line, 0), last ? new Position(line, text.length) : new Position(line + 1, 0)),
+      firstNonWhitespaceCharacterIndex: /^\s*/.exec(text)?.[0].length ?? 0,
+    };
+  }
+  offsetAt(position: Position): number {
+    const lines = this.text.split("\n");
+    let offset = 0;
+    for (let i = 0; i < position.line && i < lines.length; i++) offset += (lines[i] ?? "").length + 1;
+    return Math.min(offset + position.character, this.text.length);
+  }
+  positionAt(offset: number): Position {
+    const before = this.text.slice(0, Math.max(0, Math.min(offset, this.text.length)));
+    const lines = before.split("\n");
+    return new Position(lines.length - 1, (lines.at(-1) ?? "").length);
+  }
+  /** An unsaved edit, as typing in the editor makes one. */
+  type(text: string): void {
+    this.text = text;
+    this.dirty = true;
+  }
+  splice(range: Range, text: string): void {
+    this.text = this.text.slice(0, this.offsetAt(range.start)) + text + this.text.slice(this.offsetAt(range.end));
+    this.dirty = true;
+  }
+  async save(): Promise<boolean> {
+    workspace.files.set(this.uri.toString(), new TextEncoder().encode(this.text));
+    this.dirty = false;
+    return true;
+  }
+}
+
+type EditOperation =
+  | { kind: "replace"; uri: Uri; range: Range; text: string }
+  | { kind: "createFile"; uri: Uri; ignoreIfExists: boolean }
+  | { kind: "deleteFile"; uri: Uri };
+
+/** The edits the code under test asks the editor for, applied by `workspace.applyEdit`. */
+export class WorkspaceEdit {
+  readonly operations: EditOperation[] = [];
+  replace(uri: Uri, range: Range, text: string): void {
+    this.operations.push({ kind: "replace", uri, range, text });
+  }
+  insert(uri: Uri, position: Position, text: string): void {
+    this.operations.push({ kind: "replace", uri, range: new Range(position, position), text });
+  }
+  createFile(uri: Uri, options: { ignoreIfExists?: boolean } = {}): void {
+    this.operations.push({ kind: "createFile", uri, ignoreIfExists: options.ignoreIfExists === true });
+  }
+  deleteFile(uri: Uri, options: { ignoreIfNotExists?: boolean } = {}): void {
+    void options;
+    this.operations.push({ kind: "deleteFile", uri });
+  }
+}
 
 /** An in-memory SecretStorage. */
 export class MemorySecrets {

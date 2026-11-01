@@ -667,7 +667,13 @@ async function restoreCheckpoint(chat: ChatController, store: CheckpointStore): 
       "Remove",
     );
     if (answer !== "Remove") return;
-    await vscode.workspace.fs.delete(uri);
+    // Through the editor, like every change: an open buffer closes with it and Undo brings it back.
+    const edit = new vscode.WorkspaceEdit();
+    edit.deleteFile(uri, { ignoreIfNotExists: true });
+    if (!(await vscode.workspace.applyEdit(edit))) {
+      void vscode.window.showErrorMessage(`${picked.row.path} could not be removed.`);
+      return;
+    }
     void vscode.window.showInformationMessage(`${picked.row.path} was removed, back to before the ${picked.row.label}.`);
     return;
   }
