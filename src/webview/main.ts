@@ -93,6 +93,24 @@ convoSearch.addEventListener("input", () => {
 });
 const convoList = el("div", { className: "convos-list" });
 const archivedList = el("div", { className: "convos-list" });
+/**
+ * The lists page by cursor: reaching the end of one asks for its next page,
+ * once until the state that carries it arrives. The button says the same
+ * for anyone not scrolling.
+ */
+const loadMoreAsked = { list: false, archived: false };
+function askForMore(archived: boolean): void {
+  const key = archived ? "archived" : "list";
+  if (loadMoreAsked[key]) return;
+  loadMoreAsked[key] = true;
+  send({ type: "loadMoreConversations", archived });
+}
+for (const [list, archived] of [[convoList, false], [archivedList, true]] as const) {
+  list.addEventListener("scroll", () => {
+    const more = archived ? state?.moreArchived : state?.moreConversations && !state.searchResults;
+    if (more && list.scrollHeight - list.scrollTop - list.clientHeight < 24) askForMore(archived);
+  });
+}
 const archivedBlock = el("details", { className: "archived" }, [el("summary", { text: "Archived" }), archivedList]);
 convos.append(convoSearch, convoList, archivedBlock);
 const meta = el("div", { className: "meta" });
@@ -242,10 +260,21 @@ function renderConversations(s: ViewState): void {
   } else {
     convoList.replaceChildren(...rows.map((row) => conversationRow(row, s)));
   }
+  if (!s.searchResults && s.moreConversations) convoList.append(loadMoreRow(false));
   // The archive folds away, and never during a search: the results are what is asked about.
   archivedBlock.open = archivedBlock.open && !s.searchResults;
   archivedBlock.hidden = s.searchResults !== null || s.archivedConversations.length === 0;
   archivedList.replaceChildren(...s.archivedConversations.map((row) => archivedRow(row)));
+  if (s.moreArchived) archivedList.append(loadMoreRow(true));
+}
+
+function loadMoreRow(archived: boolean): HTMLElement {
+  return el("div", { className: "row" }, [
+    button("Load more", () => askForMore(archived), {
+      className: "link",
+      title: archived ? "Load older archived conversations" : "Load older conversations",
+    }),
+  ]);
 }
 
 function conversationRow(row: ViewState["conversations"][number], s: ViewState): HTMLElement {
@@ -747,6 +776,9 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
   const message = event.data;
   if (message.type === "state") {
     state = message.state;
+    // The page that was asked for has landed (or failed): the end of a list may ask again.
+    loadMoreAsked.list = false;
+    loadMoreAsked.archived = false;
     // The host's feedback map is the record; this session's optimistic copy
     // has done its job the moment a full state arrives.
     feedbackSession.clear();

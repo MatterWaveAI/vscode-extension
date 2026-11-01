@@ -94,6 +94,9 @@ export interface ViewState {
   conversations: ConversationSummary[];
   /** The archive, shown folded away under its own heading. */
   archivedConversations: ConversationSummary[];
+  /** True while the list (or the archive) has rows past the ones on hand: the end of it loads more. */
+  moreConversations: boolean;
+  moreArchived: boolean;
   /** The matches for the search box's text; null when no search is active. */
   searchResults: SearchHitView[] | null;
   activeId: string | null;
@@ -143,6 +146,8 @@ export type WebviewMessage =
   | { type: "deleteConversation"; id: string }
   | { type: "pinConversation"; id: string; pinned: boolean }
   | { type: "archiveConversation"; id: string; archived: boolean }
+  /** The next page of the list, or of the archive. */
+  | { type: "loadMoreConversations"; archived: boolean }
   /** The web app's same conversation, as a Markdown file. */
   | { type: "exportConversation" }
   | { type: "shareConversation" }
@@ -179,7 +184,7 @@ const WEBVIEW_TYPES = new Set<WebviewMessage["type"]>([
   "deleteConversation", "pinConversation", "archiveConversation", "exportConversation", "shareConversation",
   "send", "stop", "retry", "edit", "regenerate", "rateMessage", "setInstructions", "switchBranch", "continue",
   "compact", "pickModel", "signIn", "copyRequestId", "refreshNotifications", "readNotification", "readAllNotifications",
-  "openNotification", "loadMoreNotifications", "setNotificationsUnreadOnly", "applyCodeBlock",
+  "openNotification", "loadMoreNotifications", "setNotificationsUnreadOnly", "applyCodeBlock", "loadMoreConversations",
 ]);
 
 const FEEDBACK_REASON_SET = new Set<string>(FEEDBACK_REASONS);
@@ -224,6 +229,8 @@ export function parseWebviewMessage(raw: unknown): WebviewMessage | null {
       return id() && typeof msg.pinned === "boolean" ? (msg as WebviewMessage) : null;
     case "archiveConversation":
       return id() && typeof msg.archived === "boolean" ? (msg as WebviewMessage) : null;
+    case "loadMoreConversations":
+      return typeof msg.archived === "boolean" ? { type: "loadMoreConversations", archived: msg.archived } : null;
     case "send":
       return str("content") && (msg.temporary === undefined || typeof msg.temporary === "boolean")
         ? (msg as WebviewMessage)

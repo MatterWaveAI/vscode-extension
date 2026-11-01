@@ -112,6 +112,13 @@ export const window = {
     window.folderPicks.push(options?.placeHolder ?? "");
     return Promise.resolve(workspace.workspaceFolders.find((folder) => folder.name === window.folderPickAnswer));
   },
+  /** The QuickPicks code under test created, newest last. */
+  quickPicks: [] as FakeQuickPick[],
+  createQuickPick(): FakeQuickPick {
+    const pick = new FakeQuickPick();
+    window.quickPicks.push(pick);
+    return pick;
+  },
   /** Views registered by `activate`, by id. */
   viewProviders: {} as Record<string, unknown>,
   registerWebviewViewProvider(id: string, provider: unknown): { dispose(): void } {
@@ -183,6 +190,14 @@ export const workspace = {
       const base = folder.uri.toString().replace(/\/+$/, "");
       return value === base || value.startsWith(`${base}/`);
     });
+  },
+  /** Every file search, and the answer a test gives it (all of `files` by default). */
+  findFilesCalls: [] as { include: string; exclude: string; max: number }[],
+  findFilesAnswer: null as ((include: string) => Uri[]) | null,
+  async findFiles(include: string, exclude: string, max: number): Promise<Uri[]> {
+    workspace.findFilesCalls.push({ include, exclude, max });
+    const all = workspace.findFilesAnswer?.(include) ?? Array.from(workspace.files.keys(), (key) => Uri.parse(key));
+    return all.slice(0, max);
   },
   /** The open documents: a buffer over a file, which may hold unsaved edits. */
   documents: new Map<string, TextDocument>(),
@@ -369,6 +384,55 @@ export class WorkspaceEdit {
   deleteFile(uri: Uri, options: { ignoreIfNotExists?: boolean } = {}): void {
     void options;
     this.operations.push({ kind: "deleteFile", uri });
+  }
+}
+
+export class CancellationTokenSource {
+  readonly token = { isCancellationRequested: false };
+  cancel(): void {
+    this.token.isCancellationRequested = true;
+  }
+  dispose(): void {}
+}
+
+/** A QuickPick a test drives: it types with `type`, accepts with `accept`, escapes with `hide`. */
+export class FakeQuickPick {
+  title = "";
+  placeholder = "";
+  matchOnDescription = false;
+  busy = false;
+  items: { label: string }[] = [];
+  selectedItems: { label: string }[] = [];
+  shown = false;
+  disposed = false;
+  private readonly listeners = { value: [] as ((v: string) => void)[], accept: [] as (() => void)[], hide: [] as (() => void)[] };
+  onDidChangeValue(listener: (value: string) => void) {
+    this.listeners.value.push(listener);
+    return { dispose() {} };
+  }
+  onDidAccept(listener: () => void) {
+    this.listeners.accept.push(listener);
+    return { dispose() {} };
+  }
+  onDidHide(listener: () => void) {
+    this.listeners.hide.push(listener);
+    return { dispose() {} };
+  }
+  show(): void {
+    this.shown = true;
+  }
+  dispose(): void {
+    this.disposed = true;
+  }
+  type(value: string): void {
+    for (const listener of this.listeners.value) listener(value);
+  }
+  accept(item: { label: string }): void {
+    this.selectedItems = [item];
+    for (const listener of this.listeners.accept) listener();
+  }
+  hide(): void {
+    for (const listener of this.listeners.hide) listener();
   }
 }
 

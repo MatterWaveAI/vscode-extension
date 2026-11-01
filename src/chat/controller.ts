@@ -113,6 +113,11 @@ export class ChatController {
   private identity: string | null = null;
   private conversations: Conversation[] = [];
   private archived: Conversation[] = [];
+  /** Where each list resumes: the last page's `next_cursor`, null once every row is on hand. */
+  private conversationsCursor: string | null = null;
+  private archivedCursor: string | null = null;
+  /** True while a page is on its way, so a scroll that fires twice asks once. */
+  private loadingMore = false;
   /** Non-null while the sidebar's search box holds a query. */
   private searchResults: (Conversation & { snippet: string })[] | null = null;
   private activeId: string | null = null;
@@ -174,6 +179,8 @@ export class ChatController {
         return this.pinConversation(message.id, message.pinned);
       case "archiveConversation":
         return this.archiveConversation(message.id, message.archived);
+      case "loadMoreConversations":
+        return this.loadMoreConversations(message.archived);
       case "exportConversation":
       case "shareConversation":
         this.deps.runCommand(message.type);
@@ -233,6 +240,8 @@ export class ChatController {
       this.identity = null;
       this.conversations = [];
       this.archived = [];
+      this.conversationsCursor = null;
+      this.archivedCursor = null;
       this.searchResults = null;
       this.activeId = null;
       this.path = [];
@@ -256,15 +265,18 @@ export class ChatController {
         this.deps.client.me(),
         this.deps.client.models(),
         this.deps.client.listConversations(),
-        this.deps.client.listArchivedConversations(),
+        this.deps.client.listConversations({ archived: true }),
       ]);
       this.identity = me.name || me.email || me.subject;
       this.models = models.data;
       this.model = initialModel(models.data, this.deps.rememberedModel.get(), models.default_model);
       // A temporary conversation is in no list, whatever a deployment's rows
       // say: it would be gone within a day anyway.
-      this.conversations = conversations.filter(notTemporary);
-      this.archived = archived.filter(notTemporary);
+      // A refresh reads the first page of each list again; Load more goes on from there.
+      this.conversations = conversations.data.filter(notTemporary);
+      this.archived = archived.data.filter(notTemporary);
+      this.conversationsCursor = conversations.nextCursor;
+      this.archivedCursor = archived.nextCursor;
       // These are best-effort: a deployment without the route still chats.
       await Promise.all([this.loadNotifications(), this.loadUsage(), this.loadLibrary()]);
       if (this.activeId) await this.loadConversation(this.activeId);
@@ -395,6 +407,35 @@ export class ChatController {
 
   activeConversationId(): string | null {
     return this.activeId;
+  }
+
+  /**
+   * The next page of the list (or the archive), after the rows on hand: the
+   * API pages the sidebar 50 at a time by cursor, and a scroll to the end
+   * (or Load more) is what asks for more. A row already on hand -- moved by
+   * a pin or an archive since -- is not listed twice.
+   */
+  async loadMoreConversations(archived: boolean): Promise<void> {
+    const cursor = archived ? this.archivedCursor : this.conversationsCursor;
+    if (!cursor || this.loadingMore) return;
+    this.loadingMore = true;
+    try {
+      const page = await this.deps.client.listConversations({ archived, cursor });
+      const onHand = new Set([...this.conversations, ...this.archived].map((c) => c.id));
+      const added = page.data.filter((c) => notTemporary(c) && !onHand.has(c.id));
+      if (archived) {
+        this.archived = [...this.archived, ...added];
+        this.archivedCursor = page.nextCursor;
+      } else {
+        this.conversations = [...this.conversations, ...added];
+        this.conversationsCursor = page.nextCursor;
+      }
+    } catch (error) {
+      this.fail(error);
+    } finally {
+      this.loadingMore = false;
+    }
+    this.emit();
   }
 
   /** The sidebar's search. An empty query leaves search mode for the list. */
@@ -1209,6 +1250,8 @@ export class ChatController {
       identity: this.identity,
       conversations: this.conversations.map((c) => conversationSummary(c, this.library)),
       archivedConversations: this.archived.map((c) => conversationSummary(c, this.library)),
+      moreConversations: this.conversationsCursor !== null,
+      moreArchived: this.archivedCursor !== null,
       searchResults: this.searchResults?.map((hit): SearchHitView => ({ ...conversationSummary(hit, this.library), snippet: hit.snippet })) ?? null,
       activeId: this.activeId,
       transcript: transcriptOf(this.path, this.tree),

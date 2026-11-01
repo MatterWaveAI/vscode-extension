@@ -22,6 +22,13 @@ describe("parseWebviewMessage", () => {
       id: "c_1",
       archived: false,
     });
+    expect(parseWebviewMessage({ type: "loadMoreConversations", archived: true })).toEqual({ type: "loadMoreConversations", archived: true });
+    expect(parseWebviewMessage({ type: "loadMoreConversations", archived: false, extra: "x" })).toEqual({
+      type: "loadMoreConversations",
+      archived: false,
+    });
+    expect(parseWebviewMessage({ type: "loadMoreConversations" })).toBeNull();
+    expect(parseWebviewMessage({ type: "loadMoreConversations", archived: "yes" })).toBeNull();
     expect(parseWebviewMessage({ type: "exportConversation" })).toEqual({ type: "exportConversation" });
     expect(parseWebviewMessage({ type: "shareConversation" })).toEqual({ type: "shareConversation" });
     expect(parseWebviewMessage({ type: "rateMessage", messageId: "m_1", rating: 1 })).toEqual({ type: "rateMessage", messageId: "m_1", rating: 1 });

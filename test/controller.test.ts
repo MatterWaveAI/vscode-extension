@@ -342,6 +342,69 @@ function manage(controller: ChatController, extra: Record<string, (call: Call) =
   return fake.calls;
 }
 
+describe("conversation list paging", () => {
+  const row = (id: string, extra: object = {}) => ({ ...CONVERSATION, id, title: id, ...extra });
+
+  it("loads the next page on request, after the rows on hand, until the cursor runs out", async () => {
+    const { controller } = await setup();
+    const calls = manage(controller, {
+      "GET /api/conversations": (call) => {
+        const url = new URL(`https://x${call.url}`);
+        if (url.searchParams.get("filter") === "archived") return json({ data: [], filter: "archived", next_cursor: null });
+        return url.searchParams.get("cursor") === "p2"
+          ? json({ data: [row("c_51"), row("c_1")], filter: "default", next_cursor: null })
+          : json({ data: [row("c_1"), row("c_2")], filter: "default", next_cursor: "p2" });
+      },
+    });
+    await controller.refresh();
+    expect(controller.snapshot()).toMatchObject({ moreConversations: true, moreArchived: false });
+
+    await controller.handle({ type: "loadMoreConversations", archived: false });
+    // c_1 came round again (it moved since): it is not listed twice.
+    expect(controller.snapshot().conversations.map((c) => c.id)).toEqual(["c_1", "c_2", "c_51"]);
+    expect(controller.snapshot().moreConversations).toBe(false);
+    expect(calls.filter((c) => c.url.includes("cursor=p2"))).toHaveLength(1);
+
+    // Past the end, nothing more is asked for.
+    await controller.handle({ type: "loadMoreConversations", archived: false });
+    expect(calls.filter((c) => c.url.includes("cursor="))).toHaveLength(1);
+  });
+
+  it("pages the archive on its own cursor", async () => {
+    const { controller } = await setup();
+    const calls = manage(controller, {
+      "GET /api/conversations": (call) => {
+        const url = new URL(`https://x${call.url}`);
+        if (url.searchParams.get("filter") !== "archived") return json({ data: [], filter: "default", next_cursor: null });
+        return url.searchParams.get("cursor") === "a2"
+          ? json({ data: [row("c_old", { archived_at: CONVERSATION.created_at })], filter: "archived", next_cursor: null })
+          : json({ data: [row("c_arch", { archived_at: CONVERSATION.created_at })], filter: "archived", next_cursor: "a2" });
+      },
+    });
+    await controller.refresh();
+    expect(controller.snapshot()).toMatchObject({ moreConversations: false, moreArchived: true });
+    await controller.handle({ type: "loadMoreConversations", archived: true });
+    expect(controller.snapshot().archivedConversations.map((c) => c.id)).toEqual(["c_arch", "c_old"]);
+    expect(calls.find((c) => c.url.includes("cursor=a2"))?.url).toContain("filter=archived");
+  });
+
+  it("starts again from the first page on a refresh", async () => {
+    const { controller } = await setup();
+    manage(controller, {
+      "GET /api/conversations": (call) =>
+        call.url.includes("cursor=")
+          ? json({ data: [row("c_2")], filter: "default", next_cursor: null })
+          : json({ data: [row("c_1")], filter: "default", next_cursor: call.url.includes("archived") ? null : "p2" }),
+    });
+    await controller.refresh();
+    await controller.handle({ type: "loadMoreConversations", archived: false });
+    expect(controller.snapshot().conversations).toHaveLength(2);
+    await controller.refresh();
+    expect(controller.snapshot().conversations.map((c) => c.id)).toEqual(["c_1"]);
+    expect(controller.snapshot().moreConversations).toBe(true);
+  });
+});
+
 describe("conversation management", () => {
   it("renames through PATCH, trimmed, and the sidebar row follows", async () => {
     const { controller } = await setup();

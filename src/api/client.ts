@@ -79,6 +79,8 @@ const MAX_RETRY_WAIT_S = 30;
 const MAX_RETRIES = 2;
 /** `mw_` and eight display characters: what `/api/keys` lists as a key's `prefix`. */
 const KEY_PREFIX_LENGTH = 11;
+/** The API's cap on one page of the conversation list. */
+const MAX_LIST_PAGE = 200;
 
 /** What a turn ends with when its body was cut and could not be resumed. */
 const TRUNCATED: ConversationFrame = {
@@ -181,15 +183,34 @@ export class MatterWaveClient {
 
   // --- conversations -------------------------------------------------------
 
-  async listConversations(): Promise<Conversation[]> {
-    const list = await this.call(({ reads }) => reads.conversations.list());
-    return list.data;
+  /**
+   * One page of the sidebar list (the API's page is 50), and the cursor
+   * that resumes it -- null on the last page. `archived` reads the archive
+   * instead: every row whose `archived_at` is set.
+   */
+  async listConversations(
+    options: { archived?: boolean; cursor?: string | null } = {},
+  ): Promise<{ data: Conversation[]; nextCursor: string | null }> {
+    const params: { filter?: "archived"; cursor?: string } = {};
+    if (options.archived) params.filter = "archived";
+    if (options.cursor) params.cursor = options.cursor;
+    const list = await this.call(({ reads }) => reads.conversations.list(params));
+    return { data: list.data, nextCursor: list.next_cursor ?? null };
   }
 
-  /** The archive sidebar draws from: every row whose `archived_at` is set. */
-  async listArchivedConversations(): Promise<Conversation[]> {
-    const list = await this.call(({ reads }) => reads.conversations.list({ filter: "archived" }));
-    return list.data;
+  /**
+   * Every conversation in the list, page after page at the API's widest
+   * page, for a picker that has to offer all of them.
+   */
+  async allConversations(): Promise<Conversation[]> {
+    const rows: Conversation[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await this.call(({ reads }) => reads.conversations.list({ limit: MAX_LIST_PAGE, ...(cursor ? { cursor } : {}) }));
+      rows.push(...page.data);
+      cursor = page.next_cursor ?? undefined;
+    } while (cursor);
+    return rows;
   }
 
   /** Full-text search over the caller's own messages, newest matches first. */

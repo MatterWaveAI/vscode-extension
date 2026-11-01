@@ -33,6 +33,7 @@ import { DEFAULT_BASE_URL, normalizeServerUrl, serverUrlProblem, shouldPromptFor
 import { StatusBar } from "./statusBar";
 import { normalizePromptName, PromptLibrary, MAX_PROMPT_TEXT, type PromptRow } from "./promptLibrary";
 import { currentFolder, editorFolders, resolveNamedFile, whereItLands } from "./targets";
+import { pickWorkspaceFile as pickFile } from "./fileSearch";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -811,18 +812,9 @@ async function resolveMention(mention: Mention): Promise<{ filename: string; tex
   }
 }
 
-/** One workspace file out of a QuickPick over the whole tree. */
-async function pickWorkspaceFile(title: string): Promise<vscode.Uri | null> {
-  const files = await vscode.workspace.findFiles("**/*", "**/{.git,node_modules,dist,out,build}/**", 500);
-  if (files.length === 0) {
-    void vscode.window.showInformationMessage("This workspace has no files to attach.");
-    return null;
-  }
-  const rows = files
-    .map((uri) => ({ uri, path: relativePath(uri) }))
-    .sort((a, b) => a.path.localeCompare(b.path));
-  const picked = await vscode.window.showQuickPick(rows.map((r) => ({ ...r, label: r.path })), { title, placeHolder: "The file whose contents are attached" });
-  return picked?.uri ?? null;
+/** One workspace file, searched for as the person types, named by its workspace path. */
+function pickWorkspaceFile(title: string): Promise<vscode.Uri | null> {
+  return pickFile(title, relativePath);
 }
 
 /**
@@ -920,7 +912,7 @@ async function organizeConversation(client: MatterWaveClient, chat: ChatControll
   let conversations;
   let library;
   try {
-    [conversations, library] = await Promise.all([client.listConversations(), client.listLibrary()]);
+    [conversations, library] = await Promise.all([client.allConversations(), client.listLibrary()]);
   } catch (error) {
     void vscode.window.showErrorMessage(`The library could not be loaded: ${describe(error)}`);
     return;

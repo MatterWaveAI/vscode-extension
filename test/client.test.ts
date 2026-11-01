@@ -264,8 +264,41 @@ describe("MatterWaveClient", () => {
 
   it("lists the archive with the filter the sidebar folds away", async () => {
     const { api, calls } = client({ "GET /api/conversations": () => json({ data: [], filter: "archived" }) });
-    await api.listArchivedConversations();
+    await api.listConversations({ archived: true });
     expect(calls[0]?.url).toBe("/api/conversations?filter=archived");
+  });
+
+  it("hands back a page's cursor and resumes from one", async () => {
+    const { api, calls } = client({
+      "GET /api/conversations": (call) =>
+        call.url.includes("cursor=")
+          ? json({ data: [{ ...CONVERSATION, id: "c_2" }], filter: "default", next_cursor: null })
+          : json({ data: [CONVERSATION], filter: "default", next_cursor: "page-2" }),
+    });
+    const first = await api.listConversations();
+    expect(first).toMatchObject({ nextCursor: "page-2" });
+    const second = await api.listConversations({ cursor: first.nextCursor });
+    expect(second.data.map((c) => c.id)).toEqual(["c_2"]);
+    expect(second.nextCursor).toBeNull();
+    expect(calls[1]?.url).toBe("/api/conversations?cursor=page-2");
+  });
+
+  it("walks every page at the widest page for a picker that offers them all", async () => {
+    const pages: Record<string, { id: string; next: string | null }> = {
+      "": { id: "c_1", next: "b" },
+      b: { id: "c_2", next: "c" },
+      c: { id: "c_3", next: null },
+    };
+    const { api, calls } = client({
+      "GET /api/conversations": (call) => {
+        const cursor = new URL(`https://x${call.url}`).searchParams.get("cursor") ?? "";
+        const page = pages[cursor];
+        return json({ data: [{ ...CONVERSATION, id: page?.id }], filter: "default", next_cursor: page?.next ?? null });
+      },
+    });
+    expect((await api.allConversations()).map((c) => c.id)).toEqual(["c_1", "c_2", "c_3"]);
+    expect(calls).toHaveLength(3);
+    expect(calls.every((c) => c.url.includes("limit=200"))).toBe(true);
   });
 
   it("lists notifications with the unread count, filtered and sized only when asked", async () => {

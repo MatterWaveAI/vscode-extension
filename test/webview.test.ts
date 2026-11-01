@@ -24,6 +24,8 @@ function state(over: Partial<ViewState>): ViewState {
     identity: "Ada",
     conversations: [{ id: "c_1", title: "Clock", pinned: false, archived: false, badge: null }],
     archivedConversations: [],
+    moreConversations: false,
+    moreArchived: false,
     searchResults: null,
     activeId: "c_1",
     transcript: [],
@@ -244,6 +246,40 @@ describe("the chat webview", () => {
     );
     unarchive?.click();
     expect(sent.at(-1)).toEqual({ type: "archiveConversation", id: "c_3", archived: false });
+  });
+
+  it("offers Load more at the end of a list with more rows, and asks once per state", () => {
+    post({ type: "state", state: state({ moreConversations: true }) });
+    const lists = document.querySelectorAll<HTMLElement>(".convos-list");
+    const more = Array.from(lists[0]?.querySelectorAll("button") ?? []).find((b) => b.textContent === "Load more");
+    expect(more).toBeDefined();
+    sent.length = 0;
+    more?.click();
+    more?.click();
+    expect(sent).toEqual([{ type: "loadMoreConversations", archived: false }]);
+
+    // Scrolling to the end asks too, once the next state has landed.
+    post({ type: "state", state: state({ moreConversations: true }) });
+    sent.length = 0;
+    lists[0]?.dispatchEvent(new Event("scroll"));
+    expect(sent).toEqual([{ type: "loadMoreConversations", archived: false }]);
+
+    // No more rows, no button; and none during a search.
+    post({ type: "state", state: state({ moreConversations: false }) });
+    expect(Array.from(lists[0]?.querySelectorAll("button") ?? []).some((b) => b.textContent === "Load more")).toBe(false);
+    post({ type: "state", state: state({ moreConversations: true, searchResults: [] }) });
+    expect(Array.from(lists[0]?.querySelectorAll("button") ?? []).some((b) => b.textContent === "Load more")).toBe(false);
+  });
+
+  it("offers Load more under the archive on its own", () => {
+    post({
+      type: "state",
+      state: state({ moreArchived: true, archivedConversations: [{ id: "c_9", title: "Old", pinned: false, archived: true, badge: null }] }),
+    });
+    const archive = document.querySelectorAll<HTMLElement>(".convos-list")[1];
+    sent.length = 0;
+    Array.from(archive?.querySelectorAll("button") ?? []).find((b) => b.textContent === "Load more")?.click();
+    expect(sent).toEqual([{ type: "loadMoreConversations", archived: true }]);
   });
 
   it("shows a row's library badge as a suffix on its title, and nothing when there is none", () => {

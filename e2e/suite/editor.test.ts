@@ -2,6 +2,7 @@
 import * as assert from "node:assert/strict";
 import * as vscode from "vscode";
 import { applyToFile } from "../../src/apply";
+import { searchWorkspaceFiles } from "../../src/fileSearch";
 import { editorFolders, resolveNamedFile } from "../../src/targets";
 
 /**
@@ -44,6 +45,24 @@ async function disk(uri: vscode.Uri): Promise<string> {
 async function writeDisk(uri: vscode.Uri, text: string): Promise<void> {
   await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(text));
 }
+
+describe("finding a workspace file in a real editor", function () {
+  it("reaches a file past any fixed count by searching for it, whatever its case", async function () {
+    const found = await searchWorkspaceFiles("FILE-0599");
+    assert.deepEqual(
+      found.map((uri) => vscode.workspace.asRelativePath(uri, true)),
+      ["alpha/many/file-0599.ts"],
+    );
+  });
+
+  it("finds the files under a directory whose name was typed, and a path across folders", async function () {
+    const underMany = await searchWorkspaceFiles("many");
+    assert.ok(underMany.length > 100, `files under many/ (found ${underMany.length})`);
+    assert.ok(underMany.every((uri) => uri.path.includes("/many/")));
+    const shared = (await searchWorkspaceFiles("src/shared")).map((uri) => vscode.workspace.asRelativePath(uri, true));
+    assert.deepEqual(shared.sort(), ["alpha/src/shared.ts", "beta/src/shared.ts"]);
+  });
+});
 
 describe("applying code in a real editor", function () {
   afterEach(async function () {

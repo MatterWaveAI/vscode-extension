@@ -22,6 +22,8 @@ function view(transcript: Message[]): ViewState {
     identity: "Ada",
     conversations: [{ id: "c_1", title: "The clock question", pinned: false, archived: false, badge: null }],
     archivedConversations: [],
+    moreConversations: false,
+    moreArchived: false,
     searchResults: null,
     activeId: "c_1",
     transcript: transcript.map((m) => ({ message: m, siblingIndex: 1, siblingCount: 1 })),

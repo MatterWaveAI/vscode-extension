@@ -195,6 +195,13 @@ function editorWorkspace(dir) {
     mkdirSync(path.join(dir, folder, "src"), { recursive: true });
     writeFileSync(path.join(dir, folder, "src", "shared.ts"), `export const where = "${folder}";\n`);
   }
+  // More files than any one list of them holds, so a picker that stops at
+  // a fixed count would lose some.
+  mkdirSync(path.join(dir, "alpha", "many"));
+  for (let i = 0; i < 600; i++) {
+    const name = `file-${String(i).padStart(4, "0")}.ts`;
+    writeFileSync(path.join(dir, "alpha", "many", name), `export const n = ${i};\n`);
+  }
   const file = path.join(dir, "e2e.code-workspace");
   writeFileSync(
     file,
