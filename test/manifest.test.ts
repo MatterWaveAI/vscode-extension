@@ -79,6 +79,17 @@ describe("the extension manifest", () => {
     }
   });
 
+  it("documents every command and setting in the README", () => {
+    const readme = readFileSync(root("README.md"), "utf8");
+    for (const command of manifest.contributes.commands as { command: string; title: string }[]) {
+      const title = english[command.title.slice(1, -1)] ?? "";
+      expect(readme.includes(title), `${command.command} (“${title}”)`).toBe(true);
+    }
+    for (const setting of Object.keys(manifest.contributes.configuration.properties)) {
+      expect(readme.includes(`\`${setting}\``), setting).toBe(true);
+    }
+  });
+
   it("names every user-facing manifest string by a key, with English and Spanish for each", () => {
     const keys = new Set(Object.keys(english));
     const placeholders: string[] = [];
