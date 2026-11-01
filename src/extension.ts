@@ -13,6 +13,7 @@ import { fitsContentCap, MAX_CONTENT_CHARS, imageAttachment, imageContentType, s
 import { applyToFile, registerApplyContentProvider } from "./apply";
 import { CheckpointStore, type Checkpoint } from "./checkpoints";
 import { snapshotFolder } from "./snapshotFiles";
+import { requireTrust } from "./trust";
 import type { CodeBlock } from "./chat/codeBlocks";
 import { fitReplacement, inlineEditPrompt, replacementFromAnswer, selectedLines } from "./inlineEdit";
 import {
@@ -543,6 +544,7 @@ async function editPrompt(library: PromptLibrary, existing: PromptRow | null): P
  * extension never edits a file any other way.
  */
 async function inlineEdit(chat: ChatController, checkpoints: CheckpointStore): Promise<void> {
+  if (!(await requireTrust("Inline edit"))) return;
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.selection.isEmpty) {
     void vscode.window.showInformationMessage("Select the code to edit first.");
@@ -607,6 +609,7 @@ async function inlineEdit(chat: ChatController, checkpoints: CheckpointStore): P
  * edits a file any other way.
  */
 async function applyCodeBlockFlow(chat: ChatController, checkpoints: CheckpointStore, block: CodeBlock): Promise<void> {
+  if (!(await requireTrust("Apply"))) return;
   let picked: vscode.Uri | null = null;
   if (block.filename) {
     const named = await resolveNamedFile(block.filename, editorFolders());
@@ -694,6 +697,7 @@ async function exists(uri: vscode.Uri): Promise<boolean> {
  * file that was new restores by removing the file, with its own confirm.
  */
 async function restoreCheckpoint(chat: ChatController, store: CheckpointStore): Promise<void> {
+  if (!(await requireTrust("Restore Checkpoint"))) return;
   const rows = await store.list(chat.activeConversationId());
   if (rows.length === 0) {
     void vscode.window.showInformationMessage(
@@ -807,6 +811,7 @@ async function resolveMention(mention: Mention, history: TerminalHistory): Promi
       return terminalContext(picked.terminal.name, text);
     }
     case "git": {
+      if (!(await requireTrust("@git"))) return null;
       if (!vscode.workspace.workspaceFolders?.length) {
         void vscode.window.showInformationMessage("Open a workspace to attach its git changes.");
         return null;

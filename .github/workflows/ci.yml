@@ -23,7 +23,7 @@ jobs:
       - run: pnpm build
       # The packaging gate: a manifest problem (a missing icon, a bad
       # activation event) fails here rather than at publish time.
-      - run: pnpm exec vsce package --no-dependencies --skip-license --allow-missing-repository --out matterwave.vsix
+      - run: pnpm exec vsce package --no-dependencies --out matterwave.vsix
       - uses: actions/upload-artifact@v4
         with:
           name: vsix

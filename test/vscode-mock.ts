@@ -196,6 +196,8 @@ export const commands = {
  * test needs is modelled; the rest throws by being undefined.
  */
 export const workspace = {
+  /** Workspace trust: false is Restricted Mode. */
+  isTrusted: true,
   workspaceFolders: [] as { uri: Uri; name: string; index: number }[],
   files: new Map<string, Uint8Array>(),
   contentProviders: {} as Record<string, unknown>,

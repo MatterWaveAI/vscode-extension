@@ -6,6 +6,24 @@
   "publisher": "matterwave",
   "private": false,
   "license": "MIT",
+  "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#0B0C0E",
+    "theme": "dark"
+  },
+  "keywords": [
+    "matterwave",
+    "ai",
+    "chat",
+    "llm",
+    "assistant",
+    "code review",
+    "inline edit"
+  ],
+  "homepage": "https://github.com/MatterWaveAI/vscode-extension#readme",
+  "bugs": {
+    "url": "https://github.com/MatterWaveAI/vscode-extension/issues"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/MatterWaveAI/vscode-extension"
@@ -17,6 +35,12 @@
     "AI",
     "Chat"
   ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "In Restricted Mode MatterWave chats and reads context, but does not change files (Apply, inline edit, Restore Checkpoint) or run git for @git until the workspace is trusted."
+    }
+  },
   "main": "./dist/extension.js",
   "activationEvents": [
     "onStartupFinished"
@@ -186,7 +210,7 @@
         },
         {
           "command": "matterwave.inlineEdit",
-          "when": "editorHasSelection",
+          "when": "editorHasSelection && isWorkspaceTrusted",
           "group": "matterwave@3"
         }
       ]
@@ -195,7 +219,14 @@
       {
         "command": "matterwave.inlineEdit",
         "key": "ctrl+i",
-        "when": "editorTextFocus && editorHasSelection"
+        "mac": "cmd+i",
+        "when": "editorTextFocus && editorHasSelection && isWorkspaceTrusted && !inlineChatHasProvider && !inlineChatHasEditsAgent"
+      },
+      {
+        "command": "matterwave.inlineEdit",
+        "key": "ctrl+alt+m i",
+        "mac": "ctrl+cmd+m i",
+        "when": "editorTextFocus && editorHasSelection && isWorkspaceTrusted"
       }
     ]
   },
@@ -206,7 +237,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "pnpm run build && node e2e/run.mjs",
-    "package": "pnpm run build && vsce package --no-dependencies --skip-license --allow-missing-repository"
+    "package": "pnpm run build && vsce package --no-dependencies",
+    "icon": "node scripts/icon.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
