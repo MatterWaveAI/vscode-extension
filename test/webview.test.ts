@@ -43,6 +43,7 @@ function state(over: Partial<ViewState>): ViewState {
     notificationsUnreadOnly: false,
     notificationsComplete: true,
     usage: null,
+    answerUsage: {},
     ...over,
   };
 }
@@ -280,6 +281,18 @@ describe("the chat webview", () => {
     sent.length = 0;
     Array.from(archive?.querySelectorAll("button") ?? []).find((b) => b.textContent === "Load more")?.click();
     expect(sent).toEqual([{ type: "loadMoreConversations", archived: true }]);
+  });
+
+  it("shows an answer's tokens and cost under it, and nothing for one without a count", () => {
+    post({
+      type: "state",
+      state: state({
+        transcript: [assistantEntry("a1"), assistantEntry("a2")],
+        answerUsage: { a1: { promptTokens: 1200, completionTokens: 34, costUsd: 0.000651 } },
+      }),
+    });
+    const lines = Array.from(document.querySelectorAll(".answer-usage")).map((n) => n.textContent);
+    expect(lines).toEqual(["1,200 in · 34 out · $0.0007"]);
   });
 
   it("shows a row's library badge as a suffix on its title, and nothing when there is none", () => {

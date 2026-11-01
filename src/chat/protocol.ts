@@ -75,6 +75,14 @@ export interface NotificationView {
   read: boolean;
 }
 
+/** What one answer used, from its turn's `context` frame, and what that costs at the model's list price. */
+export interface AnswerUsage {
+  promptTokens: number;
+  completionTokens: number;
+  /** Null when the model list gave no price. */
+  costUsd: number | null;
+}
+
 /** The org's allowance this period, as the usage line renders it. */
 export interface UsageView {
   used: number;
@@ -124,6 +132,8 @@ export interface ViewState {
   unreadNotifications: number;
   /** The org's allowance this period, or null when the API did not say. */
   usage: UsageView | null;
+  /** Tokens and cost of the answers this session streamed, by message id; empty while the setting hides them. */
+  answerUsage: Record<string, AnswerUsage>;
 }
 
 export type HostMessage =

@@ -4,6 +4,7 @@ import type { FeedbackSummary, HostMessage, NotificationView, TranscriptEntry, U
 import { trustedImageDataUri } from "../chat/images";
 import { parseCodeBlocks } from "../chat/codeBlocks";
 import { renderMarkdown } from "./markdown";
+import { answerUsageLabel } from "../chat/usage";
 
 /**
  * The chat view's script. It only renders and reports intents: there is no
@@ -588,6 +589,10 @@ function renderEntry(entry: TranscriptEntry, isLast: boolean, streaming: boolean
       actions.appendChild(button("Regenerate", () => send({ type: "regenerate", messageId: m.id }), { className: "link" }));
     }
     node.appendChild(actions);
+  }
+  const used = state?.answerUsage[m.id];
+  if (used && m.role === "assistant") {
+    node.appendChild(el("div", { className: "answer-usage", text: answerUsageLabel(used), title: "Tokens this answer used, and their cost at the model's list price" }));
   }
   if (m.id && feedbackPickerId === m.id && m.role === "assistant") node.appendChild(feedbackPicker(m));
   return node;

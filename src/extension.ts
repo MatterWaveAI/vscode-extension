@@ -172,6 +172,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
       await applyCodeBlockFlow(chat, checkpoints, block);
     },
     onStatus: (status) => statusBar.update(status),
+    showAnswerUsage: () => vscode.workspace.getConfiguration("matterwave").get<boolean>("showAnswerUsage") !== false,
   });
   view.attach(chat);
 
@@ -193,6 +194,8 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
       } else if (event.affectsConfiguration("matterwave.caFile")) {
         // The next request reads the new file; refreshing makes it now.
         void chat.refresh();
+      } else if (event.affectsConfiguration("matterwave.showAnswerUsage")) {
+        chat.emit();
       }
     }),
   );

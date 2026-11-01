@@ -65,6 +65,11 @@
           "editPresentation": "multilineText",
           "markdownDescription": "How **Generate Commit Message** writes a message: a convention (Conventional Commits, a ticket prefix) or plain words. Empty uses a summary line of at most 72 characters in the imperative mood, a blank line, and a short body saying what changed and why. A workspace can set its own.",
           "scope": "resource"
+        },
+        "matterwave.showAnswerUsage": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show under each answer the tokens it used and their cost at the model's list price."
         }
       }
     },

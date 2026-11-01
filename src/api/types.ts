@@ -101,6 +101,9 @@ export interface ModelInfo {
   research_preview: boolean;
   supports_vision?: boolean | null;
   context_window: number | null;
+  /** List price in US dollars per million tokens, as the pricing page shows it; absent on an older deployment. */
+  input_usd_per_m?: number;
+  output_usd_per_m?: number;
 }
 
 export interface ModelList {

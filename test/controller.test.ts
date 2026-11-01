@@ -11,6 +11,7 @@ import { ChatViewProvider, chatHtml } from "../src/chat/viewProvider";
 import { CONVERSATION, fakeFetch, fixture, json, MODELS, sse, type Call } from "./fakeApi";
 import { FakeWebview, MemorySecrets } from "./vscode-mock";
 import { STREAM_ERROR_COPY } from "../src/streamErrors";
+import { answerUsageLabel } from "../src/chat/usage";
 
 const TOKEN = "mw_abcdefgh_THIS-MUST-NEVER-REACH-THE-WEBVIEW";
 
@@ -333,6 +334,47 @@ describe("@-mentions", () => {
   });
 });
 
+
+describe("tokens and cost per answer", () => {
+  const priced = {
+    ...MODELS,
+    data: MODELS.data.map((m) => (m.id === "grt-small" ? { ...m, input_usd_per_m: 0.5, output_usd_per_m: 1.5 } : m)),
+  };
+
+  it("keeps what the turn's context frame said under the answer's id, priced at the model's list price", async () => {
+    const { controller } = await setup({ "GET /api/models": () => json(priced) });
+    await controller.refresh();
+    await controller.send("What time is it?");
+    // The fixture's turn: 1,200 prompt tokens, 34 completion tokens, answer m_asst.
+    expect(controller.snapshot().answerUsage).toEqual({
+      m_asst: { promptTokens: 1200, completionTokens: 34, costUsd: (1200 * 0.5 + 34 * 1.5) / 1_000_000 },
+    });
+  });
+
+  it("gives tokens without a cost when the model list has no price", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    await controller.send("What time is it?");
+    expect(controller.snapshot().answerUsage.m_asst).toEqual({ promptTokens: 1200, completionTokens: 34, costUsd: null });
+  });
+
+  it("shows nothing while the setting hides it", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    await controller.send("What time is it?");
+    controller["deps"].showAnswerUsage = () => false;
+    expect(controller.snapshot().answerUsage).toEqual({});
+  });
+});
+
+describe("answerUsageLabel", () => {
+  it("reads tokens in and out, and the cost to the place that shows it", () => {
+    expect(answerUsageLabel({ promptTokens: 1200, completionTokens: 34, costUsd: 0.000651 })).toBe("1,200 in · 34 out · $0.0007");
+    expect(answerUsageLabel({ promptTokens: 90_000, completionTokens: 4_000, costUsd: 1.234 })).toBe("90,000 in · 4,000 out · $1.23");
+    expect(answerUsageLabel({ promptTokens: 3, completionTokens: 1, costUsd: 0.000002 })).toBe("3 in · 1 out · under $0.0001");
+    expect(answerUsageLabel({ promptTokens: 3, completionTokens: 1, costUsd: null })).toBe("3 in · 1 out");
+  });
+});
 
 describe("answerOnce", () => {
   it("answers in a temporary conversation it then deletes, leaving the chat as it was", async () => {

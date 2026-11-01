@@ -151,6 +151,7 @@ img.image-preview { display: block; max-width: 100%; max-height: 320px; margin-t
 .notif-when { font-size: 85%; opacity: .6; }
 .notif .row-actions { flex: none; opacity: 1; }
 .usage { font-size: 90%; }
+.answer-usage { font-size: 85%; opacity: .65; margin-top: 2px; }
 .usage.warn { font-weight: 600; }
 .signin { padding: 16px; display: flex; flex-direction: column; gap: 8px; }
 .convos { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--vscode-panel-border); }

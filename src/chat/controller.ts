@@ -14,6 +14,7 @@ import { switchTarget, transcriptOf } from "./branches";
 import { imageDataUri, MAX_IMAGE_BYTES, renderableImageType } from "./images";
 import { codeBlockAt, type CodeBlock } from "./codeBlocks";
 import type {
+  AnswerUsage,
   ConversationSummary,
   ErrorView,
   FeedbackSummary,
@@ -75,6 +76,8 @@ export interface ChatDeps {
    */
   applyCode?: (request: { messageId: string; block: CodeBlock }) => Promise<void> | void;
   onStatus?: (status: StatusInfo) => void;
+  /** Whether answers show their tokens and cost (the matterwave.showAnswerUsage setting); on when absent. */
+  showAnswerUsage?: () => boolean;
 }
 
 /** One @-mention's context, as the attachment upload takes it. */
@@ -148,6 +151,10 @@ export class ChatController {
   /** The library, read once per refresh: the rows' folder/tag badges draw from it. */
   private library: Library | null = null;
   private abort: AbortController | null = null;
+  /** The running turn's tokens, from its `context` frame, until its `done` names the answer. */
+  private turnTokens: { prompt: number; completion: number; model: ModelInfo | null } | null = null;
+  /** What each answer this session streamed used, by message id: the API keeps no per-answer count. */
+  private readonly answerUsage = new Map<string, AnswerUsage>();
   private failed: FailedTurn | null = null;
   private reloadAfterTurn = false;
   lastRequestId: string | null = null;
@@ -1045,6 +1052,7 @@ export class ChatController {
     this.error = null;
     this.failed = null;
     this.reloadAfterTurn = false;
+    this.turnTokens = null;
     const parent = this.path[this.path.length - 1] ?? null;
     this.live = emptyAssistant(conversationId, parent?.id ?? null);
     let userMessageId = retryable?.userMessageId ?? null;
@@ -1129,6 +1137,7 @@ export class ChatController {
       }
       case "context": {
         const prompt = frame.prompt_tokens;
+        if (prompt !== null) this.turnTokens = { prompt, completion: frame.completion_tokens ?? 0, model: this.model };
         this.meter = {
           usedTokens: prompt === null ? null : prompt + (frame.completion_tokens ?? 0),
           contextWindow: frame.context_window ?? this.meter?.contextWindow ?? null,
@@ -1156,6 +1165,10 @@ export class ChatController {
       }
       case "done": {
         const message = frame.message as Message;
+        if (this.turnTokens) {
+          this.answerUsage.set(message.id, answerUsageOf(this.turnTokens));
+          this.turnTokens = null;
+        }
         this.path = [...this.path.filter((m) => m.id !== ""), message];
         this.live = null;
         this.emit();
@@ -1319,6 +1332,7 @@ export class ChatController {
       notificationsUnreadOnly: this.notificationsUnreadOnly,
       notificationsComplete: this.notificationsComplete,
       usage: this.usage,
+      answerUsage: this.deps.showAnswerUsage?.() === false ? {} : Object.fromEntries(this.answerUsage),
     };
   }
 
@@ -1414,6 +1428,19 @@ function usageViewOf(report: UsageReport): UsageView {
     resetsAt: report.resets_at,
     planName: report.plan.name,
   };
+}
+
+/**
+ * A turn's tokens as an answer's usage: what the prompt and the answer
+ * used, and what that costs at the model's list price per million -- the
+ * price the pricing page shows, not a bill.
+ */
+export function answerUsageOf(tokens: { prompt: number; completion: number; model: ModelInfo | null }): AnswerUsage {
+  const input = tokens.model?.input_usd_per_m;
+  const output = tokens.model?.output_usd_per_m;
+  const costUsd =
+    typeof input === "number" && typeof output === "number" ? (tokens.prompt * input + tokens.completion * output) / 1_000_000 : null;
+  return { promptTokens: tokens.prompt, completionTokens: tokens.completion, costUsd };
 }
 
 function errorView(kind: StreamErrorKind, requestId: string | null): ErrorView {
