@@ -13,7 +13,7 @@ import { fitsContentCap, MAX_CONTENT_CHARS, imageAttachment, imageContentType, s
 import { applyToFile, registerApplyContentProvider } from "./apply";
 import { CheckpointStore } from "./checkpoints";
 import type { CodeBlock } from "./chat/codeBlocks";
-import { inlineEditPrompt, replacementFromAnswer } from "./inlineEdit";
+import { fitReplacement, inlineEditPrompt, replacementFromAnswer, selectedLines } from "./inlineEdit";
 import {
   docsContext,
   fetchDocText,
@@ -527,14 +527,21 @@ async function inlineEdit(chat: ChatController, checkpoints: CheckpointStore): P
     ignoreFocusOut: true,
   });
   if (!instruction?.trim()) return;
+  // Whole lines, so the model sees (and answers with) each line's indentation.
+  const { first, last } = selectedLines(selection.start, selection.end);
+  const lines = new vscode.Range(
+    new vscode.Position(first, 0),
+    last + 1 < document.lineCount ? new vscode.Position(last + 1, 0) : document.lineAt(last).range.end,
+  );
+  const original = document.getText(lines);
   const path = relativePath(document.uri);
   const prompt = inlineEditPrompt({
     instruction,
-    code: document.getText(selection),
+    code: original,
     languageId: document.languageId,
     path,
-    startLine: selection.start.line + 1,
-    endLine: selection.end.line + 1,
+    startLine: first + 1,
+    endLine: last + 1,
   });
   const answer = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: "MatterWave is editing the selection…" },
@@ -549,14 +556,15 @@ async function inlineEdit(chat: ChatController, checkpoints: CheckpointStore): P
     );
     return;
   }
-  // The file is rewritten whole through the diff, with the selection's range
-  // swapped for the answer's code; nothing else on disk is touched.
+  // The document goes through the diff with the selected lines swapped for
+  // the answer's, fitted to keep their line break and indentation; nothing
+  // else in it is touched.
   const full = document.getText();
-  const start = document.offsetAt(selection.start);
-  const end = document.offsetAt(selection.end);
-  await applyToFile(document.uri, full.slice(0, start) + replacement + full.slice(end), {
+  const start = document.offsetAt(lines.start);
+  const end = document.offsetAt(lines.end);
+  await applyToFile(document.uri, full.slice(0, start) + fitReplacement(original, replacement) + full.slice(end), {
     title: `${path} — inline edit`,
-    detail: "The selection becomes exactly the code on the right.",
+    detail: "The selected lines become exactly the code on the right.",
     onSnapshot: (snapshot) => recordCheckpoint(chat, checkpoints, document.uri, snapshot, "Inline edit"),
   });
 }
