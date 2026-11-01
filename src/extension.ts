@@ -14,6 +14,7 @@ import { applyToFile, registerApplyContentProvider } from "./apply";
 import { CheckpointStore, type Checkpoint } from "./checkpoints";
 import { snapshotFolder } from "./snapshotFiles";
 import { requireTrust } from "./trust";
+import { registerMcpServer } from "./mcp";
 import { commitMessageFrom, commitMessagePrompt, gitApi, repositoryFor } from "./commitMessage";
 import {
   CODE_ACTION_COMMANDS,
@@ -224,6 +225,22 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
   context.subscriptions.push(
     vscode.commands.registerCommand("matterwave.generateCommitMessage", (clicked) => generateCommitMessage(chat, clicked)),
   );
+  // VS Code's agent mode gets MatterWave's tools, as the account signed in here.
+  const mcpChanged = new vscode.EventEmitter<void>();
+  context.subscriptions.push(
+    mcpChanged,
+    tokens.onDidChange(() => mcpChanged.fire()),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("matterwave.baseUrl")) mcpChanged.fire();
+    }),
+  );
+  const mcp = registerMcpServer({
+    baseUrl,
+    getToken: () => tokens.get(),
+    version: String(context.extension?.packageJSON?.version ?? ""),
+    onDidChange: mcpChanged.event,
+  });
+  if (mcp) context.subscriptions.push(mcp);
   command("matterwave.explainTerminalCommand", () => terminalCommand("explain", terminals, chat, view));
   command("matterwave.fixTerminalCommand", () => terminalCommand("fix", terminals, chat, view));
   command("matterwave.showLog", () => log.show(true));

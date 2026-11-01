@@ -5,6 +5,7 @@ import { applyToFile } from "../../src/apply";
 import { createFetch } from "../../src/api/transport";
 import { CheckpointStore } from "../../src/checkpoints";
 import { commitMessagePrompt, gitApi, repositoryFor } from "../../src/commitMessage";
+import { mcpProvider, type McpHttpDefinition } from "../../src/mcp";
 import { searchWorkspaceFiles } from "../../src/fileSearch";
 import { snapshotFolder } from "../../src/snapshotFiles";
 import { editorFolders, resolveNamedFile } from "../../src/targets";
@@ -84,6 +85,24 @@ describe("the lightbulb in a real editor", function () {
     } finally {
       problems.dispose();
     }
+  });
+});
+
+describe("the MCP server in a real editor", function () {
+  it("builds the editor's own HTTP server definition, adding the bearer only at start", async function () {
+    const editor = vscode as unknown as { lm: { registerMcpServerDefinitionProvider?: unknown }; McpHttpServerDefinition?: unknown };
+    assert.equal(typeof editor.lm.registerMcpServerDefinitionProvider, "function", "this editor offers the provider API");
+    const Definition = editor.McpHttpServerDefinition as new (label: string, uri: vscode.Uri, headers?: Record<string, string>, version?: string) => McpHttpDefinition;
+    const signedIn = mcpProvider(
+      { baseUrl: () => "https://mw.test", getToken: async () => "mw_abcdefgh_e2e", version: "0.0.0", onDidChange: new vscode.EventEmitter<void>().event },
+      Definition,
+    );
+    const [server] = await signedIn.provideMcpServerDefinitions();
+    assert.ok(server);
+    assert.equal(server.uri.toString(), "https://mw.test/mcp");
+    assert.deepEqual(server.headers, {});
+    const started = await signedIn.resolveMcpServerDefinition(server);
+    assert.equal(started?.headers.Authorization, "Bearer mw_abcdefgh_e2e");
   });
 });
 

@@ -448,6 +448,17 @@ export class WorkspaceEdit {
   }
 }
 
+export class EventEmitter<T> {
+  private readonly listeners: ((value: T) => void)[] = [];
+  readonly event = (listener: (value: T) => void) => listen(this.listeners, listener);
+  fire(value: T): void {
+    for (const listener of [...this.listeners]) listener(value);
+  }
+  dispose(): void {
+    this.listeners.length = 0;
+  }
+}
+
 export class CancellationTokenSource {
   readonly token = { isCancellationRequested: false };
   cancel(): void {
