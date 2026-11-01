@@ -148,7 +148,7 @@ describe("the webview message channel", () => {
     expect(state.streaming).toBe(false);
     expect(state.live).toBeNull();
     expect(state.transcript.map((e) => e.message.id)).toEqual(["m_user", "m_asst"]);
-    expect(state.conversations).toEqual([{ id: "c_1", title: "What time is it?", pinned: false, archived: false, badge: null }]);
+    expect(state.conversations).toEqual([{ id: "c_1", title: "What time is it?", pinned: false, archived: false, badge: null, source: null }]);
     expect(state.meter).toEqual({ usedTokens: 1234, contextWindow: 32768, compactable: true });
     expect(statuses.at(-1)).toMatchObject({ signedIn: true, identity: "Ada", model: "GRT Small", meterPercent: 4 });
 
@@ -706,7 +706,7 @@ describe("conversation management", () => {
     await controller.refresh();
     await controller.handle({ type: "renameConversation", id: "c_1", title: "  Better name  " });
     expect(calls.find((c) => c.method === "PATCH")?.url).toBe("/api/conversations/c_1");
-    expect(controller.snapshot().conversations).toEqual([{ id: "c_1", title: "Better name", pinned: false, archived: false, badge: null }]);
+    expect(controller.snapshot().conversations).toEqual([{ id: "c_1", title: "Better name", pinned: false, archived: false, badge: null, source: null }]);
   });
 
   it("pins and unpins over PUT and DELETE, pinned sorting first", async () => {
@@ -738,7 +738,7 @@ describe("conversation management", () => {
     await controller.handle({ type: "archiveConversation", id: "c_1", archived: true });
     const state = controller.snapshot();
     expect(state.conversations).toEqual([]);
-    expect(state.archivedConversations).toEqual([{ id: "c_1", title: "New chat", pinned: false, archived: true, badge: null }]);
+    expect(state.archivedConversations).toEqual([{ id: "c_1", title: "New chat", pinned: false, archived: true, badge: null, source: null }]);
     expect(state.activeId).toBeNull();
     // Unarchiving puts it back.
     controller["deps"].client = new MatterWaveClient({
@@ -780,7 +780,7 @@ describe("conversation management", () => {
     });
     await controller.handle({ type: "searchConversations", query: "clock" });
     expect(query).toBe("clock");
-    expect(controller.snapshot().searchResults).toEqual([{ id: "c_1", title: "New chat", pinned: false, archived: false, badge: null, snippet: "the clock struck" }]);
+    expect(controller.snapshot().searchResults).toEqual([{ id: "c_1", title: "New chat", pinned: false, archived: false, badge: null, source: null, snippet: "the clock struck" }]);
     const searches = calls.filter((c) => c.url.startsWith("/api/search")).length;
     await controller.handle({ type: "searchConversations", query: "   " });
     expect(controller.snapshot().searchResults).toBeNull();
@@ -803,7 +803,7 @@ describe("conversation management", () => {
     await fromWebview({ type: "ready" });
     const state = lastState(webview.posted);
     // Folder first, then the tags it carries, in the library's order.
-    expect(state.conversations).toEqual([{ id: "c_1", title: "New chat", pinned: false, archived: false, badge: "Work · bug" }]);
+    expect(state.conversations).toEqual([{ id: "c_1", title: "New chat", pinned: false, archived: false, badge: "Work · bug", source: null }]);
     // One library read per refresh, whatever the lists asked for.
     expect(calls.filter((c) => c.url === "/api/library")).toHaveLength(1);
     // A deployment without the route loses the badges and nothing else.
@@ -823,7 +823,7 @@ describe("conversation management", () => {
       runCommand: () => undefined,
     });
     await bare.refresh();
-    expect(bare.snapshot().conversations).toEqual([{ id: "c_1", title: "New chat", pinned: false, archived: false, badge: null }]);
+    expect(bare.snapshot().conversations).toEqual([{ id: "c_1", title: "New chat", pinned: false, archived: false, badge: null, source: null }]);
   });
 });
 
@@ -1131,6 +1131,99 @@ describe("temporary chats", () => {
     const create = calls.find((c) => c.method === "POST" && c.url === "/api/conversations");
     expect(JSON.parse(String(create?.body))).toEqual({ model: "grt-small", temporary: true });
     expect(lastState(webview.posted).temporary).toBe(true);
+  });
+});
+
+describe("a connector's conversation", () => {
+  const SLACK = {
+    connector: "slack",
+    connection_id: "conn-1",
+    channel_label: "#support",
+    url: "https://acme.slack.com/archives/C01/p1700000000000100",
+  };
+  const SOURCED = { ...CONVERSATION, title: "Deploy question", source: SLACK };
+  const REFUSAL = {
+    detail: "This conversation is answered from slack in #support; reply there. Fork it to continue it here.",
+    code: "connector_conversation",
+    source: SLACK,
+    request_id: "req-409",
+  };
+
+  it("carries the source on the row and on the open conversation, and sends no turn into it", async () => {
+    const { controller, webview, calls } = await setup({
+      "GET /api/conversations": () => json({ data: [SOURCED], filter: "default" }),
+      "GET /api/conversations/c_1": () => json({ ...SOURCED, messages: [USER, DONE] }),
+    });
+    await controller.refresh();
+    expect(controller.snapshot().conversations).toEqual([
+      { id: "c_1", title: "Deploy question", pinned: false, archived: false, badge: null, source: SLACK },
+    ]);
+    await controller.openConversation("c_1");
+    expect(controller.snapshot().source).toEqual(SLACK);
+
+    await controller.send("Any news?");
+    await controller.edit("m_user", "Any news at all?");
+    await controller.regenerate("m_asst");
+    expect(calls.filter((c) => c.method === "POST" && c.url.includes("/messages"))).toEqual([]);
+    const state = lastState(webview.posted);
+    expect(state.error).toBeNull();
+    expect(state.notice).toBe("Answered in Slack #support — reply in the thread");
+    // Leaving it clears the mark.
+    controller.newChat();
+    expect(controller.snapshot().source).toBeNull();
+  });
+
+  it("turns the API's 409 on a send into the same lock when the list was stale", async () => {
+    // The row and the first read predate the source; the reload after the
+    // refused turn is what brings it.
+    let reads = 0;
+    const { controller, webview, calls } = await setup({
+      "GET /api/conversations": () => json({ data: [CONVERSATION], filter: "default" }),
+      "POST /api/conversations/c_1/messages": () => json(REFUSAL, 409),
+      "GET /api/conversations/c_1": () => json({ ...(reads++ === 0 ? CONVERSATION : SOURCED), messages: [USER, DONE] }),
+    });
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    expect(controller.snapshot().source).toBeNull();
+    await controller.send("Any news?");
+    expect(calls.some((c) => c.method === "POST" && c.url === "/api/conversations/c_1/messages")).toBe(true);
+    const state = lastState(webview.posted);
+    expect(state.source).toEqual(SLACK);
+    // Not a failed turn: no error, no Retry, and the optimistic line is gone with the reload.
+    expect(state.error).toBeNull();
+    expect(state.transcript.map((e) => e.message.id)).toEqual(["m_user", "m_asst"]);
+    await controller.retry();
+    expect(calls.filter((c) => c.method === "POST" && c.url === "/api/conversations/c_1/messages")).toHaveLength(1);
+  });
+
+  it("forks from the leaf into a conversation of the person's own, and opens it", async () => {
+    const FORKED = { ...CONVERSATION, id: "c_2", title: "Fork of Deploy question", source: null };
+    const { controller, calls, openLink } = await setup({
+      "GET /api/conversations": () => json({ data: [SOURCED], filter: "default" }),
+      "GET /api/conversations/c_1": () => json({ ...SOURCED, messages: [USER, DONE] }),
+      "POST /api/conversations/c_1/fork": () => json(FORKED, 201),
+      "GET /api/conversations/c_2": () => json({ ...FORKED, messages: [USER, DONE] }),
+      "GET /api/conversations/c_2/tree": () => json({ ...FORKED, messages: [USER, DONE] }),
+      "GET /api/conversations/c_2/context": () =>
+        json({ model: "grt-small", context_window: 32768, used_tokens: 1234, compactable: true }),
+      "GET /api/conversations/c_2/feedback": () => json({ data: [] }),
+    });
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    await controller.handle({ type: "openLink", url: SLACK.url });
+    expect(openLink).toHaveBeenCalledWith(SLACK.url);
+
+    await controller.handle({ type: "forkConversation", messageId: "m_asst" });
+    const fork = calls.find((c) => c.method === "POST" && c.url === "/api/conversations/c_1/fork");
+    expect(JSON.parse(String(fork?.body))).toEqual({ message_id: "m_asst" });
+    const state = controller.snapshot();
+    expect(state.activeId).toBe("c_2");
+    expect(state.source).toBeNull();
+    expect(state.notice).toContain("Forked into “Fork of Deploy question”");
+    expect(state.conversations.map((c) => [c.id, c.source])).toEqual([
+      ["c_2", null],
+      ["c_1", SLACK],
+    ]);
   });
 });
 

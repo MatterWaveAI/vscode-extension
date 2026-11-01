@@ -1,16 +1,17 @@
 /**
  * Vendored from the MatterWave TypeScript SDK (MatterWaveAI/typescript-sdk,
  * MIT, version 0.1.0) and trimmed to the surface this extension uses: the
- * request/retry core, `me()`, device login, and the conversation API with
- * its streaming frames. The v1 chat-completions surface, the native
- * org/keys/webhooks/library/shares clients and the environment-variable
- * fallbacks are left out.
+ * request/retry core, `me()`, device login, the conversation API with its
+ * streaming frames, and the reading half of `presets` (a composer offers the
+ * org's presets; it never writes them). The v1 chat-completions surface, the
+ * native org/keys/webhooks/library/shares/connections clients, the preset
+ * writes and the environment-variable fallbacks are left out.
  *
  * It is vendored, not depended on, because `@matterwave/sdk` is not
  * published to npm and this repository no longer sits beside the SDK's
  * source in the monorepo. If the package is published, this file and its
  * importers can move back to the dependency. Change both together:
- * upstream `src/{client,conversations,conversation-types,errors,frames,sse}.ts`.
+ * upstream `src/{client,conversations,conversation-types,connectors,connector-types,errors,frames,sse}.ts`.
  *
  * The extension's own client (`src/api/client.ts`) wraps this one; the
  * routes the SDK does not model (pin, archive, delete, share, feedback,
@@ -95,6 +96,23 @@ export class PermissionDeniedError extends APIError {}
 export class NotFoundError extends APIError {}
 /** 409: valid, but the state does not allow it. */
 export class ConflictError extends APIError {}
+/** The `code` the app puts beside `detail` on the 409 for a turn in a conversation a connector opened. */
+export const CONNECTOR_CONVERSATION_CODE = "connector_conversation";
+/**
+ * 409 with `code` `connector_conversation`: a send, edit or regenerate in a
+ * conversation a connector opened (one started from Slack, say), which is
+ * answered in its own thread alone. `source` says which connector and
+ * channel, with a link to the thread when the connector has one. A fork of
+ * the conversation is ordinary and takes messages.
+ */
+export class ConnectorConversationError extends ConflictError {
+  readonly source: ConversationSource;
+
+  constructor(message: string, init: APIErrorInit & { source: ConversationSource }) {
+    super(message, { ...init, code: CONNECTOR_CONVERSATION_CODE });
+    this.source = init.source;
+  }
+}
 /** 429: the per-key window, or the organisation's monthly budget. */
 export class RateLimitError extends APIError {}
 /** 5xx: the API or the model gateway behind it failed. */
@@ -167,6 +185,31 @@ export interface ConversationMessage {
   finish_reason: string | null;
 }
 
+/**
+ * The org preset a conversation answers with, as the conversation carries
+ * it beside `preset_id`: the id again, and the name a composer can label
+ * the choice with.
+ */
+export interface ConversationPreset {
+  id: string;
+  name: string;
+}
+
+/**
+ * Where a connector opened a conversation: which connector (`slack`), the
+ * connection it came through, the channel as a person would name it
+ * (`#support`), and a link to the thread when the connector has one. Such a
+ * conversation is answered in that thread alone -- `send`, `edit` and
+ * `regenerate` in it throw `ConnectorConversationError` -- and a fork of it
+ * is an ordinary conversation with no source.
+ */
+export interface ConversationSource {
+  connector: string;
+  connection_id: string | null;
+  channel_label: string | null;
+  url: string | null;
+}
+
 export interface Conversation {
   id: string;
   title: string;
@@ -183,6 +226,18 @@ export interface Conversation {
   folder_id: string | null;
   /** Fixed at creation; a temporary chat is in no list and is deleted 24h after its last message. */
   temporary?: boolean | null;
+  /**
+   * The org preset the conversation answers with, when it is on one: the
+   * id, and the same with its name as `preset`. Null for a conversation
+   * answering with its own picks; absent from an API that predates presets.
+   */
+  preset_id?: string | null;
+  preset?: ConversationPreset | null;
+  /**
+   * Where a connector opened the conversation; null for one a person
+   * started, absent from an API that predates connectors.
+   */
+  source?: ConversationSource | null;
 }
 
 /** `GET /api/me/instructions`: the person's own custom instructions. */
@@ -255,6 +310,61 @@ export interface CreateConversationParams {
    * its last message. Off, the key is omitted entirely.
    */
   temporary?: boolean;
+  /**
+   * One of the org's live presets (`presets.list()`), whose model,
+   * instructions and tools the conversation's turns answer with; null or
+   * left out is no preset.
+   */
+  preset_id?: string | null;
+}
+
+// --- presets (upstream connector-types.ts, trimmed) ---------------------------
+
+/**
+ * One of the org's agent presets: the model, instructions, tools and welcome
+ * message a conversation on it answers with. `tools` null is the platform's
+ * default set and an empty list none. `deleted_at` is set on a deleted one,
+ * which `presets.get` still answers for and the list never offers.
+ */
+export interface Preset {
+  id: string;
+  name: string;
+  description: string;
+  model: string;
+  instructions: string;
+  tools: string[] | null;
+  welcome_message: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+/** A tool a preset may name, with what it does. */
+export interface PresetTool {
+  name: string;
+  description: string;
+}
+
+/** The rules a preset is held to: how many the org may keep, and the longest name, description, instructions and welcome message. */
+export interface PresetLimits {
+  max_presets: number;
+  name_max_len: number;
+  description_max_len: number;
+  instructions_max_len: number;
+  welcome_max_len: number;
+}
+
+/**
+ * `GET /api/org/presets`: the org's live presets, the tools a preset may
+ * name, the limits, and `can_manage`, whether the caller may change them (an
+ * owner or admin).
+ */
+export interface PresetListing {
+  data: Preset[];
+  tools: PresetTool[];
+  limits: PresetLimits;
+  can_manage: boolean;
 }
 
 /**
@@ -753,12 +863,37 @@ export function errorFromResponse(response: Response, raw: string): APIError {
   const detail = detailText(object?.detail);
   if (detail) {
     // The app's own routes answer `{"detail": ..., "request_id": ...}`,
-    // FastAPI's shape with the ids beside it, rather than OpenAI's.
-    return new Cls(detail, { status: response.status, requestId, retryAfter, rateLimit, body: payload });
+    // FastAPI's shape with the ids beside it, rather than OpenAI's. A few
+    // put a `code` beside the detail, and one of those names the thread
+    // the conversation is answered in.
+    const code = typeof object?.code === "string" ? object.code : null;
+    if (response.status === 409 && code === CONNECTOR_CONVERSATION_CODE) {
+      return new ConnectorConversationError(detail, {
+        status: response.status,
+        requestId,
+        retryAfter,
+        rateLimit,
+        body: payload,
+        source: sourceOf(object?.source),
+      });
+    }
+    return new Cls(detail, { status: response.status, code, requestId, retryAfter, rateLimit, body: payload });
   }
   const text = raw.trim();
   const messageText = text ? `HTTP ${response.status}: ${text.slice(0, 200)}` : `HTTP ${response.status}`;
   return new Cls(messageText, { status: response.status, requestId, retryAfter, rateLimit, body: payload });
+}
+
+/** The thread a `connector_conversation` refusal names, in the shape a conversation carries it. */
+function sourceOf(value: unknown): ConversationSource {
+  const object = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+  const text = (field: unknown): string | null => (typeof field === "string" ? field : null);
+  return {
+    connector: text(object.connector) ?? "",
+    connection_id: text(object.connection_id),
+    channel_label: text(object.channel_label),
+    url: text(object.url),
+  };
 }
 
 /** 429 and 5xx, except the 429 that means the budget is spent. */
@@ -822,6 +957,8 @@ export class MatterWave {
   readonly conversations: Conversations;
   /** Device login: a key for a person, approved in their browser. */
   readonly auth: Auth;
+  /** The org's agent presets, as any member reads them. */
+  readonly presets: Presets;
   private readonly apiKey: string | null;
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
@@ -838,6 +975,7 @@ export class MatterWave {
     this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
     this.conversations = new Conversations(this);
     this.auth = new Auth(this);
+    this.presets = new Presets(this);
   }
 
   /** `GET /api/me`: who the key (or device-login token) acts as. */
@@ -1173,8 +1311,13 @@ export class Conversations {
     return this.call("GET", `/api/conversations/search${query({ q, limit: params.limit })}`, undefined, options);
   }
 
-  /** `POST /api/conversations`. An untitled one is named from its first message. */
+  /**
+   * `POST /api/conversations`. An untitled one is named from its first
+   * message. `preset_id` puts it on one of the org's presets; null or left
+   * out is no preset.
+   */
   create(params: CreateConversationParams = {}, options: RequestOptions = {}): Promise<WithRequestId<Conversation>> {
+    if (params.preset_id === "") throw new MatterWaveConfigError("preset_id must be a preset's id, or null for no preset");
     return this.call("POST", "/api/conversations", defined({ ...params }), options);
   }
 
@@ -1213,6 +1356,19 @@ export class Conversations {
   /** Every message, branches included, in creation order, as `messages`. */
   tree(conversationId: string, options: RequestOptions = {}): Promise<WithRequestId<ConversationWithMessages>> {
     return this.call("GET", conversationPath(conversationId, "/tree"), undefined, options);
+  }
+
+  /** Copy the path down to `messageId` into a new conversation. `ConflictError` for a temporary conversation: a temporary one is not kept, so it cannot be forked. */
+  fork(
+    conversationId: string,
+    messageId: string,
+    params: { title?: string | null } = {},
+    options: RequestOptions = {},
+  ): Promise<WithRequestId<ConversationWithMessages>> {
+    segment("messageId", messageId);
+    const body: Record<string, unknown> = { message_id: messageId };
+    if (params.title !== undefined && params.title !== null) body.title = params.title;
+    return this.call("POST", conversationPath(conversationId, "/fork"), body, options);
   }
 
   /** Show the branch ending at `messageId`; returns the new path. */
@@ -1348,5 +1504,37 @@ export class Auth {
   readonly device: DeviceAuth;
   constructor(client: MatterWave) {
     this.device = new DeviceAuth(client);
+  }
+}
+
+// --- presets (upstream connectors.ts, the reads) --------------------------------
+
+/**
+ * `/api/org/presets`: the org's agent presets. Any member reads them, an API
+ * key with `chat:read` included, which is what a picker needs.
+ */
+export class Presets {
+  constructor(private readonly client: MatterWave) {}
+
+  /** The live presets, the tools a preset may name, the limits, and whether the caller may change them (`can_manage`). */
+  list(options: RequestOptions = {}): Promise<WithRequestId<PresetListing>> {
+    return this.client.json<PresetListing>(
+      { method: "GET", path: "/api/org/presets", body: undefined, keyed: true, stream: false },
+      options,
+    );
+  }
+
+  /** One preset, a deleted one included (`deleted_at` says so). */
+  get(presetId: string, options: RequestOptions = {}): Promise<WithRequestId<Preset>> {
+    return this.client.json<Preset>(
+      {
+        method: "GET",
+        path: `/api/org/presets/${segment("presetId", presetId)}`,
+        body: undefined,
+        keyed: true,
+        stream: false,
+      },
+      options,
+    );
   }
 }

@@ -8,6 +8,7 @@ import { answerUsageLabel } from "../chat/usage";
 import { announcement } from "./announce";
 import { tokenize } from "./highlight";
 import { suggestionsAt, type Suggestions } from "./suggest";
+import { connectorName, connectorNoticeText, sourceLabel } from "../chat/connectorSource";
 
 /**
  * The chat view's script. It only renders and reports intents: there is no
@@ -140,6 +141,12 @@ temporaryRow.hidden = true;
 const sendButton = button("Send", submit);
 const stopButton = button("Stop", () => send({ type: "stop" }));
 const composer = el("div", { className: "composer" }, [temporaryRow, input, el("div", { className: "row" }, [stopButton, sendButton])]);
+// In the composer's place while a connector's conversation is open: where
+// it is answered, the thread's link, and the fork. The composer itself is
+// only hidden, so a draft is there when a person's own conversation is.
+const connector = el("div", { className: "connector" });
+connector.hidden = true;
+connector.setAttribute("role", "note");
 const signIn = el("div", { className: "signin" }, [
   el("p", { text: "Sign in to chat with your organisation's models." }),
   button("Sign in", () => send({ type: "signIn" })),
@@ -293,7 +300,7 @@ notificationsPanel.append(
 
 function submit(): void {
   const content = input.value.trim();
-  if (!content || state?.streaming || state?.offline) return;
+  if (!content || state?.streaming || state?.offline || state?.source) return;
   // The toggle is offered before the first send only; once a conversation
   // exists, whether it is temporary is already fixed.
   const temporary = temporaryBox.checked && !state?.activeId;
@@ -309,7 +316,7 @@ function render(): void {
     app.replaceChildren(signIn);
     return;
   }
-  if (!app.contains(composer)) app.replaceChildren(header, convos, meta, banners, instructionsPanel, notificationsPanel, transcript, composer);
+  if (!app.contains(composer)) app.replaceChildren(header, convos, meta, banners, instructionsPanel, notificationsPanel, transcript, connector, composer);
   renderHeader(state);
   renderConversations(state);
   renderMeta(state);
@@ -326,6 +333,26 @@ function render(): void {
   // The temporary toggle belongs to the not-yet-created chat: it is gone
   // once the first send has made a conversation, whatever kind it is.
   temporaryRow.hidden = Boolean(state.activeId) || state.temporary;
+  renderConnector(state);
+}
+
+/** A connector's conversation takes no message here: the notice stands where the composer would. */
+function renderConnector(s: ViewState): void {
+  const source = s.source;
+  composer.hidden = source !== null;
+  connector.hidden = source === null;
+  if (source === null) {
+    connector.replaceChildren();
+    return;
+  }
+  const actions = el("div", { className: "row" });
+  if (source.url) {
+    const url = source.url;
+    actions.appendChild(button(`Open in ${connectorName(source)}`, () => send({ type: "openLink", url }), { className: "link", title: "Open the thread this conversation is answered in" }));
+  }
+  const leaf = s.transcript.at(-1)?.message.id;
+  if (leaf) actions.appendChild(button("Fork to continue here", () => send({ type: "forkConversation", messageId: leaf }), { title: "Copy this conversation into one of your own, which takes messages" }));
+  connector.replaceChildren(el("div", { className: "text", text: connectorNoticeText(source) }), actions);
 }
 
 function renderHeader(s: ViewState): void {
@@ -400,6 +427,8 @@ function conversationRow(row: ViewState["conversations"][number], s: ViewState):
   // The library badge rides the row's label: the folder it is filed in and
   // its tags, dimmed after the title.
   if (row.badge) title.append(el("span", { className: "lib-badge", text: row.badge }));
+  // A connector's conversation says where it is answered, the same way.
+  if (row.source) title.append(el("span", { className: "lib-badge source-badge", text: sourceLabel(row.source), title: `Answered in ${sourceLabel(row.source)}` }));
   actions.append(
     button(row.pinned ? "Unpin" : "Pin", () => send({ type: "pinConversation", id: row.id, pinned: !row.pinned }), { className: "link", title: row.pinned ? "Unpin" : "Pin to the top" }),
     button("Rename", () => {

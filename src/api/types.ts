@@ -15,6 +15,7 @@ import type { Conversation, ConversationMessage, ConversationWithMessages, Devic
 export type {
   Conversation,
   ConversationInstructions,
+  ConversationSource,
   DeviceCode as DeviceAuthorization,
   DeviceToken,
   Me,

@@ -31,6 +31,10 @@ describe("parseWebviewMessage", () => {
     expect(parseWebviewMessage({ type: "loadMoreConversations", archived: "yes" })).toBeNull();
     expect(parseWebviewMessage({ type: "exportConversation" })).toEqual({ type: "exportConversation" });
     expect(parseWebviewMessage({ type: "shareConversation" })).toEqual({ type: "shareConversation" });
+    expect(parseWebviewMessage({ type: "openLink", url: "https://acme.slack.com/archives/C01/p1" })).toEqual({
+      type: "openLink",
+      url: "https://acme.slack.com/archives/C01/p1",
+    });
     expect(parseWebviewMessage({ type: "rateMessage", messageId: "m_1", rating: 1 })).toEqual({ type: "rateMessage", messageId: "m_1", rating: 1 });
     expect(parseWebviewMessage({ type: "rateMessage", messageId: "m_1", rating: -1 })).toEqual({ type: "rateMessage", messageId: "m_1", rating: -1 });
     expect(parseWebviewMessage({ type: "rateMessage", messageId: "m_1", rating: 0 })).toEqual({ type: "rateMessage", messageId: "m_1", rating: 0 });
@@ -71,6 +75,9 @@ describe("parseWebviewMessage", () => {
     expect(parseWebviewMessage({ type: "setInstructions", text: "x".repeat(2001) })).toBeNull();
     expect(parseWebviewMessage({ type: "readNotification" })).toBeNull();
     expect(parseWebviewMessage({ type: "readNotification", id: "" })).toBeNull();
+    expect(parseWebviewMessage({ type: "openLink" })).toBeNull();
+    expect(parseWebviewMessage({ type: "openLink", url: "" })).toBeNull();
+    expect(parseWebviewMessage({ type: "openLink", url: "x".repeat(2049) })).toBeNull();
   });
 
   it("drops malformed intents instead of passing them on", () => {
