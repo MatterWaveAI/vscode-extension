@@ -11,7 +11,7 @@ import type { FolderRow, Library, TagRow } from "./api/types";
 import { ChatViewProvider } from "./chat/viewProvider";
 import { fitsContentCap, MAX_CONTENT_CHARS, imageAttachment, imageContentType, selectionContent } from "./context";
 import { applyToFile, registerApplyContentProvider } from "./apply";
-import { CheckpointStore } from "./checkpoints";
+import { CheckpointStore, type Checkpoint } from "./checkpoints";
 import type { CodeBlock } from "./chat/codeBlocks";
 import { fitReplacement, inlineEditPrompt, replacementFromAnswer, selectedLines } from "./inlineEdit";
 import {
@@ -32,7 +32,7 @@ import { pickerRows, resolvePick, type PickerRow } from "./models";
 import { DEFAULT_BASE_URL, normalizeServerUrl, serverUrlProblem, shouldPromptForServer } from "./settings";
 import { StatusBar } from "./statusBar";
 import { normalizePromptName, PromptLibrary, MAX_PROMPT_TEXT, type PromptRow } from "./promptLibrary";
-import { resolveInFolder, whereItLands } from "./targets";
+import { currentFolder, editorFolders, resolveNamedFile, whereItLands } from "./targets";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -373,7 +373,7 @@ async function askAboutSelection(chat: ChatController, view: ChatViewProvider): 
     question,
     code: document.getText(selection),
     languageId: document.languageId,
-    path: vscode.workspace.asRelativePath(document.uri, false),
+    path: relativePath(document.uri),
     startLine: selection.start.line + 1,
     endLine: selection.end.line + 1,
   });
@@ -395,7 +395,7 @@ async function askAboutFile(chat: ChatController, view: ChatViewProvider): Promi
   }
   const question = await vscode.window.showInputBox({ title: "Ask about the file", value: "Explain this file." });
   if (!question) return;
-  const path = vscode.workspace.asRelativePath(editor.document.uri, false);
+  const path = relativePath(editor.document.uri);
   await view.reveal();
   // An image is sent as its own bytes for the vision-capable models; a text
   // file is sent extracted, as before.
@@ -580,30 +580,26 @@ async function inlineEdit(chat: ChatController, checkpoints: CheckpointStore): P
 async function applyCodeBlockFlow(chat: ChatController, checkpoints: CheckpointStore, block: CodeBlock): Promise<void> {
   let picked: vscode.Uri | null = null;
   if (block.filename) {
-    const folder = vscode.workspace.workspaceFolders?.[0];
-    if (!folder) {
-      void vscode.window.showInformationMessage("Open a workspace to apply code to a file.");
-      return;
-    }
-    picked = resolveInFolder(folder.uri, block.filename);
-    if (!picked) {
+    const named = await resolveNamedFile(block.filename, editorFolders());
+    if (named.kind === "outside") {
       void vscode.window.showWarningMessage(
         `The answer names “${block.filename}”, which is not a path inside the workspace, so nothing was applied.`,
       );
       return;
     }
+    if (named.kind === "none") {
+      if (!vscode.workspace.workspaceFolders?.length) {
+        void vscode.window.showInformationMessage("Open a workspace to apply code to a file.");
+      }
+      return;
+    }
+    picked = named.uri;
   } else {
     picked = await pickWorkspaceFile("Apply code — which file does this replace?");
     if (!picked) return;
   }
   const target = picked;
-  let before: string | null = null;
-  try {
-    before = new TextDecoder().decode(await vscode.workspace.fs.readFile(target));
-  } catch {
-    before = null;
-  }
-  if (before === null) {
+  if (!(await exists(target))) {
     const answer = await vscode.window.showInformationMessage(
       `${relativePath(target)} does not exist yet. Create it with this code?`,
       { modal: true, detail: `A diff opens before anything is written.\n\nCreates ${whereItLands(target)}` },
@@ -628,11 +624,38 @@ async function recordCheckpoint(
   before: string | null,
   label: string,
 ): Promise<void> {
-  const row = await store.record(chat.activeConversationId(), relativePath(target), before, label);
+  const row = await store.record(chat.activeConversationId(), { uri: target.toString(), path: relativePath(target) }, before, label);
   if (row === null) {
     void vscode.window.showWarningMessage(
       `${relativePath(target)} is too large to snapshot, so this change has no checkpoint. VS Code's own undo still applies.`,
     );
+  }
+}
+
+/**
+ * The file a checkpoint was taken of: the URI it recorded -- folder, host
+ * and all -- or, for one an older release kept by its relative path alone,
+ * that path in the folder it belongs to.
+ */
+async function checkpointTarget(row: Checkpoint): Promise<vscode.Uri | null> {
+  if (row.uri) return vscode.Uri.parse(row.uri);
+  const named = await resolveNamedFile(row.path, editorFolders());
+  if (named.kind === "file") return named.uri;
+  if (named.kind === "outside") {
+    void vscode.window.showWarningMessage(`${row.path} is not a path inside the workspace, so it cannot be restored.`);
+  } else if (!vscode.workspace.workspaceFolders?.length) {
+    void vscode.window.showInformationMessage("Open a workspace to restore a file into.");
+  }
+  return null;
+}
+
+/** Whether a file is there at all, before its document is opened. */
+async function exists(uri: vscode.Uri): Promise<boolean> {
+  try {
+    await vscode.workspace.fs.stat(uri);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -662,12 +685,8 @@ async function restoreCheckpoint(chat: ChatController, store: CheckpointStore): 
     { title: "MatterWave checkpoints", placeHolder: "Pick a checkpoint to restore" },
   );
   if (!picked) return;
-  const folder = vscode.workspace.workspaceFolders?.[0];
-  if (!folder) {
-    void vscode.window.showInformationMessage("Open a workspace to restore a file into.");
-    return;
-  }
-  const uri = vscode.Uri.joinPath(folder.uri, picked.row.path);
+  const uri = await checkpointTarget(picked.row);
+  if (!uri) return;
   if (picked.row.content === null) {
     const answer = await vscode.window.showInformationMessage(
       `Remove ${picked.row.path}? It did not exist when this checkpoint was taken.`,
@@ -726,7 +745,9 @@ async function resolveMention(mention: Mention): Promise<{ filename: string; tex
       const dir = picked?.[0];
       if (!dir) return null;
       const path = relativePath(dir);
-      const tree = await folderTree(path, readWorkspaceDir);
+      // The walk reads under the picked folder's own URI, so a path two
+      // workspace folders share is never read from the wrong one.
+      const tree = await folderTree(path, (at) => readDirUnder(dir, at === path ? "" : at.slice(path.length + 1)));
       return folderContext(path, tree);
     }
     case "terminal": {
@@ -750,11 +771,12 @@ async function resolveMention(mention: Mention): Promise<{ filename: string; tex
       return terminalContext(picked.terminal.name, buffer);
     }
     case "git": {
-      const root = vscode.workspace.workspaceFolders?.[0];
-      if (!root) {
+      if (!vscode.workspace.workspaceFolders?.length) {
         void vscode.window.showInformationMessage("Open a workspace to attach its git changes.");
         return null;
       }
+      const root = await currentFolder(editorFolders(), "@git — which folder's changes are attached?");
+      if (!root) return null;
       const picked = await vscode.window.showQuickPick(
         [
           { range: "worktree" as const, label: "Working tree changes", detail: "git diff HEAD — staged and unstaged" },
@@ -803,26 +825,20 @@ async function pickWorkspaceFile(title: string): Promise<vscode.Uri | null> {
   return picked?.uri ?? null;
 }
 
-/** A workspace-relative path, so no home path leaks into a prompt. */
+/**
+ * A workspace-relative path, so no home path leaks into a prompt. With
+ * several folders open it leads with the folder's name, so two folders'
+ * `src/a.ts` are never the same name.
+ */
 function relativePath(uri: vscode.Uri): string {
-  return vscode.workspace.asRelativePath(uri, false);
+  return vscode.workspace.asRelativePath(uri, true);
 }
 
-/** The names of one workspace directory, directories marked with a trailing `/`. */
-async function readWorkspaceDir(path: string): Promise<string[]> {
-  const folders = vscode.workspace.workspaceFolders ?? [];
-  if (folders.length === 0) throw new Error("no workspace");
-  let last: unknown = null;
-  for (const folder of folders) {
-    try {
-      const uri = path ? vscode.Uri.joinPath(folder.uri, path) : folder.uri;
-      const rows = await vscode.workspace.fs.readDirectory(uri);
-      return rows.map(([name, type]) => (type & vscode.FileType.Directory ? `${name}/` : name));
-    } catch (error) {
-      last = error;
-    }
-  }
-  throw last instanceof Error ? last : new Error("unreadable");
+/** The names in one directory under `root`, directories marked with a trailing `/`. */
+async function readDirUnder(root: vscode.Uri, path: string): Promise<string[]> {
+  const uri = path ? vscode.Uri.joinPath(root, ...path.split("/")) : root;
+  const rows = await vscode.workspace.fs.readDirectory(uri);
+  return rows.map(([name, type]) => (type & vscode.FileType.Directory ? `${name}/` : name));
 }
 
 /**

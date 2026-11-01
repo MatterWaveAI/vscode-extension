@@ -104,6 +104,14 @@ export const window = {
     return Promise.resolve(document);
   },
   terminals: [] as unknown[],
+  activeTextEditor: undefined as { document: { uri: Uri } } | undefined,
+  /** What the folder pick answers: a folder's name, or undefined for Escape. */
+  folderPickAnswer: undefined as string | undefined,
+  folderPicks: [] as string[],
+  showWorkspaceFolderPick(options?: { placeHolder?: string }): Promise<unknown> {
+    window.folderPicks.push(options?.placeHolder ?? "");
+    return Promise.resolve(workspace.workspaceFolders.find((folder) => folder.name === window.folderPickAnswer));
+  },
   /** Views registered by `activate`, by id. */
   viewProviders: {} as Record<string, unknown>,
   registerWebviewViewProvider(id: string, provider: unknown): { dispose(): void } {
@@ -158,13 +166,23 @@ export const workspace = {
     workspace.contentProviders[scheme] = provider;
     return { dispose() {} };
   },
-  asRelativePath(uri: Uri): string {
+  /** As the editor's: with several folders open, `includeWorkspaceFolder` leads with the folder's name. */
+  asRelativePath(uri: Uri, includeWorkspaceFolder?: boolean): string {
     const value = uri.toString();
     for (const folder of workspace.workspaceFolders) {
       const base = folder.uri.toString().replace(/\/+$/, "");
-      if (value.startsWith(`${base}/`)) return value.slice(base.length + 1);
+      if (!value.startsWith(`${base}/`)) continue;
+      const relative = value.slice(base.length + 1);
+      return includeWorkspaceFolder && workspace.workspaceFolders.length > 1 ? `${folder.name}/${relative}` : relative;
     }
     return value.replace(/^file:\/\//, "").replace(/^\//, "");
+  },
+  getWorkspaceFolder(uri: Uri): { uri: Uri; name: string; index: number } | undefined {
+    const value = uri.toString();
+    return workspace.workspaceFolders.find((folder) => {
+      const base = folder.uri.toString().replace(/\/+$/, "");
+      return value === base || value.startsWith(`${base}/`);
+    });
   },
   /** The open documents: a buffer over a file, which may hold unsaved edits. */
   documents: new Map<string, TextDocument>(),

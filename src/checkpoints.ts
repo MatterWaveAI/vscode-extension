@@ -15,7 +15,13 @@ export interface Checkpoint {
   id: string;
   /** The chat the apply happened from; null when none was open. */
   conversationId: string | null;
-  /** Workspace-relative path of the file. */
+  /**
+   * The file's full URI -- its folder in a multi-root workspace, its host in
+   * a remote one -- which is what a restore writes to. Absent only on rows
+   * an older release kept by their relative path alone.
+   */
+  uri?: string;
+  /** Workspace-relative path of the file, as the restore list shows it. */
   path: string;
   /** The file's contents before the apply; null when the file was new. */
   content: string | null;
@@ -49,13 +55,19 @@ export class CheckpointStore {
    * Keep what the file was before an apply. Null when the file's contents
    * were too large to snapshot faithfully; the apply itself is unaffected.
    */
-  async record(conversationId: string | null, path: string, content: string | null, label: string): Promise<Checkpoint | null> {
+  async record(
+    conversationId: string | null,
+    file: { uri: string; path: string },
+    content: string | null,
+    label: string,
+  ): Promise<Checkpoint | null> {
     if (content !== null && content.length > MAX_SNAPSHOT_CHARS) return null;
     const rows = this.read();
     const checkpoint: Checkpoint = {
       id: `${this.now().getTime().toString(36)}-${rows.length.toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
       conversationId,
-      path,
+      uri: file.uri,
+      path: file.path,
       content,
       createdAt: this.now().toISOString(),
       label,

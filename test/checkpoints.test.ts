@@ -7,6 +7,11 @@ import type { Memento } from "../src/promptLibrary";
 
 const FILE = vscode.Uri.file("/workspace/src/a.ts");
 
+/** A file's identity as a checkpoint keeps it: its full URI and the path the list shows. */
+function at(path: string): { uri: string; path: string } {
+  return { uri: vscode.Uri.joinPath(vscode.Uri.file("/workspace"), path).toString(), path };
+}
+
 function fakeMemento(): Memento & { values: Map<string, unknown> } {
   const values = new Map<string, unknown>();
   return {
@@ -39,17 +44,23 @@ const ROW = (over: Partial<Checkpoint> = {}): Checkpoint => ({
 describe("CheckpointStore", () => {
   it("round-trips a snapshot: record, list, get", async () => {
     const { store: checkpoints } = store();
-    const row = await checkpoints.record("c_1", "src/a.ts", "before", "Apply");
-    expect(row).toMatchObject({ conversationId: "c_1", path: "src/a.ts", content: "before", label: "Apply" });
+    const row = await checkpoints.record("c_1", at("src/a.ts"), "before", "Apply");
+    expect(row).toMatchObject({
+      conversationId: "c_1",
+      uri: "file:///workspace/src/a.ts",
+      path: "src/a.ts",
+      content: "before",
+      label: "Apply",
+    });
     expect((await checkpoints.list("c_1")).map((r) => r.path)).toEqual(["src/a.ts"]);
     expect(await checkpoints.get(row?.id ?? "")).toEqual(row);
   });
 
   it("lists newest first, per chat, and keeps other chats out of the list", async () => {
     const { store: checkpoints } = store();
-    await checkpoints.record("c_1", "a.ts", "1", "Apply");
-    await checkpoints.record("c_1", "b.ts", "2", "Inline edit");
-    await checkpoints.record("c_2", "c.ts", "3", "Apply");
+    await checkpoints.record("c_1", at("a.ts"), "1", "Apply");
+    await checkpoints.record("c_1", at("b.ts"), "2", "Inline edit");
+    await checkpoints.record("c_2", at("c.ts"), "3", "Apply");
     expect((await checkpoints.list("c_1")).map((r) => r.path)).toEqual(["b.ts", "a.ts"]);
     expect((await checkpoints.list("c_2")).map((r) => r.path)).toEqual(["c.ts"]);
     expect((await checkpoints.list(null)).map((r) => r.path)).toEqual(["c.ts", "b.ts", "a.ts"]);
@@ -57,15 +68,15 @@ describe("CheckpointStore", () => {
 
   it("keeps a file that was new as a contentless checkpoint, and refuses one too large to restore", async () => {
     const { store: checkpoints } = store();
-    expect(await checkpoints.record("c_1", "new.ts", null, "Apply")).toMatchObject({ content: null });
-    expect(await checkpoints.record("c_1", "huge.ts", "x".repeat(MAX_SNAPSHOT_CHARS + 1), "Apply")).toBeNull();
+    expect(await checkpoints.record("c_1", at("new.ts"), null, "Apply")).toMatchObject({ content: null });
+    expect(await checkpoints.record("c_1", at("huge.ts"), "x".repeat(MAX_SNAPSHOT_CHARS + 1), "Apply")).toBeNull();
     expect((await checkpoints.list("c_1")).map((r) => r.path)).toEqual(["new.ts"]);
   });
 
   it("keeps only the newest per chat, so one busy chat cannot push the others out", async () => {
     const { store: checkpoints } = store();
-    for (let i = 0; i < MAX_CHECKPOINTS_PER_CHAT + 5; i++) await checkpoints.record("c_1", `f${i}.ts`, `${i}`, "Apply");
-    await checkpoints.record("c_2", "other.ts", "x", "Apply");
+    for (let i = 0; i < MAX_CHECKPOINTS_PER_CHAT + 5; i++) await checkpoints.record("c_1", at(`f${i}.ts`), `${i}`, "Apply");
+    await checkpoints.record("c_2", at("other.ts"), "x", "Apply");
     const chatRows = await checkpoints.list("c_1");
     expect(chatRows).toHaveLength(MAX_CHECKPOINTS_PER_CHAT);
     expect(chatRows[0]).toMatchObject({ path: `f${MAX_CHECKPOINTS_PER_CHAT + 4}.ts` });
@@ -76,11 +87,19 @@ describe("CheckpointStore", () => {
 
   it("removes one row and leaves the rest", async () => {
     const { store: checkpoints } = store();
-    const first = await checkpoints.record("c_1", "a.ts", "1", "Apply");
-    await checkpoints.record("c_1", "b.ts", "2", "Apply");
+    const first = await checkpoints.record("c_1", at("a.ts"), "1", "Apply");
+    await checkpoints.record("c_1", at("b.ts"), "2", "Apply");
     await checkpoints.remove(first?.id ?? "");
     expect((await checkpoints.list("c_1")).map((r) => r.path)).toEqual(["b.ts"]);
     expect(await checkpoints.get(first?.id ?? "")).toBeNull();
+  });
+
+  it("keeps a remote file's host and a second folder's name in the URI it restores to", async () => {
+    const { store: checkpoints } = store();
+    const remote = "vscode-remote://ssh-remote+box/home/ada/beta/src/a.ts";
+    const row = await checkpoints.record("c_1", { uri: remote, path: "beta/src/a.ts" }, "x", "Apply");
+    expect(row?.uri).toBe(remote);
+    expect(vscode.Uri.parse(row?.uri ?? "").authority).toBe("ssh-remote+box");
   });
 
   it("accepts the shape a memento already holds without mangling it", async () => {
@@ -112,7 +131,7 @@ describe("snapshot and restore round-trip", () => {
       title: "t",
       onSnapshot: async (before) => {
         recorded = before;
-        await checkpoints.record("c_1", "src/a.ts", before, "Apply");
+        await checkpoints.record("c_1", at("src/a.ts"), before, "Apply");
       },
     });
     expect(recorded).toBe("before");

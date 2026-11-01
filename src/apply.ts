@@ -48,7 +48,7 @@ export interface ApplyOptions {
  * it was, or the document moved on while the diff was open.
  */
 export async function applyToFile(target: vscode.Uri, newContent: string, opts: ApplyOptions): Promise<boolean> {
-  const name = vscode.workspace.asRelativePath(target, false);
+  const name = vscode.workspace.asRelativePath(target, true);
   let document: vscode.TextDocument | null;
   try {
     document = await documentOrNull(target);

@@ -2,6 +2,7 @@
 import * as assert from "node:assert/strict";
 import * as vscode from "vscode";
 import { applyToFile } from "../../src/apply";
+import { editorFolders, resolveNamedFile } from "../../src/targets";
 
 /**
  * The extension's edits inside a real editor, in the two-folder workspace
@@ -104,6 +105,33 @@ describe("applying code in a real editor", function () {
     assert.equal(applied, true);
     assert.deepEqual(snapshots, [null], "a new file's checkpoint says it was new");
     assert.equal(await disk(uri), "export const made = true;\n");
+  });
+
+  it("applies a path both folders have to the folder of the file the person is in", async function () {
+    const beta = vscode.Uri.joinPath(folder("beta").uri, "src", "shared.ts");
+    const alpha = vscode.Uri.joinPath(folder("alpha").uri, "src", "shared.ts");
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(beta));
+
+    const named = await resolveNamedFile("src/shared.ts", editorFolders());
+    assert.equal(named.kind, "file");
+    if (named.kind !== "file") return;
+    assert.equal(named.uri.toString(), beta.toString(), "the second folder's file, not the first's");
+    assert.equal(vscode.workspace.asRelativePath(named.uri, true), "beta/src/shared.ts");
+
+    const applied = await withStub("showInformationMessage", applyAnswer, () =>
+      applyToFile(named.uri, 'export const where = "beta, applied";\n', { title: "e2e", lint: false }),
+    );
+    assert.equal(applied, true);
+    assert.equal(await disk(beta), 'export const where = "beta, applied";\n');
+    assert.equal(await disk(alpha), 'export const where = "alpha";\n', "the first folder's file is untouched");
+  });
+
+  it("follows a path that names the folder, and refuses one that climbs out of every folder", async function () {
+    await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+    const named = await resolveNamedFile("alpha/src/shared.ts", editorFolders());
+    assert.equal(named.kind === "file" && named.uri.toString(), vscode.Uri.joinPath(folder("alpha").uri, "src", "shared.ts").toString());
+    assert.deepEqual(await resolveNamedFile("alpha/../../outside.ts", editorFolders()), { kind: "outside" });
+    assert.deepEqual(await resolveNamedFile("..\\..\\outside.ts", editorFolders()), { kind: "outside" });
   });
 
   it("applies nothing when the person keeps the file as it was", async function () {
