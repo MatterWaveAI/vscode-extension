@@ -103,9 +103,12 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
   const proposals = new ProposalFileSystem();
   const editorTracker = new EditorTracker();
   const agentLog = vscode.window.createOutputChannel("MatterWave Agent");
+  // One transport for every request: it reads matterwave.caFile per request
+  // and keeps the dispatcher built from it.
+  const transport = createFetch(caFile);
   const mcp = new McpManager({
     version: String((context.extension?.packageJSON as { version?: string } | undefined)?.version ?? "0.0.0"),
-    fetch: (input, init) => createFetch(caFile)(input, init),
+    fetch: (input, init) => transport(input, init),
     // MatterWave's own /mcp signs in as the editor does; any other server
     // carries only the headers its configuration names.
     headersFor: async (name, config) => {
@@ -124,7 +127,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
     baseUrl,
     getToken: () => tokens.get(),
     // Reads matterwave.caFile per request, so a change applies at once.
-    fetch: createFetch(caFile),
+    fetch: transport,
     onRequestId: (id) => {
       chat.lastRequestId = id;
     },
@@ -159,7 +162,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
     state: context.workspaceState,
     mcp,
     mcpConfigs,
-    fetch: (input, init) => createFetch(caFile)(input, init ?? {}),
+    fetch: (input, init) => transport(input, init ?? {}),
     onChange: () => chat.emit(),
     log: (line) => agentLog.appendLine(line),
   });
