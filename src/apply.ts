@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { whereItLands } from "./targets";
 
 /**
  * Applying code to a file, the only way the extension ever writes one: a
@@ -51,9 +52,14 @@ export async function applyToFile(target: vscode.Uri, newContent: string, opts: 
   virtualDocuments.set(preview.toString(), newContent);
   virtualDocuments.set(empty.toString(), "");
   await vscode.commands.executeCommand("vscode.diff", before === null ? empty : target, preview, opts.title);
+  // The dialog names where the write lands, resolved, not the name the
+  // answer gave: the two differ exactly when it matters.
   const answer = await vscode.window.showInformationMessage(
     `Apply this code to ${name}?`,
-    { modal: true, detail: opts.detail ?? "The file becomes exactly the code on the right." },
+    {
+      modal: true,
+      detail: `${opts.detail ?? "The file becomes exactly the code on the right."}\n\nWrites to ${whereItLands(target)}`,
+    },
     "Apply",
   );
   if (answer !== "Apply") {

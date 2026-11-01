@@ -5,23 +5,51 @@
  * mock does not model should fail loudly rather than pass against a stub.
  */
 
+import { posix } from "node:path";
+
+/**
+ * A URI in the parts the editor's has -- scheme, authority, path -- so code
+ * that must keep a remote host's authority (`vscode-remote://ssh-remote+box`)
+ * is tested against one. `joinPath` normalises `.` and `..` the way the
+ * editor's does (POSIX join), which is exactly what lets a careless join
+ * climb out of a folder.
+ */
 export class Uri {
-  private constructor(readonly path: string) {}
+  private constructor(
+    readonly scheme: string,
+    readonly authority: string,
+    readonly path: string,
+    readonly query: string,
+    readonly fragment: string,
+  ) {}
   static parse(value: string): Uri {
-    return new Uri(value);
+    const match = /^([a-zA-Z][a-zA-Z0-9+.-]*):(\/\/([^/?#]*))?([^?#]*)(\?[^#]*)?(#.*)?$/.exec(value);
+    if (!match) return new Uri("file", "", value, "", "");
+    return new Uri(match[1] ?? "file", match[3] ?? "", match[4] ?? "", (match[5] ?? "").slice(1), (match[6] ?? "").slice(1));
   }
   static file(path: string): Uri {
-    return new Uri(`file://${path}`);
+    const normalized = path.replace(/\\/g, "/");
+    return new Uri("file", "", normalized.startsWith("/") ? normalized : `/${normalized}`, "", "");
   }
   static joinPath(base: Uri, ...segments: string[]): Uri {
-    return new Uri([base.path.replace(/\/+$/, ""), ...segments].join("/"));
+    return base.with({ path: posix.join(base.path || "/", ...segments) });
   }
-  /** The scheme of the URI: what names the document's source. */
-  get scheme(): string {
-    return /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(this.path)?.[1] ?? "file";
+  with(change: { scheme?: string; authority?: string; path?: string; query?: string; fragment?: string }): Uri {
+    return new Uri(
+      change.scheme ?? this.scheme,
+      change.authority ?? this.authority,
+      change.path ?? this.path,
+      change.query ?? this.query,
+      change.fragment ?? this.fragment,
+    );
   }
-  toString(): string {
+  get fsPath(): string {
     return this.path;
+  }
+  toString(skipEncoding?: boolean): string {
+    void skipEncoding;
+    const authority = this.authority || this.scheme === "file" ? `//${this.authority}` : "";
+    return `${this.scheme}:${authority}${this.path}${this.query ? `?${this.query}` : ""}${this.fragment ? `#${this.fragment}` : ""}`;
   }
 }
 

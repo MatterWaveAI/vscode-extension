@@ -32,6 +32,7 @@ import { pickerRows, resolvePick, type PickerRow } from "./models";
 import { DEFAULT_BASE_URL, normalizeServerUrl, serverUrlProblem, shouldPromptForServer } from "./settings";
 import { StatusBar } from "./statusBar";
 import { normalizePromptName, PromptLibrary, MAX_PROMPT_TEXT, type PromptRow } from "./promptLibrary";
+import { resolveInFolder, whereItLands } from "./targets";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -576,7 +577,13 @@ async function applyCodeBlockFlow(chat: ChatController, checkpoints: CheckpointS
       void vscode.window.showInformationMessage("Open a workspace to apply code to a file.");
       return;
     }
-    picked = vscode.Uri.joinPath(folder.uri, block.filename);
+    picked = resolveInFolder(folder.uri, block.filename);
+    if (!picked) {
+      void vscode.window.showWarningMessage(
+        `The answer names “${block.filename}”, which is not a path inside the workspace, so nothing was applied.`,
+      );
+      return;
+    }
   } else {
     picked = await pickWorkspaceFile("Apply code — which file does this replace?");
     if (!picked) return;
@@ -591,7 +598,7 @@ async function applyCodeBlockFlow(chat: ChatController, checkpoints: CheckpointS
   if (before === null) {
     const answer = await vscode.window.showInformationMessage(
       `${relativePath(target)} does not exist yet. Create it with this code?`,
-      { modal: true, detail: "A diff opens before anything is written." },
+      { modal: true, detail: `A diff opens before anything is written.\n\nCreates ${whereItLands(target)}` },
       "Create",
     );
     if (answer !== "Create") return;
