@@ -138,8 +138,9 @@ commands are Markdown files in `~/.matterwave/commands/` or the workspace's `.ma
 prompts still work as `/name`.
 
 **Restore and resume.** `/restore` lists the chat's checkpoints (Apply, inline edit and agent
-writes); restoring one puts back every file it and the later ones changed, after one confirm. Your
-project's own git is not touched. `/resume` picks up an earlier agent run in this workspace with its
+writes); restoring one puts back every file it and the later ones changed, after one confirm, and
+skips a path that now leads out of the workspace through a link. Your project's own git is not
+touched. `/resume` picks up an earlier agent run in this workspace with its
 tool rounds in context.
 
 **More tools.** `todo_write` keeps the run's plan as a checklist in the view. `web_fetch` reads a

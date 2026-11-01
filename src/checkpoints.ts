@@ -1,3 +1,5 @@
+import { confine } from "./lib/sdk/agent/confine";
+import { DenyList } from "./lib/sdk/agent/deny";
 import type { Memento } from "./promptLibrary";
 
 /**
@@ -102,4 +104,19 @@ export function restorePlan(rows: readonly Checkpoint[], pickedId: string): { pa
   // Newest to the picked one; an older row of the same path overwrites, so its content wins.
   for (const row of rows.slice(0, at + 1)) plan.set(row.path, { path: row.path, content: row.content, label: row.label });
   return [...plan.values()].sort((a, b) => a.path.localeCompare(b.path));
+}
+
+/**
+ * Where restoring `path` under `root` writes: the path with its links
+ * followed, or null when that now leads out of the root (a folder replaced
+ * by a link since the checkpoint was taken), so a restore never writes
+ * through it. The deny list does not apply: a checkpoint holds what the
+ * person's own Apply wrote, and putting it back is theirs to do.
+ */
+export function restoreTarget(root: string, path: string): string | null {
+  try {
+    return confine(root, path, { deny: new DenyList([]) }).absolute;
+  } catch {
+    return null;
+  }
 }

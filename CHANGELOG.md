@@ -36,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - What an MCP server sends is capped (8 MB a message, 100 tools, 16,000-character schemas), and colliding tool names are made unique. `web_fetch` follows redirects only on the approved origin and reads at most 4 MB.
 - The approval card writes out invisible characters (bidi overrides, zero-width and tag characters) in a command, URL or arguments, and the diff editor's Accept and Reject answer only a change under review.
 - A file's byte-order mark is no longer read as text, so an edit no longer writes a second one.
+- `/restore` resolves each checkpoint's path again and writes nothing through a folder that has since become a link out of the workspace.
 
 ### Changed
 

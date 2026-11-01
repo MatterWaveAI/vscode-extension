@@ -11,7 +11,7 @@ import type { FolderRow, Library, TagRow } from "./api/types";
 import { ChatViewProvider } from "./chat/viewProvider";
 import { fitsContentCap, MAX_CONTENT_CHARS, imageAttachment, imageContentType, selectionContent } from "./context";
 import { applyToFile, registerApplyContentProvider } from "./apply";
-import { CheckpointStore, restorePlan } from "./checkpoints";
+import { CheckpointStore, restorePlan, restoreTarget } from "./checkpoints";
 import { AgentSession, type AgentSettings } from "./agent/session";
 import { EditorReviewSurface, EditorTracker, PROPOSAL_SCHEME, ProposalFileSystem, openDocumentText } from "./agent/editor";
 import { McpManager, type McpServerConfig } from "./agent/mcp";
@@ -787,8 +787,15 @@ async function restoreCheckpoint(chat: ChatController, store: CheckpointStore, a
     "Restore",
   );
   if (answer !== "Restore") return;
+  const skipped: string[] = [];
   for (const step of plan) {
-    const uri = vscode.Uri.joinPath(folder.uri, step.path);
+    // Re-resolved now: a folder on the path may have become a link out of the workspace since.
+    const target = restoreTarget(folder.uri.fsPath, step.path);
+    if (!target) {
+      skipped.push(step.path);
+      continue;
+    }
+    const uri = vscode.Uri.file(target);
     if (step.content === null) {
       try {
         await vscode.workspace.fs.delete(uri);
@@ -799,8 +806,13 @@ async function restoreCheckpoint(chat: ChatController, store: CheckpointStore, a
     }
     await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(step.content));
   }
+  if (skipped.length > 0) {
+    void vscode.window.showWarningMessage(`Not restored, because the path now leads out of the workspace: ${skipped.join(", ")}.`);
+  }
+  const restored = plan.filter((p) => !skipped.includes(p.path));
+  if (restored.length === 0) return;
   void vscode.window.showInformationMessage(
-    plan.length === 1 ? `${plan[0]!.path} was restored.` : `${plan.length} files were restored: ${plan.map((p) => p.path).join(", ")}.`,
+    restored.length === 1 ? `${restored[0]!.path} was restored.` : `${restored.length} files were restored: ${restored.map((p) => p.path).join(", ")}.`,
   );
 }
 

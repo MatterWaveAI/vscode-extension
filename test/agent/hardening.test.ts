@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { restoreTarget } from "../../src/checkpoints";
 import { childEnv } from "../../src/agent/env";
 import { OffsiteRedirect, WEB_FETCH_MAX_BYTES, fetchApproved, webFetchTool } from "../../src/agent/extraTools";
 import { contractTools } from "../../src/agent/host";
@@ -134,6 +135,17 @@ describe("a change that waited for approval", () => {
     await agent.setMode("auto-edit");
     await run(agent, "Change y.");
     expect(review.applied.map((a) => a.content)).toEqual(["const x = 1;\r\nconst y = 3;\r\n"]);
+  });
+});
+
+describe("/restore", () => {
+  it("re-resolves each path, and writes nothing through a folder that became a link out of the workspace", () => {
+    expect(restoreTarget(ws.root, "sub/keep.txt")).toBe(join(ws.root, "sub", "keep.txt"));
+    // A checkpoint of the person's own Apply to a deny-listed name still restores.
+    expect(restoreTarget(ws.root, ".env.example")).toBe(join(ws.root, ".env.example"));
+    renameSync(join(ws.root, "sub"), join(ws.root, "sub-old"));
+    symlinkSync(outside.root, join(ws.root, "sub"), "junction");
+    expect(restoreTarget(ws.root, "sub/keep.txt")).toBeNull();
   });
 });
 
