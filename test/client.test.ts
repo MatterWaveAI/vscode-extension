@@ -1,6 +1,6 @@
 import { setSleep } from "../src/lib/matterwaveClient";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { MatterWaveClient } from "../src/api/client";
+import { MatterWaveClient, requestLogLine, type RequestLogEntry } from "../src/api/client";
 import { ApiError, parseRetryAfter } from "../src/api/errors";
 import { CONVERSATION, fakeFetch, fixture, json, sse } from "./fakeApi";
 
@@ -264,8 +264,41 @@ describe("MatterWaveClient", () => {
 
   it("lists the archive with the filter the sidebar folds away", async () => {
     const { api, calls } = client({ "GET /api/conversations": () => json({ data: [], filter: "archived" }) });
-    await api.listArchivedConversations();
+    await api.listConversations({ archived: true });
     expect(calls[0]?.url).toBe("/api/conversations?filter=archived");
+  });
+
+  it("hands back a page's cursor and resumes from one", async () => {
+    const { api, calls } = client({
+      "GET /api/conversations": (call) =>
+        call.url.includes("cursor=")
+          ? json({ data: [{ ...CONVERSATION, id: "c_2" }], filter: "default", next_cursor: null })
+          : json({ data: [CONVERSATION], filter: "default", next_cursor: "page-2" }),
+    });
+    const first = await api.listConversations();
+    expect(first).toMatchObject({ nextCursor: "page-2" });
+    const second = await api.listConversations({ cursor: first.nextCursor });
+    expect(second.data.map((c) => c.id)).toEqual(["c_2"]);
+    expect(second.nextCursor).toBeNull();
+    expect(calls[1]?.url).toBe("/api/conversations?cursor=page-2");
+  });
+
+  it("walks every page at the widest page for a picker that offers them all", async () => {
+    const pages: Record<string, { id: string; next: string | null }> = {
+      "": { id: "c_1", next: "b" },
+      b: { id: "c_2", next: "c" },
+      c: { id: "c_3", next: null },
+    };
+    const { api, calls } = client({
+      "GET /api/conversations": (call) => {
+        const cursor = new URL(`https://x${call.url}`).searchParams.get("cursor") ?? "";
+        const page = pages[cursor];
+        return json({ data: [{ ...CONVERSATION, id: page?.id }], filter: "default", next_cursor: page?.next ?? null });
+      },
+    });
+    expect((await api.allConversations()).map((c) => c.id)).toEqual(["c_1", "c_2", "c_3"]);
+    expect(calls).toHaveLength(3);
+    expect(calls.every((c) => c.url.includes("limit=200"))).toBe(true);
   });
 
   it("lists notifications with the unread count, filtered and sized only when asked", async () => {
@@ -475,5 +508,108 @@ describe("MatterWaveClient", () => {
     expect((form.get("file") as File).name).toBe("conversations.json");
     await expect(api.importStatus("imp_1")).resolves.toMatchObject({ status: "running" });
     expect(calls[1]?.url).toBe("/api/me/imports/imp_1");
+  });
+});
+
+describe("the request log", () => {
+  it("records each request's method, path, status, request id and time -- never its query, body or key", async () => {
+    const entries: RequestLogEntry[] = [];
+    const fake = fakeFetch({
+      "GET /api/conversations/search": () => json({ data: [], query: "private words" }),
+      "POST /api/conversations": () => json(CONVERSATION, 201),
+    });
+    const api = new MatterWaveClient({
+      baseUrl: "https://mw.test",
+      getToken: async () => "mw_abcdefgh_secret",
+      fetch: fake.fetch,
+      onRequest: (entry) => void entries.push(entry),
+    });
+    await api.searchConversations("private words");
+    await api.createConversation({ title: "My secret plan" });
+    expect(entries.map((e) => [e.method, e.path, e.status, e.requestId, e.error])).toEqual([
+      ["GET", "/api/conversations/search", 200, "req-test", null],
+      ["POST", "/api/conversations", 201, "req-test", null],
+    ]);
+    expect(entries.every((e) => typeof e.ms === "number" && e.ms >= 0)).toBe(true);
+    const logged = entries.map(requestLogLine).join("\n");
+    expect(logged).not.toMatch(/private|secret|plan/);
+    expect(requestLogLine(entries[0] as RequestLogEntry)).toMatch(/^GET \/api\/conversations\/search -> 200 in \d+ ms \(request req-test\)$/);
+  });
+
+  it("records a request that got no answer, with what the runtime said", async () => {
+    const entries: RequestLogEntry[] = [];
+    const api = new MatterWaveClient({
+      baseUrl: "https://mw.test",
+      getToken: async () => null,
+      fetch: async () => {
+        throw new Error("connect ECONNREFUSED 10.0.0.1:443");
+      },
+      onRequest: (entry) => void entries.push(entry),
+    });
+    await expect(api.models()).rejects.toMatchObject({ status: 0 });
+    expect(entries[0]).toMatchObject({ method: "GET", path: "/api/models", status: null, error: "connect ECONNREFUSED 10.0.0.1:443" });
+    expect(requestLogLine(entries[0] as RequestLogEntry)).toMatch(/^GET \/api\/models -> failed: connect ECONNREFUSED 10\.0\.0\.1:443 in \d+ ms$/);
+  });
+});
+
+describe("fork, report, search, folders and announcements", () => {
+  it("sends each to its route with the body the API takes", async () => {
+    const { api, calls } = client({
+      "POST /api/conversations/c_1/fork": () => json(CONVERSATION, 201),
+      "POST /api/conversations/c_1/report": () => json({ id: "r_1" }, 201),
+      "GET /api/search": () => json({ data: [], query: "a b", next_cursor: "n2" }),
+      "PATCH /api/library/folders/f_1": () => json({ id: "f_1", name: "Renamed", position: 0, created_at: "", updated_at: "" }),
+      "DELETE /api/library/folders/f_1": () => new Response(null, { status: 204 }),
+      "GET /api/announcements": () => json({ data: [] }),
+    });
+    await api.forkConversation("c_1", "m_9");
+    await api.reportConversation("c_1", { kind: "unsafe", messageId: "m_9", note: "It told me to." });
+    await api.reportConversation("c_1", { kind: "unhelpful" });
+    expect(await api.search("a b", "n1")).toEqual({ data: [], nextCursor: "n2" });
+    await api.renameFolder("f_1", "Renamed");
+    await api.deleteFolder("f_1");
+    await api.announcements();
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      "POST /api/conversations/c_1/fork",
+      "POST /api/conversations/c_1/report",
+      "POST /api/conversations/c_1/report",
+      "GET /api/search?q=a+b&cursor=n1",
+      "PATCH /api/library/folders/f_1",
+      "DELETE /api/library/folders/f_1",
+      "GET /api/announcements",
+    ]);
+    expect(JSON.parse(String(calls[0]?.body))).toEqual({ message_id: "m_9" });
+    expect(JSON.parse(String(calls[1]?.body))).toEqual({ kind: "unsafe", message_id: "m_9", note: "It told me to." });
+    expect(JSON.parse(String(calls[2]?.body))).toEqual({ kind: "unhelpful" });
+    expect(JSON.parse(String(calls[4]?.body))).toEqual({ name: "Renamed" });
+  });
+});
+
+describe("key options and the account routes", () => {
+  it("mints a key with its scopes and expiry, renames one, and reads the account's state", async () => {
+    const { api, calls } = client({
+      "POST /api/keys": () => json({ id: "k_1", name: "CI", prefix: "mw_abcdefgh", key: "mw_abcdefgh_example" }, 201),
+      "PATCH /api/keys/k_1": () => json({ id: "k_1", name: "CI runner" }),
+      "GET /api/me/enforcement": () => json({ state: "none" }),
+      "POST /api/me/export": () => json({ id: "e_1", status: "pending" }, 202),
+      "GET /api/me/export/e_1": () => json({ id: "e_1", status: "ready", download_url: "/api/me/export/e_1/download?expires=1&sig=x" }),
+      "GET /api/attachments/limits/me": () => json({ max_upload_bytes: 1, quota_bytes: 2, quota_used_bytes: 0, quota_remaining_bytes: 2 }),
+    });
+    await api.createKey("CI", { scopes: ["chat:read"], expiresInDays: 90 });
+    await api.createKey("Plain");
+    await api.renameKey("k_1", "CI runner");
+    expect(await api.enforcement()).toEqual({ state: "none" });
+    expect((await api.startExport()).id).toBe("e_1");
+    expect((await api.exportStatus("e_1")).download_url).toContain("/download");
+    expect((await api.attachmentLimits()).max_upload_bytes).toBe(1);
+    expect(JSON.parse(String(calls[0]?.body))).toEqual({ name: "CI", scopes: ["chat:read"], expires_in_days: 90 });
+    expect(JSON.parse(String(calls[1]?.body))).toEqual({ name: "Plain" });
+    expect(JSON.parse(String(calls[2]?.body))).toEqual({ name: "CI runner" });
+    expect(calls.map((c) => `${c.method} ${c.url}`).slice(3)).toEqual([
+      "GET /api/me/enforcement",
+      "POST /api/me/export",
+      "GET /api/me/export/e_1",
+      "GET /api/attachments/limits/me",
+    ]);
   });
 });

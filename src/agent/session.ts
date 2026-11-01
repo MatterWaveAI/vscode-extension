@@ -58,7 +58,7 @@ export interface AgentSessionDeps {
   };
   review: ReviewSurface;
   /** Keep what a file was before an applied change, for `/restore`. */
-  checkpoint?(conversationId: string | null, relative: string, before: string | null): Promise<void>;
+  checkpoint?(conversationId: string | null, relative: string, before: string | null, absolute: string): Promise<void>;
   /** The per-session flag yolo needs: a modal the person must confirm. */
   confirmYolo(): Promise<boolean>;
   pickRoot?(roots: { name: string; path: string }[]): Promise<string | null>;
@@ -285,7 +285,7 @@ export class AgentSession {
       // The file may have changed, or its path been relinked, while the change waited for the person.
       const stale = await change.stale?.();
       if (stale) return { status: "failed", reason: stale };
-      await this.deps.checkpoint?.(conversationId, change.relative, change.before);
+      await this.deps.checkpoint?.(conversationId, change.relative, change.before, change.absolute);
       this.status = `Writing ${change.relative}`;
       this.changed();
       return { status: "applied", content: await this.deps.review.apply(change, content), edited: content !== change.after };

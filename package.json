@@ -1,41 +1,78 @@
 {
   "name": "matterwave",
-  "displayName": "MatterWave",
-  "description": "Chat with your organisation's MatterWave models from the editor, or let the coding agent read, change and test the workspace with your approval.",
+  "displayName": "%displayName%",
+  "description": "%description%",
   "version": "0.3.0",
   "publisher": "matterwave",
   "private": false,
-  "license": "MIT",
+  "license": "Apache-2.0",
+  "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#0B0C0E",
+    "theme": "dark"
+  },
+  "keywords": [
+    "matterwave",
+    "ai",
+    "chat",
+    "llm",
+    "assistant",
+    "code review",
+    "inline edit"
+  ],
+  "homepage": "https://github.com/MatterWaveAI/vscode-extension#readme",
+  "bugs": {
+    "url": "https://github.com/MatterWaveAI/vscode-extension/issues"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/MatterWaveAI/vscode-extension"
   },
   "engines": {
-    "vscode": "^1.90.0"
+    "vscode": "^1.93.0"
   },
   "categories": [
     "AI",
     "Chat"
   ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "%capabilities.untrustedWorkspaces.description%",
+      "restrictedConfigurations": [
+        "matterwave.agent.mcpServers"
+      ]
+    }
+  },
   "main": "./dist/extension.js",
-  "activationEvents": [
-    "onStartupFinished"
-  ],
+  "activationEvents": [],
   "contributes": {
     "configuration": {
-      "title": "MatterWave",
+      "title": "%configuration.title%",
       "properties": {
         "matterwave.baseUrl": {
           "type": "string",
-          "default": "https://app.matterwave.dev",
-          "description": "The MatterWave deployment this editor talks to.",
+          "default": "https://app.matterwave.ai",
+          "description": "%config.baseUrl.description%",
           "scope": "application"
         },
         "matterwave.caFile": {
           "type": "string",
           "default": "",
-          "description": "Path to a PEM file holding the certificate authority that signed the deployment's TLS certificate, for a deployment behind a private CA. Trusted in addition to the system's authorities. Empty uses the system's authorities alone.",
+          "description": "%config.caFile.description%",
           "scope": "application"
+        },
+        "matterwave.commitMessageStyle": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "markdownDescription": "%config.commitMessageStyle.markdownDescription%",
+          "scope": "resource"
+        },
+        "matterwave.showAnswerUsage": {
+          "type": "boolean",
+          "default": true,
+          "description": "%config.showAnswerUsage.description%"
         },
         "matterwave.agent.defaultMode": {
           "type": "string",
@@ -45,12 +82,12 @@
             "auto-edit"
           ],
           "enumDescriptions": [
-            "Read and search only: no file changes, no commands.",
-            "Every file change and every command needs your approval (the default).",
-            "File changes are applied without asking (a change to the agent's or the editor's own settings still asks); commands still ask."
+            "%config.agent.defaultMode.plan%",
+            "%config.agent.defaultMode.ask%",
+            "%config.agent.defaultMode.autoEdit%"
           ],
           "default": "ask",
-          "description": "The agent's approval mode in a new workspace. Yolo (nothing asks) is not a default: it is allowed per session, from the mode chip, /approval-mode or Shift+Tab, after a confirm. A workspace's settings can make this stricter (plan), never looser.",
+          "description": "%config.agent.defaultMode.description%",
           "scope": "window"
         },
         "matterwave.agent.maxSteps": {
@@ -58,38 +95,38 @@
           "default": 40,
           "minimum": 1,
           "maximum": 500,
-          "description": "The most model calls one agent run makes before it stops and says so. A workspace's settings can lower it, not raise it past yours.",
+          "description": "%config.agent.maxSteps.description%",
           "scope": "window"
         },
         "matterwave.agent.maxTokens": {
           "type": "integer",
           "default": 500000,
           "minimum": 1000,
-          "description": "The most tokens one agent run spends (prompt and completion, every step) before it stops and says so. A workspace's settings can lower it, not raise it past yours.",
+          "description": "%config.agent.maxTokens.description%",
           "scope": "window"
         },
         "matterwave.agent.editorContext": {
           "type": "boolean",
           "default": true,
-          "description": "Send the active file's name, the selection (up to 8,000 characters) and the recently opened files' names with each agent prompt. Files the deny list covers are never sent.",
+          "description": "%config.agent.editorContext.description%",
           "scope": "window"
         },
         "matterwave.agent.webFetch": {
           "type": "boolean",
           "default": true,
-          "description": "Offer the agent web_fetch. Every fetch asks first in the ask and auto-edit modes; plan does not offer it.",
+          "description": "%config.agent.webFetch.description%",
           "scope": "window"
         },
         "matterwave.agent.matterwaveMcp": {
           "type": "boolean",
           "default": true,
-          "description": "Offer the agent MatterWave's own MCP server (/mcp on matterwave.baseUrl, signed in as this editor): your conversations and models as tools.",
+          "description": "%config.agent.matterwaveMcp.description%",
           "scope": "window"
         },
         "matterwave.agent.mcpServers": {
           "type": "object",
           "default": {},
-          "markdownDescription": "MCP servers the agent may use, by name. Each is `{ \"command\": \"...\", \"args\": [...], \"env\": {...} }` (stdio) or `{ \"url\": \"https://...\", \"headers\": {...} }` (HTTP), with an optional `\"tools\": [...]` allow-list (only those tools reach the model), `\"trust\": true` (your standing approval: its tools run without asking where they would ask) and `\"disabled\": true`. Every other MCP tool asks before each call outside yolo. Workspace settings apply only in a trusted folder, and each server they add asks before it first starts (again whenever its definition changes); `trust` counts only in your user settings. A server's read-only marks, which let plan mode offer a tool (still asking), are believed only for a trusted server and MatterWave's own.",
+          "markdownDescription": "%config.agent.mcpServers.markdownDescription%",
           "additionalProperties": {
             "type": "object",
             "properties": {
@@ -142,7 +179,7 @@
       "activitybar": [
         {
           "id": "matterwave",
-          "title": "MatterWave",
+          "title": "%viewsContainer.matterwave.title%",
           "icon": "media/matterwave.svg"
         }
       ]
@@ -152,163 +189,224 @@
         {
           "type": "webview",
           "id": "matterwave.chat",
-          "name": "Chat"
+          "name": "%view.chat.name%"
         }
       ]
     },
     "commands": [
       {
         "command": "matterwave.signInWithDeviceCode",
-        "title": "Sign In (Device Code)",
-        "category": "MatterWave"
+        "title": "%command.signInWithDeviceCode.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.signInWithApiKey",
-        "title": "Sign In with API Key",
-        "category": "MatterWave"
+        "title": "%command.signInWithApiKey.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.signOut",
-        "title": "Sign Out",
-        "category": "MatterWave"
+        "title": "%command.signOut.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.openChat",
+        "title": "%command.openChat.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.newChat",
-        "title": "New Chat",
-        "category": "MatterWave",
+        "title": "%command.newChat.title%",
+        "category": "%command.category%",
         "icon": "$(add)"
       },
       {
         "command": "matterwave.askAboutSelection",
-        "title": "Ask about Selection",
-        "category": "MatterWave"
+        "title": "%command.askAboutSelection.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.askAboutFile",
-        "title": "Ask about File",
-        "category": "MatterWave"
+        "title": "%command.askAboutFile.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.inlineEdit",
-        "title": "Edit Selection with MatterWave",
-        "category": "MatterWave"
+        "title": "%command.inlineEdit.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.fixProblem",
+        "title": "%command.fixProblem.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.explainCode",
+        "title": "%command.explainCode.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.generateTests",
+        "title": "%command.generateTests.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.addDocs",
+        "title": "%command.addDocs.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.explainTerminalCommand",
+        "title": "%command.explainTerminalCommand.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.fixTerminalCommand",
+        "title": "%command.fixTerminalCommand.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.generateCommitMessage",
+        "title": "%command.generateCommitMessage.title%",
+        "category": "%command.category%",
+        "icon": "$(sparkle)"
       },
       {
         "command": "matterwave.pickModel",
-        "title": "Pick Model",
-        "category": "MatterWave"
+        "title": "%command.pickModel.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.compactNow",
-        "title": "Compact Conversation Now",
-        "category": "MatterWave"
+        "title": "%command.compactNow.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.copyRequestId",
-        "title": "Copy Last Request ID",
-        "category": "MatterWave"
+        "title": "%command.copyRequestId.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.exportConversation",
-        "title": "Export Conversation as Markdown",
-        "category": "MatterWave"
+        "title": "%command.exportConversation.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.shareConversation",
-        "title": "Create Share Link",
-        "category": "MatterWave"
+        "title": "%command.shareConversation.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.manageShares",
-        "title": "Manage Share Links",
-        "category": "MatterWave"
+        "title": "%command.manageShares.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.organizeConversation",
-        "title": "Organize",
-        "category": "MatterWave"
+        "title": "%command.organizeConversation.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.manageTags",
-        "title": "Manage Tags",
-        "category": "MatterWave"
+        "title": "%command.manageTags.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.manageFolders",
+        "title": "%command.manageFolders.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.reportConversation",
+        "title": "%command.reportConversation.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.customInstructions",
-        "title": "Edit Custom Instructions",
-        "category": "MatterWave"
+        "title": "%command.customInstructions.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.account",
+        "title": "%command.account.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.manageApiKeys",
-        "title": "Manage API Keys",
-        "category": "MatterWave"
+        "title": "%command.manageApiKeys.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.switchAccount",
-        "title": "Switch Account",
-        "category": "MatterWave"
+        "title": "%command.switchAccount.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.promptLibrary",
-        "title": "Prompt Library",
-        "category": "MatterWave"
+        "title": "%command.promptLibrary.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.restoreCheckpoint",
-        "title": "Restore Checkpoint",
-        "category": "MatterWave"
+        "title": "%command.restoreCheckpoint.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.importHistory",
-        "title": "Import ChatGPT or Claude History",
-        "category": "MatterWave"
+        "title": "%command.importHistory.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.showLog",
+        "title": "%command.showLog.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.agent.toggle",
-        "title": "Toggle Agent Mode",
-        "category": "MatterWave"
+        "title": "%command.agent.toggle.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.agent.setMode",
-        "title": "Set Agent Approval Mode",
-        "category": "MatterWave"
+        "title": "%command.agent.setMode.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.agent.cycleMode",
-        "title": "Cycle Agent Approval Mode",
-        "category": "MatterWave"
+        "title": "%command.agent.cycleMode.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.agent.accept",
-        "title": "Accept the Agent's Change",
-        "category": "MatterWave",
+        "title": "%command.agent.accept.title%",
+        "category": "%command.category%",
         "icon": "$(check)"
       },
       {
         "command": "matterwave.agent.reject",
-        "title": "Reject the Agent's Change",
-        "category": "MatterWave",
+        "title": "%command.agent.reject.title%",
+        "category": "%command.category%",
         "icon": "$(close)"
       },
       {
         "command": "matterwave.agent.pickRoot",
-        "title": "Pick the Agent's Root Folder",
-        "category": "MatterWave"
+        "title": "%command.agent.pickRoot.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.agent.init",
-        "title": "Draft MATTERWAVE.md (/init)",
-        "category": "MatterWave"
+        "title": "%command.agent.init.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.agent.resume",
-        "title": "Resume an Agent Run",
-        "category": "MatterWave"
+        "title": "%command.agent.resume.title%",
+        "category": "%command.category%"
       },
       {
         "command": "matterwave.showUsage",
-        "title": "Show Usage",
-        "category": "MatterWave"
+        "title": "%command.showUsage.title%",
+        "category": "%command.category%"
       }
     ],
     "menus": {
@@ -332,8 +430,25 @@
         },
         {
           "command": "matterwave.inlineEdit",
-          "when": "editorHasSelection",
+          "when": "editorHasSelection && isWorkspaceTrusted",
           "group": "matterwave@3"
+        }
+      ],
+      "terminal/context": [
+        {
+          "command": "matterwave.explainTerminalCommand",
+          "group": "matterwave@1"
+        },
+        {
+          "command": "matterwave.fixTerminalCommand",
+          "group": "matterwave@2"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "matterwave.generateCommitMessage",
+          "when": "scmProvider == git",
+          "group": "navigation"
         }
       ],
       "editor/title": [
@@ -363,7 +478,90 @@
       {
         "command": "matterwave.inlineEdit",
         "key": "ctrl+i",
+        "mac": "cmd+i",
+        "when": "editorTextFocus && editorHasSelection && isWorkspaceTrusted && !inlineChatHasProvider && !inlineChatHasEditsAgent"
+      },
+      {
+        "command": "matterwave.inlineEdit",
+        "key": "ctrl+alt+m i",
+        "mac": "ctrl+cmd+m i",
+        "when": "editorTextFocus && editorHasSelection && isWorkspaceTrusted"
+      },
+      {
+        "command": "matterwave.openChat",
+        "key": "ctrl+alt+m c",
+        "mac": "ctrl+cmd+m c"
+      },
+      {
+        "command": "matterwave.newChat",
+        "key": "ctrl+alt+m n",
+        "mac": "ctrl+cmd+m n"
+      },
+      {
+        "command": "matterwave.askAboutSelection",
+        "key": "ctrl+alt+m a",
+        "mac": "ctrl+cmd+m a",
         "when": "editorTextFocus && editorHasSelection"
+      }
+    ],
+    "walkthroughs": [
+      {
+        "id": "matterwave.gettingStarted",
+        "title": "%walkthrough.gettingStarted.title%",
+        "description": "%walkthrough.gettingStarted.description%",
+        "steps": [
+          {
+            "id": "signIn",
+            "title": "%walkthrough.gettingStarted.signIn.title%",
+            "description": "%walkthrough.gettingStarted.signIn.description%",
+            "media": {
+              "markdown": "media/walkthrough/sign-in.md"
+            },
+            "completionEvents": [
+              "onCommand:matterwave.signInWithDeviceCode",
+              "onCommand:matterwave.signInWithApiKey"
+            ]
+          },
+          {
+            "id": "askAboutSelection",
+            "title": "%walkthrough.gettingStarted.askAboutSelection.title%",
+            "description": "%walkthrough.gettingStarted.askAboutSelection.description%",
+            "media": {
+              "markdown": "media/walkthrough/ask.md"
+            },
+            "completionEvents": [
+              "onCommand:matterwave.askAboutSelection"
+            ]
+          },
+          {
+            "id": "apply",
+            "title": "%walkthrough.gettingStarted.apply.title%",
+            "description": "%walkthrough.gettingStarted.apply.description%",
+            "media": {
+              "markdown": "media/walkthrough/apply.md"
+            },
+            "completionEvents": [
+              "onCommand:matterwave.openChat"
+            ]
+          },
+          {
+            "id": "inlineEdit",
+            "title": "%walkthrough.gettingStarted.inlineEdit.title%",
+            "description": "%walkthrough.gettingStarted.inlineEdit.description%",
+            "media": {
+              "markdown": "media/walkthrough/inline-edit.md"
+            },
+            "completionEvents": [
+              "onCommand:matterwave.inlineEdit"
+            ]
+          }
+        ]
+      }
+    ],
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "matterwave.mcp",
+        "label": "MatterWave"
       }
     ]
   },
@@ -374,7 +572,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "pnpm run build && node e2e/run.mjs",
-    "package": "pnpm run build && vsce package --no-dependencies --skip-license --allow-missing-repository",
+    "package": "pnpm run build && vsce package --no-dependencies",
+    "icon": "node scripts/icon.mjs",
     "sdk:check": "node scripts/sdk-agent.mjs --check",
     "sdk:sync": "node scripts/sdk-agent.mjs --sync"
   },
@@ -382,9 +581,10 @@
     "@eslint/js": "^9.17.0",
     "@types/mocha": "10.0.10",
     "@types/node": "^22.10.0",
-    "@types/vscode": "~1.90.0",
+    "@types/vscode": "~1.93.0",
     "@vscode/test-electron": "3.1.0",
     "@vscode/vsce": "^3.2.1",
+    "axe-core": "^4.14.0",
     "esbuild": "^0.24.0",
     "eslint": "^9.17.0",
     "globals": "^15.14.0",
@@ -392,7 +592,6 @@
     "mocha": "12.0.3",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.18.0",
-    "undici": "^7.30.1",
     "vitest": "^2.1.8"
   },
   "packageManager": "pnpm@10.12.3",
@@ -400,14 +599,5 @@
     "onlyBuiltDependencies": [
       "esbuild"
     ]
-  },
-  "capabilities": {
-    "untrustedWorkspaces": {
-      "supported": "limited",
-      "description": "The coding agent (its file and shell tools, MATTERWAVE.md, project commands, subagents and MCP servers) stays off until the folder is trusted. Chat works either way.",
-      "restrictedConfigurations": [
-        "matterwave.agent.mcpServers"
-      ]
-    }
   }
 }

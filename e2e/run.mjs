@@ -1,22 +1,28 @@
-// The end-to-end tests: the built extension inside a real VS Code. Two suites:
+// The end-to-end tests: the built extension inside a real VS Code, in three
+// suites under `./suite` (each runs inside the editor's extension host,
+// under mocha).
 //
-// - agent (always): the coding agent against a scripted fake /v1 that the
-//   suite serves from inside the extension host, in a scratch workspace
-//   folder this launcher creates -- the native diff, Accept, Reject, an
-//   edited proposal and undo, with no deployment and no credential.
-// - deployment: a real MatterWave deployment, skipped without its
-//   environment (below).
+// The editor suite always runs. It needs no deployment: it opens a
+// two-folder workspace made for the run and checks what the vscode mock the
+// unit tests use cannot show -- edits through the editor's buffer, undo,
+// files created on the editor's file service, which folder a path lands in.
 //
-// For the deployment suite this launcher does what the extension host
-// cannot: it signs in as the standing e2e account the way the browser does,
-// approves a device login for the run as that account, hands the key it
-// minted to the suite in `./suite` (which runs inside the editor's extension
-// host, under mocha), and revokes the key whatever the run did.
+// The agent suite always runs too: the coding agent against a scripted fake
+// /v1 that the suite serves from inside the extension host, in a scratch
+// workspace folder this launcher creates -- the native diff, Accept, Reject,
+// an edited proposal and undo, with no deployment and no credential.
+//
+// The deployment suite runs against a real MatterWave deployment. For it
+// this launcher does what the extension host cannot: it signs in as the
+// standing e2e account the way the browser does, approves a device login
+// for the run as that account, hands the key it minted to the suite, and
+// revokes the key whatever the run did.
 //
 //   E2E_ADMIN_EMAIL / E2E_ADMIN_PASSWORD   the account; without them the
-//                                          test is skipped, not failed
-//   E2E_BASE_URL                           the deployment; without it the test
-//                                          is skipped
+//                                          deployment suite is skipped, not
+//                                          failed
+//   E2E_BASE_URL                           the deployment; without it the
+//                                          deployment suite is skipped
 //   E2E_CA_FILE                            the deployment's CA, for a private one,
 //                                          trusted by both this process and the
 //                                          extension host (optional)
@@ -34,7 +40,10 @@
 // person signs it in, it works on every plan, and the session is the
 // browser's.
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import * as http from "node:http";
+import * as https from "node:https";
+import * as net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -52,13 +61,14 @@ const caFile = process.env.E2E_CA_FILE ? path.resolve(process.env.E2E_CA_FILE) :
 const vsix = process.env.E2E_VSIX ? path.resolve(process.env.E2E_VSIX) : "";
 const cachePath = path.join(root, ".vscode-test");
 
-/** Why the deployment suite cannot run here, or null when it can. */
-const deploymentSkip =
+/** Why the deployment suite cannot run, or null when it can. */
+const deploymentSkipped =
   !noAuth && (!email || !password)
     ? "E2E_ADMIN_EMAIL / E2E_ADMIN_PASSWORD are not set"
     : !baseUrl
       ? "E2E_BASE_URL is not set"
       : null;
+
 if (vsix && !existsSync(vsix)) {
   console.error(`vscode e2e: the .vsix ${vsix} does not exist (E2E_VSIX).`);
   process.exit(1);
@@ -166,7 +176,7 @@ async function mintDeviceKey(jar, csrf) {
 async function buildSuite() {
   await esbuild.build({
     absWorkingDir: root,
-    entryPoints: ["e2e/suite/index.ts", "e2e/suite/chat.test.ts", "e2e/suite/agent.test.ts"],
+    entryPoints: ["e2e/suite/index.ts", "e2e/suite/chat.test.ts", "e2e/suite/editor.test.ts", "e2e/suite/agent.test.ts"],
     outdir: "dist/e2e",
     bundle: true,
     platform: "node",
@@ -180,7 +190,8 @@ async function buildSuite() {
   });
 }
 
-const LAUNCH_FLAGS = [
+/** The editor's flags for every suite. */
+const LAUNCH_ARGS = [
   "--disable-extensions",
   "--disable-workspace-trust",
   "--skip-welcome",
@@ -224,7 +235,7 @@ async function runAgentSuite() {
       extensionDevelopmentPath,
       extensionTestsPath: path.join(suite, "index.js"),
       cachePath,
-      launchArgs: [workspace, ...LAUNCH_FLAGS],
+      launchArgs: [workspace, ...LAUNCH_ARGS],
       extensionTestsEnv: { ELECTRON_RUN_AS_NODE: undefined, E2E_SUITE: "agent", E2E_WORKSPACE: workspace },
     });
   } finally {
@@ -232,11 +243,174 @@ async function runAgentSuite() {
   }
 }
 
+/**
+ * A two-folder workspace for the editor suite, made fresh for the run: two
+ * roots so a path that names neither can be told from one that names the
+ * second, and LF endings so what a test writes is what it reads back on
+ * every platform.
+ */
+function editorWorkspace(dir) {
+  for (const folder of ["alpha", "beta"]) {
+    mkdirSync(path.join(dir, folder, "src"), { recursive: true });
+    writeFileSync(path.join(dir, folder, "src", "shared.ts"), `export const where = "${folder}";\n`);
+  }
+  // More files than any one list of them holds, so a picker that stops at
+  // a fixed count would lose some.
+  mkdirSync(path.join(dir, "alpha", "many"));
+  for (let i = 0; i < 600; i++) {
+    const name = `file-${String(i).padStart(4, "0")}.ts`;
+    writeFileSync(path.join(dir, "alpha", "many", name), `export const n = ${i};\n`);
+  }
+  // beta is a git repository with one change staged: what a commit
+  // message is written for.
+  const git = (...args) => {
+    const result = spawnSync("git", ["-c", "user.name=e2e", "-c", "user.email=e2e@example.invalid", ...args], {
+      cwd: path.join(dir, "beta"),
+      encoding: "utf8",
+    });
+    if (result.status !== 0) throw new Error(`git ${args[0]} failed: ${result.stderr}`);
+  };
+  git("init", "-q");
+  git("add", ".");
+  git("commit", "-q", "-m", "Start");
+  writeFileSync(path.join(dir, "beta", "src", "staged.ts"), "export const staged = true;\n");
+  git("add", "src/staged.ts");
+  const file = path.join(dir, "e2e.code-workspace");
+  writeFileSync(
+    file,
+    JSON.stringify({ folders: [{ path: "alpha" }, { path: "beta" }], settings: { "files.eol": "\n", "files.autoSave": "off" } }, null, 2),
+  );
+  return file;
+}
+
+/** openssl from PATH, $OPENSSL, or Git for Windows' copy; null when there is none. */
+function findOpenssl() {
+  const candidates = [process.env.OPENSSL, "openssl", "C:\\Program Files\\Git\\usr\\bin\\openssl.exe"].filter(Boolean);
+  return candidates.find((bin) => spawnSync(bin, ["version"], { stdio: "ignore" }).status === 0) ?? null;
+}
+
+/**
+ * The deployment's name: one no resolver knows, so only the proxy can reach
+ * it (the editor sends loopback addresses direct, never through a proxy).
+ */
+const TARGET_HOST = "mw-e2e.test";
+
+/**
+ * A throwaway certificate authority and a server certificate it signed for
+ * TARGET_HOST: the private CA a deployment behind a corporate root
+ * presents, which no system store trusts.
+ */
+function privateCa(dir) {
+  const openssl = findOpenssl();
+  if (!openssl) return null;
+  const at = (name) => path.join(dir, name);
+  const run = (args) => {
+    const result = spawnSync(openssl, args, { encoding: "utf8" });
+    if (result.status !== 0) throw new Error(`openssl ${args[0]} failed: ${result.stderr}`);
+  };
+  writeFileSync(at("server.ext"), `subjectAltName=DNS:${TARGET_HOST}\nbasicConstraints=CA:FALSE\n`);
+  run(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", at("ca.key"), "-out", at("ca.crt"), "-days", "2", "-subj", "/CN=MatterWave e2e test CA"]);
+  run(["req", "-newkey", "rsa:2048", "-nodes", "-keyout", at("server.key"), "-out", at("server.csr"), "-subj", `/CN=${TARGET_HOST}`]);
+  run(["x509", "-req", "-in", at("server.csr"), "-CA", at("ca.crt"), "-CAkey", at("ca.key"), "-CAcreateserial", "-out", at("server.crt"), "-days", "2", "-extfile", at("server.ext")]);
+  return { ca: at("ca.crt"), key: readFileSync(at("server.key")), cert: readFileSync(at("server.crt")) };
+}
+
+const PROXY_USER = "e2e";
+const PROXY_PASSWORD = "e2e-test-pass";
+
+/**
+ * An HTTPS server behind the private CA, and an HTTP proxy in front of it
+ * that refuses a tunnel without Basic credentials and tunnels to that one
+ * server alone (the editor's own traffic stays off the network): the
+ * network a person behind a corporate proxy has. The proxy counts what it
+ * saw, and answers GET /__stats with the counts.
+ */
+async function proxiedDeployment(tls) {
+  const stats = { tunnels: 0, refused: 0 };
+  const target = https.createServer({ key: tls.key, cert: tls.cert }, (req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ through: "target", path: req.url }));
+  });
+  const expected = `Basic ${Buffer.from(`${PROXY_USER}:${PROXY_PASSWORD}`).toString("base64")}`;
+  const proxy = http.createServer((req, res) => {
+    if (req.url?.endsWith("/__stats")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(stats));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  proxy.on("connect", (req, socket, head) => {
+    if (req.headers["proxy-authorization"] !== expected) {
+      stats.refused++;
+      socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="e2e"\r\n\r\n');
+      return;
+    }
+    const [host, port] = (req.url ?? "").split(":");
+    if (host !== TARGET_HOST || Number(port) !== target.address().port) {
+      socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+      return;
+    }
+    stats.tunnels++;
+    const upstream = net.connect(Number(port), "127.0.0.1", () => {
+      socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      upstream.write(head);
+      upstream.pipe(socket);
+      socket.pipe(upstream);
+    });
+    upstream.on("error", () => socket.destroy());
+    socket.on("error", () => upstream.destroy());
+  });
+  await Promise.all([target, proxy].map((server) => new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))));
+  return {
+    targetUrl: `https://${TARGET_HOST}:${target.address().port}`,
+    proxyUrl: `http://${PROXY_USER}:${PROXY_PASSWORD}@127.0.0.1:${proxy.address().port}`,
+    statsUrl: `http://127.0.0.1:${proxy.address().port}/__stats`,
+    close: () => {
+      for (const server of [target, proxy]) {
+        server.closeAllConnections?.();
+        server.close();
+      }
+    },
+  };
+}
+
+async function runEditorSuite() {
+  const dir = mkdtempSync(path.join(tmpdir(), "mw-vscode-e2e-"));
+  const tls = privateCa(dir);
+  if (!tls) console.log("vscode e2e: no openssl, so the proxy and private-CA test is skipped.");
+  const network = tls ? await proxiedDeployment(tls) : null;
+  // The editor's own network settings, as a person behind the proxy has
+  // them: user settings, since a workspace cannot set http.proxy.
+  const userData = path.join(dir, "user-data");
+  mkdirSync(path.join(userData, "User"), { recursive: true });
+  writeFileSync(path.join(userData, "User", "settings.json"), JSON.stringify(network ? { "http.proxy": network.proxyUrl } : {}, null, 2));
+  try {
+    await runTests({
+      extensionDevelopmentPath: root,
+      extensionTestsPath: path.join(root, "dist", "e2e", "index.js"),
+      cachePath: path.join(root, ".vscode-test"),
+      launchArgs: [editorWorkspace(dir), `--user-data-dir=${userData}`, ...LAUNCH_ARGS],
+      extensionTestsEnv: {
+        ELECTRON_RUN_AS_NODE: undefined,
+        E2E_SUITE: "editor",
+        E2E_TLS_TARGET: network?.targetUrl,
+        E2E_TLS_CA: tls?.ca,
+        E2E_PROXY_STATS: network?.statsUrl,
+      },
+    });
+  } finally {
+    network?.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   await buildSuite();
+  await runEditorSuite();
   await runAgentSuite();
-  if (deploymentSkip) {
-    console.log(`vscode e2e: deployment suite SKIPPED -- ${deploymentSkip}.`);
+  if (deploymentSkipped) {
+    console.log(`vscode e2e: the deployment suite is SKIPPED -- ${deploymentSkipped}.`);
     return;
   }
   const jar = noAuth ? null : new CookieJar();
@@ -248,12 +422,12 @@ async function main() {
       extensionDevelopmentPath: root,
       extensionTestsPath: path.join(root, "dist", "e2e", "index.js"),
       cachePath,
-      launchArgs: LAUNCH_FLAGS,
+      launchArgs: LAUNCH_ARGS,
       extensionTestsEnv: {
-        E2E_SUITE: "deployment",
         // Set in a terminal inside an editor; the editor under test must
         // start as an editor, not as a bare node.
         ELECTRON_RUN_AS_NODE: undefined,
+        E2E_SUITE: "deployment",
         NODE_EXTRA_CA_CERTS: caFile || undefined,
         // The extension's fetch trusts its own matterwave.caFile, not the
         // host's NODE_EXTRA_CA_CERTS: the suite sets the setting from this.

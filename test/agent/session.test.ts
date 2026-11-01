@@ -438,14 +438,18 @@ describe("context, availability, resume and restore", () => {
     const before = { app: read("src/app.ts"), other: read("src/other.ts") };
 
     const rows: Checkpoint[] = [];
+    const snapshots = new Map<string, string | null>();
     const model = new FakeModel([
       [callChunk("e1", "edit", EDIT)],
       [callChunk("e2", "edit", { path: "src/other.ts", old_string: "c = 3", new_string: "c = 4" })],
       [textChunk("Both changed.")],
     ]);
     const { agent } = session(model, {
-      checkpoint: async (conversationId, relative, content) => {
-        rows.unshift({ id: `cp${rows.length}`, conversationId, path: relative, content, createdAt: new Date().toISOString(), label: "Agent edit" });
+      checkpoint: async (conversationId, relative, content, absolute) => {
+        const at = new Date().toISOString();
+        const id = `cp${rows.length}`;
+        snapshots.set(id, content);
+        rows.unshift({ id, conversationId, uri: absolute, path: relative, isNew: content === null, size: content?.length ?? 0, createdAt: at, usedAt: at, label: "Agent edit" });
       },
     });
     await agent.setMode("auto-edit");
@@ -456,7 +460,7 @@ describe("context, availability, resume and restore", () => {
     // Restore to before the first of the two: both files come back.
     const plan = restorePlan(rows, rows.at(-1)!.id);
     expect(plan.map((p) => p.path)).toEqual(["src/app.ts", "src/other.ts"]);
-    for (const step of plan) writeFileSync(join(ws.root, ...step.path.split("/")), step.content!);
+    for (const step of plan) writeFileSync(join(ws.root, ...step.path.split("/")), snapshots.get(step.id)!);
     expect(read("src/app.ts").equals(before.app)).toBe(true);
     expect(read("src/other.ts").equals(before.other)).toBe(true);
     expect(execFileSync("git", ["rev-parse", "HEAD"], { cwd: ws.root, encoding: "utf8" })).toBe(head);

@@ -10,7 +10,7 @@
  * user setting.
  */
 
-export const DEFAULT_BASE_URL = "https://app.matterwave.dev";
+export const DEFAULT_BASE_URL = "https://app.matterwave.ai";
 
 /** Ask on the first activation that still has the default server in force; never again after. */
 export function shouldPromptForServer(input: { configured: string | undefined; prompted: boolean }): boolean {

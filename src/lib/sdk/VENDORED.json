@@ -1,7 +1,7 @@
 {
   "about": "A byte-for-byte copy of @matterwave/sdk src/agent; scripts/sdk-agent.mjs --sync rewrites it, test/sdkVendor.test.ts holds it.",
   "source": "MatterWaveAI/typescript-sdk",
-  "ref": "agent-contract-1.1",
+  "ref": "f95f723564f6ec19fb50955ba73a929ef8a63f4e",
   "commit": "f95f723564f6ec19fb50955ba73a929ef8a63f4e",
   "contract_version": "1.2.0",
   "contract_sha256": "86240640559d7c90e3a88f4ea18e39b09a070a542f7999ca4c6d7ffac138dc76",

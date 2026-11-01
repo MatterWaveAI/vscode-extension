@@ -218,17 +218,27 @@ describe("the extension's own tools, decided by their kind", () => {
 });
 
 describe("restore plans", () => {
-  const row = (id: string, path: string, content: string | null): Checkpoint => ({ id, conversationId: "c", path, content, createdAt: "", label: "Agent edit" });
+  const row = (id: string, path: string, isNew = false): Checkpoint => ({
+    id,
+    conversationId: "c",
+    uri: `file:///ws/${path}`,
+    path,
+    isNew,
+    size: 0,
+    createdAt: "",
+    usedAt: "",
+    label: "Agent edit",
+  });
 
-  it("restoring to before a change also takes back every later one, each file to its earliest content", () => {
+  it("restoring to before a change also takes back every later one, each file to its earliest snapshot", () => {
     // Newest first: a.ts edited twice, b.ts once, c.ts created.
-    const rows = [row("4", "c.ts", null), row("3", "a.ts", "a-v2"), row("2", "b.ts", "b-v1"), row("1", "a.ts", "a-v1")];
-    expect(restorePlan(rows, "1")).toEqual([
-      { path: "a.ts", content: "a-v1", label: "Agent edit" },
-      { path: "b.ts", content: "b-v1", label: "Agent edit" },
-      { path: "c.ts", content: null, label: "Agent edit" },
+    const rows = [row("4", "c.ts", true), row("3", "a.ts"), row("2", "b.ts"), row("1", "a.ts")];
+    expect(restorePlan(rows, "1").map((p) => [p.path, p.id, p.isNew])).toEqual([
+      ["a.ts", "1", false],
+      ["b.ts", "2", false],
+      ["c.ts", "4", true],
     ]);
-    expect(restorePlan(rows, "3").map((p) => [p.path, p.content])).toEqual([["a.ts", "a-v2"], ["c.ts", null]]);
+    expect(restorePlan(rows, "3").map((p) => [p.path, p.id])).toEqual([["a.ts", "3"], ["c.ts", "4"]]);
     expect(restorePlan(rows, "nope")).toEqual([]);
   });
 });

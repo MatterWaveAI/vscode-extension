@@ -2,29 +2,38 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # develop is where the work lands between releases; main is what ships.
+    branches: [develop, main]
   pull_request:
+    branches: [develop, main]
+
+# The workflow token reads the repository and nothing else; a job that
+# needs more says so itself.
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # The packageManager field pins the version; no `version:` needed here.
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
+      - name: No private ticket ids in tracked files
+        run: sh scripts/check-ticket-ids.sh
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
       # The packaging gate: a manifest problem (a missing icon, a bad
       # activation event) fails here rather than at publish time.
-      - run: pnpm exec vsce package --no-dependencies --skip-license --allow-missing-repository --out matterwave.vsix
-      - uses: actions/upload-artifact@v4
+      - run: pnpm exec vsce package --no-dependencies --out matterwave.vsix
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: vsix
           path: matterwave.vsix
@@ -40,26 +49,47 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec vitest run test/agent
 
-  # The agent suite in a real VS Code (downloaded into .vscode-test) against
-  # the scripted /v1 it serves itself; the deployment suite skips without its
-  # secrets.
+  # The extension inside a real VS Code (downloaded by @vscode/test-electron)
+  # under a virtual display: the editor suite and the agent suite (against the
+  # scripted /v1 it serves itself) always run; the deployment suite runs only
+  # where E2E_BASE_URL and the e2e account are configured, and says it was
+  # skipped otherwise.
   e2e:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: xvfb-run -a pnpm run test:e2e
+      - run: xvfb-run -a pnpm test:e2e
+
+  # Every commit on the branch, not just the tip: a secret removed in a
+  # later commit is still in the history anyone can clone.
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Scan the history for committed secrets
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$archive" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          echo "${GITLEAKS_SHA256}  ${archive}" | sha256sum -c -
+          tar -xzf "$archive" gitleaks
+          ./gitleaks git --redact --verbose .

@@ -7,25 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- **Agent mode**: an Agent toggle in the chat view runs the coding agent over `/v1/chat/completions` with the shared tool contract, agent contract 1.2.0 (`read_file`, `list_dir`, `glob`, `grep`, `edit`, `write_file`, `run_shell`), in the extension host, confined to the workspace root -- `..`, absolute paths elsewhere, links out of the root, names Windows reads as something else (`key.pem:x`, `a.`, `NUL.txt`, `\\?\` and network paths, refused on every platform) and the deny list (`.env*`, `*.pem`, `id_*`, `.git/`, any case, plus `.matterwaveignore`'s entries) are refused before anything happens, and searches skip what the `.gitignore` and `.matterwaveignore` files from the root down ignore. The root is the workspace folder (pick one when several are open).
-- **The SDK's tools and wording**: the read tools, the search walk and its ignore rules, `run_shell`'s text, the approval decisions for the extension's own tools (by kind: `todo_write` and `task` are `meta`, `web_fetch` is `network`, MCP tools are `mcp`), the refusal sentences and the prompt's "More tools" and project-instructions slots are the vendored SDK's (`src/lib/sdk/agent`, `pnpm sdk:sync --sdk <dir> --ref <ref>`), so the model reads the same text here as in every other client; the contract's conformance cases run through the extension's own tools in the unit suite.
-- **Approval modes**: `plan` (reads only), `ask` (the default: every change and command approved), `auto-edit` (changes applied, commands asked) and `yolo` (per session, after a confirm, never saved). The mode chip and the status bar always show it; Shift+Tab, the chip and `/approval-mode` change it.
-- **Native diff review**: in `ask` every write opens VS Code's diff on an editable virtual document. Accept writes what the right side holds through a `WorkspaceEdit` (so Ctrl+Z undoes it), Reject leaves the file byte-identical, and the model is told either way, including when you edited its proposal.
-- **Commands and Stop**: `run_shell` runs as a child process in the root with the contract's time limit and output cap (head and tail kept), its output streaming into the view. Stop ends the stream, a waiting approval, the command and every process it started, detached ones included: on Windows the shell runs in a Job Object (so `cmd /c start /b ...` and `Start-Process` children end with it, as they do when VS Code exits), on Linux in a new session and, where a systemd user manager runs, a transient scope (cgroup), on macOS in a new session with its descendants swept. A `timeout_s` outside 1-600 is refused rather than clamped.
-- **Run limits**: a step cap and a per-run token cap end a looping run with a message naming the setting; a 402 or a spent budget (`insufficient_quota`) ends it with the chat's budget copy. Agent mode is greyed out with its reason in an untrusted workspace, for a model with `supports_tools: false`, or when `/api/me` says the org turned `local_agent_tools` off (the SDK's `toolsOf` and `localAgentToolsOf`: a missing field reads as allowed).
-- **Context**: `MATTERWAVE.md`, `AGENTS.md`, a personal `MATTERWAVE.local.md` and `~/.matterwave/MATTERWAVE.md`, loaded only in a trusted folder (with a notice otherwise), each fenced in the prompt and cut at 32,768 characters, plus the account's custom instructions; `@path` mentions; the active file, selection and recent files, size-capped and never from a denied path.
-- **Checkpoints and `/restore`**: every applied agent write is a checkpoint, and restoring one puts back every file it and the later ones changed, after one confirm, without touching the project's git.
-- **Slash commands**: `/help`, `/approval-mode`, `/context`, `/restore`, `/init` (the agent drafts `MATTERWAVE.md`) and `/resume` (an earlier run with its tool rounds) join `/model`, `/compact`, `/clear`, `/share` and `/export`; custom commands are Markdown files in `~/.matterwave/commands` or `.matterwave/commands`.
-- **Agent compaction**: old tool output is folded first, then older steps are summarised (the conversation's compaction when the run is stored, a `/v1` call otherwise); `/compact` does it on demand.
-- **MCP client**: stdio and HTTP servers from `matterwave.agent.mcpServers`, each with a tool allow-list and optional trust, plus MatterWave's own `/mcp` signed in as the editor. Every MCP tool asks before each call in `ask` and `auto-edit`, read-only or not; `plan` offers only the read-only ones, and asks; `yolo` runs them. `"trust": true` is the person's standing approval: a trusted server's tools run without asking wherever they would ask.
-- **Todo list, subagents, web fetch**: `todo_write` shows the run's plan in the view; subagents defined in `.matterwave/agents/*.md` run as nested loops with their own tool allow-list under the run's limits; `web_fetch` asks first outside yolo and is not offered in plan. A call the person rejects goes back to the model as the contract's `rejected` sentence, an ordinary result, with what they said after it.
-- **Usage view**: this session's agent runs (steps, tool calls, tokens), the period's allowance and your spend from `/api/budget`.
-- The chat stream's `compacting` frame: the view says the server is summarising earlier turns while the first token waits.
-
 ### Security
 
+- The extension's exports (the chat controller and its message tap) are given only to the extension test runner; a production host exports nothing, so no other installed extension can read transcripts or run turns with your credential.
+- A file an answer names is applied only when it is a plain relative path that stays inside a workspace folder: `../`, absolute, drive-letter, UNC and URI paths are refused, and the Apply and Create dialogs show where the write lands.
+- In Restricted Mode (an untrusted workspace) Apply, inline edit, Restore Checkpoint, Insert at Cursor, the lightbulb's Fix and Add Docs, commit messages and `@git` wait for the workspace to be trusted.
 - MatterWave's credential goes to an MCP server only at exactly `<matterwave.baseUrl>/mcp`; a prefix match had let a look-alike host (`https://app.example.dev.evil.test/mcp`, `https://app.example.dev@evil.test/mcp`) named `matterwave` in a workspace's settings receive it.
 - MCP servers a workspace's settings add start only after the person approves that exact definition (kept per workspace until it changes), and a workspace cannot mark its own servers `trust`. A server's read-only marks count only for a trusted server and MatterWave's own; plan mode leaves any other server's tools out.
 - A change to `.vscode/`, `*.code-workspace`, `.matterwave/`, `MATTERWAVE.md`, `MATTERWAVE.local.md`, `AGENTS.md` or `.matterwaveignore`, or, for a root at or above the home folder, to `.bashrc`, `.bash_profile`, `.profile`, `.zshrc`, `.zprofile`, `.ssh/`, `.aws/` or a `.config/matterwave`, asks in every mode, `yolo` included, by its own name or where its links lead, so text the agent read cannot write itself into standing instructions, a shell start-up line or a server the editor starts. A workspace's settings can make the default mode stricter and the step and token caps lower, never the reverse.
@@ -40,10 +26,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A file's byte-order mark is no longer read as text, so an edit no longer writes a second one.
 - `/restore` resolves each checkpoint's path again and writes nothing through a folder that has since become a link out of the workspace.
 
+### Fixed
+
+- Apply, inline edit and restore change the document through the editor (a `WorkspaceEdit` over the range that differs) instead of writing to disk: the change joins Undo, unsaved edits are kept and diffed against, the checkpoint records what the buffer held, and no save conflict follows. A document changed while the diff was open is not applied.
+- Inline edit works on whole lines and keeps the selection's trailing line break and indentation; an answer with no fenced code is not applied.
+- Multi-root and remote workspaces: a named file goes to the folder its path names, else the active editor's, else the only one, else a pick; `@git` and `@folder` act on the right folder; checkpoints keep the file's full URI; new files are created through the editor's file service, so a remote host is kept.
+- The sidebar and the archive load every page of conversations (scroll to the end, or Load more), Organize lists them all, and the file picker searches the whole workspace as you type.
+- `@terminal` reads a terminal's recent commands, output and exit codes through shell integration (or its copied buffer), each `@` mention is its own pick, and backing out of a pick leaves no empty conversation.
+- A selection holding `@file` (a JSDoc tag) or starting with `/` is sent as it is, not read as a mention or a command.
+
+### Added
+
+- **Proxy support**: requests follow the editor's `http.proxy` (with credentials), `http.proxyStrictSSL` and the operating system's certificates, with `matterwave.caFile` trusted on top. The bundled HTTP client is gone and the extension is about 500 KB smaller.
+- **Get started**: a walkthrough (sign in, ask, apply, inline edit), keybindings for Open Chat, New Chat and Ask about Selection (`Ctrl+Alt+M C/N/A`, `Ctrl+Cmd+M` on macOS), and a **MatterWave** log of every request's method, path, status, time and request id, never content (**Show Log**). The extension activates when it is used, and asks for the server on first use.
+- **The lightbulb**: Fix with MatterWave for a reported problem, through a reviewed diff; Explain, Generate Tests and Add Docs for a selection.
+- **The terminal**: Explain and Fix Last Terminal Command from the terminal's context menu.
+- **Commit messages** from the staged changes, from the Source Control title bar, in the `matterwave.commitMessageStyle` style, written in a temporary conversation that leaves the chat untouched.
+- **MCP**: MatterWave's MCP server is offered to VS Code's agent mode, as the signed-in account (VS Code 1.101 and later).
+- **Conversations**: fork from any message, report an answer or a conversation, ranked and paged search over titles and messages, rename and delete folders (**Manage Folders**), and the deployment's announcements as dismissable banners.
+- **Account**: your spending cap beside the allowance; key creation with scopes and a lifetime, and key rename; an **Account** command with plan, cap, moderation status, **Export my data** and **See plans**; uploads checked against the deployment's own limits before they are sent.
+- **Composer**: Insert at Cursor and Copy on every code block, code coloured in the editor theme's colours, and completion for `@` and `/` (your saved prompts included).
+- Tokens and cost at list price under each answer (`matterwave.showAnswerUsage`).
+- The prompt library keeps prompts for every workspace or for this one, and Settings Sync carries it and your model choice to your other machines.
+- Checkpoint snapshots are files in the extension's storage, under one cap for every chat (least recently used first), instead of the editor's state.
+- The chat view is a labelled landmark for screen readers and says once when an answer finishes, instead of reading every streamed token.
+- Commands, settings and the walkthrough in Spanish.
+- `Cmd+I` for inline edit on macOS; `Ctrl/Cmd+I` yields to the editor's own inline chat when one is installed, and `Ctrl+Alt+M I` always works.
+- The Marketplace icon, gallery banner, keywords and links; the `.vsix` ships the licence and this changelog.
+- **Agent mode**: an Agent toggle in the chat view runs the coding agent over `/v1/chat/completions` with the shared tool contract, agent contract 1.2.0 (`read_file`, `list_dir`, `glob`, `grep`, `edit`, `write_file`, `run_shell`), in the extension host, confined to the workspace root -- `..`, absolute paths elsewhere, links out of the root, names Windows reads as something else (`key.pem:x`, `a.`, `NUL.txt`, `\\?\` and network paths, refused on every platform) and the deny list (`.env*`, `*.pem`, `id_*`, `.git/`, any case, plus `.matterwaveignore`'s entries) are refused before anything happens, and searches skip what the `.gitignore` and `.matterwaveignore` files from the root down ignore. The root is the workspace folder (pick one when several are open).
+- **The SDK's tools and wording**: the read tools, the search walk and its ignore rules, `run_shell`'s text, the approval decisions for the extension's own tools (by kind: `todo_write` and `task` are `meta`, `web_fetch` is `network`, MCP tools are `mcp`), the refusal sentences and the prompt's "More tools" and project-instructions slots are the vendored SDK's (`src/lib/sdk/agent`, `pnpm sdk:sync --sdk <dir> --ref <ref>`), so the model reads the same text here as in every other client; the contract's conformance cases run through the extension's own tools in the unit suite.
+- **Approval modes**: `plan` (reads only), `ask` (the default: every change and command approved), `auto-edit` (changes applied, commands asked) and `yolo` (per session, after a confirm, never saved). The mode chip and the status bar always show it; Shift+Tab, the chip and `/approval-mode` change it.
+- **Native diff review**: in `ask` every write opens VS Code's diff on an editable virtual document. Accept writes what the right side holds through a `WorkspaceEdit` (so Ctrl+Z undoes it), Reject leaves the file byte-identical, and the model is told either way, including when you edited its proposal.
+- **Commands and Stop**: `run_shell` runs as a child process in the root with the contract's time limit and output cap (head and tail kept), its output streaming into the view. Stop ends the stream, a waiting approval, the command and every process it started, detached ones included: on Windows the shell runs in a Job Object (so `cmd /c start /b ...` and `Start-Process` children end with it, as they do when VS Code exits), on Linux in a new session and, where a systemd user manager runs, a transient scope (cgroup), on macOS in a new session with its descendants swept. A `timeout_s` outside 1-600 is refused rather than clamped.
+- **Run limits**: a step cap and a per-run token cap end a looping run with a message naming the setting; a 402 or a spent budget (`insufficient_quota`) ends it with the chat's budget copy. Agent mode is greyed out with its reason in an untrusted workspace, for a model with `supports_tools: false`, or when `/api/me` says the org turned `local_agent_tools` off (the SDK's `toolsOf` and `localAgentToolsOf`: a missing field reads as allowed).
+- **Context**: `MATTERWAVE.md`, `AGENTS.md`, a personal `MATTERWAVE.local.md` and `~/.matterwave/MATTERWAVE.md`, loaded only in a trusted folder (with a notice otherwise), each fenced in the prompt and cut at 32,768 characters, plus the account's custom instructions; `@path` mentions; the active file, selection and recent files, size-capped and never from a denied path.
+- **Checkpoints and `/restore`**: every applied agent write is a checkpoint beside Apply's and inline edit's, and restoring one puts back every file it and the later ones changed (one file through the reviewed diff, several after one confirm, as one edit Undo takes back), without touching the project's git.
+- **Slash commands**: `/help`, `/approval-mode`, `/context`, `/restore`, `/init` (the agent drafts `MATTERWAVE.md`) and `/resume` (an earlier run with its tool rounds) join `/model`, `/compact`, `/clear`, `/share` and `/export`; custom commands are Markdown files in `~/.matterwave/commands` or `.matterwave/commands`.
+- **Agent compaction**: old tool output is folded first, then older steps are summarised (the conversation's compaction when the run is stored, a `/v1` call otherwise); `/compact` does it on demand.
+- **MCP client**: stdio and HTTP servers from `matterwave.agent.mcpServers`, each with a tool allow-list and optional trust, plus MatterWave's own `/mcp` signed in as the editor. Every MCP tool asks before each call in `ask` and `auto-edit`, read-only or not; `plan` offers only the read-only ones, and asks; `yolo` runs them. `"trust": true` is the person's standing approval: a trusted server's tools run without asking wherever they would ask.
+- **Todo list, subagents, web fetch**: `todo_write` shows the run's plan in the view; subagents defined in `.matterwave/agents/*.md` run as nested loops with their own tool allow-list under the run's limits; `web_fetch` asks first outside yolo and is not offered in plan. A call the person rejects goes back to the model as the contract's `rejected` sentence, an ordinary result, with what they said after it.
+- **Usage view**: this session's agent runs (steps, tool calls, tokens), the period's allowance and your spend from `/api/budget`.
+- The chat stream's `compacting` frame: the view says the server is summarising earlier turns while the first token waits.
+
 ### Changed
 
-- The SDK's agent module (`@matterwave/sdk` `src/agent`, contract v1.0.0) is vendored byte for byte into `src/lib/sdk/agent` with a drift check (`pnpm sdk:check`, `test/sdkVendor.test.ts`).
-- `pnpm run test:e2e` always runs the new agent suite (a scripted `/v1`, no deployment needed); the deployment suite still skips without its environment. CI runs the agent tool tests on Linux, Windows and macOS, and the agent e2e suite.
+- The default server (`matterwave.baseUrl`) is `https://app.matterwave.ai`, the public deployment's address.
+- The extension is licensed under Apache-2.0 instead of MIT; the `.vsix` ships `LICENSE` and `NOTICE`.
+- The SDK's agent module (`@matterwave/sdk` `src/agent`, contract 1.2.0) is vendored byte for byte into `src/lib/sdk/agent` with a drift check (`pnpm sdk:check`, `test/sdkVendor.test.ts`).
+- `pnpm test:e2e` always runs the agent suite (a scripted `/v1`, no deployment needed) beside the editor suite; the deployment suite still skips without its environment. CI runs the agent tool tests on Linux, Windows and macOS, and the agent e2e suite.
+
+[Unreleased]: https://github.com/MatterWaveAI/vscode-extension/compare/v0.3.0...HEAD
 
 ## [0.3.0] - 2026-10-31
 
@@ -71,7 +103,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Deferred
 
-- **De-vendoring the SDK**: `@matterwave/sdk` is still not published to npm (registry 404; the sibling `typescript-sdk` repo sits at 0.3.0 unpublished), so the vendored client at `src/lib/matterwaveClient.ts` stays. Swap it for the package when it is published.
+- **De-vendoring the SDK**: `@matterwave/sdk` is not published to npm, so the vendored client at `src/lib/matterwaveClient.ts` stays until it is.
 
 [0.3.0]: https://github.com/MatterWaveAI/vscode-extension/releases/tag/v0.3.0
 

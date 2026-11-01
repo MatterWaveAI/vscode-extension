@@ -13,7 +13,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
   private controller: ChatController | undefined;
 
-  constructor(private readonly extensionUri: vscode.Uri) {}
+  /** `onOpen` runs each time the view is shown afresh: the first-run questions wait for it. */
+  constructor(
+    private readonly extensionUri: vscode.Uri,
+    private readonly onOpen?: () => void,
+  ) {}
 
   attach(controller: ChatController): void {
     this.controller = controller;
@@ -48,6 +52,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     view.onDidDispose(() => {
       this.view = undefined;
     });
+    this.onOpen?.();
   }
 }
 
@@ -86,7 +91,9 @@ export function chatHtml({ cspSource, scriptUri, nonce }: { cspSource: string; s
 <style nonce="${nonce}">${STYLES}</style>
 </head>
 <body>
-<div id="app" role="application" aria-label="MatterWave chat"></div>
+<header class="sr-only"><h1>MatterWave chat</h1></header>
+<main id="app" aria-label="MatterWave chat"></main>
+<div id="announcer" class="sr-only" role="status" aria-live="polite"></div>
 <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
@@ -94,6 +101,7 @@ export function chatHtml({ cspSource, scriptUri, nonce }: { cspSource: string; s
 
 const STYLES = `
 :root { color-scheme: light dark; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 body { margin: 0; padding: 0; font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); color: var(--vscode-foreground); background: var(--vscode-sideBar-background); }
 #app { display: flex; flex-direction: column; height: 100vh; }
 button { font: inherit; color: var(--vscode-button-foreground); background: var(--vscode-button-background); border: none; padding: 3px 8px; border-radius: 2px; cursor: pointer; }
@@ -113,6 +121,14 @@ button:disabled { opacity: .5; cursor: default; }
 .msg .body pre { background: var(--vscode-textCodeBlock-background); padding: 6px; overflow-x: auto; }
 .msg .body code { font-family: var(--vscode-editor-font-family); }
 .apply-wrap pre { margin-bottom: 0; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.tok-comment { color: var(--vscode-descriptionForeground); font-style: italic; }
+.tok-string { color: var(--vscode-symbolIcon-stringForeground, var(--vscode-debugTokenExpression-string)); }
+.tok-number { color: var(--vscode-symbolIcon-numberForeground, var(--vscode-debugTokenExpression-number)); }
+.tok-keyword { color: var(--vscode-symbolIcon-keywordForeground, var(--vscode-debugTokenExpression-name)); }
+.suggestions { display: flex; flex-direction: column; border: 1px solid var(--vscode-editorSuggestWidget-border, var(--vscode-panel-border)); background: var(--vscode-editorSuggestWidget-background, var(--vscode-input-background)); max-height: 160px; overflow-y: auto; }
+.suggestions [role=option] { padding: 2px 6px; cursor: pointer; display: flex; gap: 8px; }
+.suggestions [role=option] .detail { opacity: .7; }
+.suggestions [role=option][aria-selected=true] { background: var(--vscode-editorSuggestWidget-selectedBackground, var(--vscode-list-activeSelectionBackground)); color: var(--vscode-editorSuggestWidget-selectedForeground, var(--vscode-list-activeSelectionForeground)); }
 .apply-bar { display: flex; gap: 6px; padding: 1px 2px 6px; background: var(--vscode-textCodeBlock-background); border-bottom-left-radius: 4px; border-bottom-right-radius: 4px; margin-bottom: 6px; }
 .msg .actions { display: flex; gap: 4px; margin-top: 2px; }
 details { border-left: 2px solid var(--vscode-panel-border); padding-left: 6px; margin: 4px 0; }
@@ -121,6 +137,8 @@ details pre { white-space: pre-wrap; }
 .notice, .error { margin: 6px 8px; padding: 6px 8px; border-radius: 4px; }
 .notice { background: var(--vscode-inputValidation-infoBackground); border: 1px solid var(--vscode-inputValidation-infoBorder); white-space: pre-line; }
 .error { background: var(--vscode-inputValidation-errorBackground); border: 1px solid var(--vscode-inputValidation-errorBorder); }
+.announcement.warning { background: var(--vscode-inputValidation-warningBackground); border-color: var(--vscode-inputValidation-warningBorder); }
+.announcement.critical { background: var(--vscode-inputValidation-errorBackground); border-color: var(--vscode-inputValidation-errorBorder); }
 .error .title { font-weight: 600; }
 .cut { margin-top: 4px; font-size: 90%; display: flex; gap: 6px; align-items: center; opacity: .9; }
 img.image-preview { display: block; max-width: 100%; max-height: 320px; margin-top: 4px; border-radius: 4px; border: 1px solid var(--vscode-panel-border); }
@@ -146,6 +164,7 @@ img.image-preview { display: block; max-width: 100%; max-height: 320px; margin-t
 .notif-when { font-size: 85%; opacity: .6; }
 .notif .row-actions { flex: none; opacity: 1; }
 .usage { font-size: 90%; }
+.answer-usage { font-size: 85%; opacity: .65; margin-top: 2px; }
 .usage.warn { font-weight: 600; }
 .signin { padding: 16px; display: flex; flex-direction: column; gap: 8px; }
 .convos { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--vscode-panel-border); }
