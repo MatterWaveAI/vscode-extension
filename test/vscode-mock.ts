@@ -30,6 +30,18 @@ export enum StatusBarAlignment {
   Right = 2,
 }
 
+export enum ExtensionMode {
+  Production = 1,
+  Development = 2,
+  Test = 3,
+}
+
+export enum ConfigurationTarget {
+  Global = 1,
+  Workspace = 2,
+  WorkspaceFolder = 3,
+}
+
 export enum QuickPickItemKind {
   Separator = -1,
   Default = 0,
@@ -64,16 +76,28 @@ export const window = {
     return Promise.resolve(document);
   },
   terminals: [] as unknown[],
+  /** Views registered by `activate`, by id. */
+  viewProviders: {} as Record<string, unknown>,
+  registerWebviewViewProvider(id: string, provider: unknown): { dispose(): void } {
+    window.viewProviders[id] = provider;
+    return { dispose() {} };
+  },
 };
 
 export const commands = {
   executed: [] as string[],
   /** The arguments of each executeCommand, parallel to `executed`. */
   commandArgs: [] as unknown[][],
+  /** Commands registered by `activate`, by id. */
+  registered: new Map<string, (...args: unknown[]) => unknown>(),
   executeCommand(id: string, ...rest: unknown[]): Promise<void> {
     commands.executed.push(id);
     commands.commandArgs.push(rest);
     return Promise.resolve();
+  },
+  registerCommand(id: string, run: (...args: unknown[]) => unknown): { dispose(): void } {
+    commands.registered.set(id, run);
+    return { dispose: () => void commands.registered.delete(id) };
   },
 };
 
@@ -86,6 +110,22 @@ export const workspace = {
   workspaceFolders: [] as { uri: Uri; name: string; index: number }[],
   files: new Map<string, Uint8Array>(),
   contentProviders: {} as Record<string, unknown>,
+  /** Settings by `section.key`; `getConfiguration` reads and writes here. */
+  settings: new Map<string, unknown>(),
+  getConfiguration(section: string) {
+    return {
+      get<T>(key: string): T | undefined {
+        return workspace.settings.get(`${section}.${key}`) as T | undefined;
+      },
+      update(key: string, value: unknown): Promise<void> {
+        workspace.settings.set(`${section}.${key}`, value);
+        return Promise.resolve();
+      },
+    };
+  },
+  onDidChangeConfiguration(): { dispose(): void } {
+    return { dispose() {} };
+  },
   registerTextDocumentContentProvider(scheme: string, provider: unknown): { dispose(): void } {
     workspace.contentProviders[scheme] = provider;
     return { dispose() {} };

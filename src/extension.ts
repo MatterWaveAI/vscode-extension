@@ -74,12 +74,13 @@ async function promptForServer(context: vscode.ExtensionContext): Promise<void> 
 }
 
 /**
- * What `activate` returns (`vscode.extensions.getExtension(...).exports`):
- * the seam the end-to-end test drives a real chat through, in place of the
- * webview it cannot reach. Nothing here reveals the credential: the
- * controller never holds it, and a host message never carries it (a unit
- * test asserts so), so another extension learns no more than it could by
- * running the commands.
+ * What `activate` returns under the extension test runner
+ * (`vscode.extensions.getExtension(...).exports`): the seam the end-to-end
+ * test drives a real chat through, in place of the webview it cannot reach.
+ *
+ * Only there. The controller reads the person's transcripts and runs turns
+ * with their credential, and any installed extension can read another's
+ * exports, so a production or development host exports nothing.
  */
 export interface MatterWaveApi {
   chat: ChatController;
@@ -87,7 +88,12 @@ export interface MatterWaveApi {
   onHostMessage(listener: (message: HostMessage) => void): vscode.Disposable;
 }
 
-export function activate(context: vscode.ExtensionContext): MatterWaveApi {
+/** The exports for a host in `mode`: the test seam under the test runner, nothing anywhere else. */
+export function exportsFor(mode: vscode.ExtensionMode, api: MatterWaveApi): MatterWaveApi | undefined {
+  return mode === vscode.ExtensionMode.Test ? api : undefined;
+}
+
+export function activate(context: vscode.ExtensionContext): MatterWaveApi | undefined {
   const tokens = new TokenStore(context.secrets, baseUrl);
   const statusBar = new StatusBar();
   const view = new ChatViewProvider(context.extensionUri);
@@ -248,13 +254,13 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi {
   void chat.refresh();
   void promptForServer(context);
 
-  return {
+  return exportsFor(context.extensionMode, {
     chat,
     onHostMessage: (listener) => {
       taps.add(listener);
       return { dispose: () => void taps.delete(listener) };
     },
-  };
+  });
 }
 
 export function deactivate(): void {
