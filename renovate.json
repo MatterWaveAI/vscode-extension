@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "T-061 shared policy. pnpm ecosystem (package.json + pnpm-lock.yaml); nothing special beyond defaults. rangeStrategy is 'auto' (not 'pin') because these repos commit lockfiles while manifests keep version ranges: Renovate updates the range in the manifest and the resolved version in the lockfile together.",
+  "description": "Shared policy across the MatterWave repos. pnpm ecosystem (package.json + pnpm-lock.yaml); nothing special beyond defaults. rangeStrategy is 'auto' (not 'pin') because these repos commit lockfiles while manifests keep version ranges: Renovate updates the range in the manifest and the resolved version in the lockfile together.",
   "extends": [
     "config:recommended",
     ":pinDigests",
