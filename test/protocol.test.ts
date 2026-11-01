@@ -22,6 +22,13 @@ describe("parseWebviewMessage", () => {
       id: "c_1",
       archived: false,
     });
+    expect(parseWebviewMessage({ type: "loadMoreConversations", archived: true })).toEqual({ type: "loadMoreConversations", archived: true });
+    expect(parseWebviewMessage({ type: "loadMoreConversations", archived: false, extra: "x" })).toEqual({
+      type: "loadMoreConversations",
+      archived: false,
+    });
+    expect(parseWebviewMessage({ type: "loadMoreConversations" })).toBeNull();
+    expect(parseWebviewMessage({ type: "loadMoreConversations", archived: "yes" })).toBeNull();
     expect(parseWebviewMessage({ type: "exportConversation" })).toEqual({ type: "exportConversation" });
     expect(parseWebviewMessage({ type: "shareConversation" })).toEqual({ type: "shareConversation" });
     expect(parseWebviewMessage({ type: "rateMessage", messageId: "m_1", rating: 1 })).toEqual({ type: "rateMessage", messageId: "m_1", rating: 1 });
@@ -78,5 +85,24 @@ describe("parseWebviewMessage", () => {
     expect(parseWebviewMessage({ type: "matterwave.admin", token: "x" })).toBeNull();
     expect(parseWebviewMessage("ready")).toBeNull();
     expect(parseWebviewMessage(null)).toBeNull();
+  });
+});
+
+describe("the fork, report and announcement intents", () => {
+  it("lets them through with their ids, and drops them without", () => {
+    expect(parseWebviewMessage({ type: "forkConversation", messageId: "m_1" })).toEqual({ type: "forkConversation", messageId: "m_1" });
+    expect(parseWebviewMessage({ type: "reportMessage", messageId: "m_1", extra: 1 })).toEqual({ type: "reportMessage", messageId: "m_1" });
+    expect(parseWebviewMessage({ type: "dismissAnnouncement", id: "an_1" })).toEqual({ type: "dismissAnnouncement", id: "an_1" });
+    expect(parseWebviewMessage({ type: "forkConversation" })).toBeNull();
+    expect(parseWebviewMessage({ type: "reportMessage", messageId: "x".repeat(65) })).toBeNull();
+    expect(parseWebviewMessage({ type: "dismissAnnouncement", id: 3 })).toBeNull();
+  });
+});
+
+describe("the copy and insert intents", () => {
+  it("carry a message id and a block index, like Apply", () => {
+    expect(parseWebviewMessage({ type: "copyCodeBlock", messageId: "m_1", blockIndex: 2 })).toEqual({ type: "copyCodeBlock", messageId: "m_1", blockIndex: 2 });
+    expect(parseWebviewMessage({ type: "insertCodeBlock", messageId: "m_1", blockIndex: 0 })).toEqual({ type: "insertCodeBlock", messageId: "m_1", blockIndex: 0 });
+    expect(parseWebviewMessage({ type: "insertCodeBlock", messageId: "m_1", blockIndex: -1 })).toBeNull();
   });
 });

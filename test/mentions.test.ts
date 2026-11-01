@@ -1,28 +1,31 @@
 import { describe, expect, it } from "vitest";
-import { hasMentions, MENTION_KINDS, parseMentions } from "../src/chat/mentions";
+import { hasMentions, MENTION_KINDS, mentionTitle, parseMentions } from "../src/chat/mentions";
+
+const one = (kind: string) => ({ kind, token: `@${kind}`, ordinal: 1, of: 1 });
 
 describe("parseMentions", () => {
   it("recognises every provider kind as its own word", () => {
     expect(parseMentions("Explain @file then @folder with @terminal, @git and @docs")).toEqual([
-      { kind: "file", token: "@file" },
-      { kind: "folder", token: "@folder" },
-      { kind: "terminal", token: "@terminal" },
-      { kind: "git", token: "@git" },
-      { kind: "docs", token: "@docs" },
+      one("file"),
+      one("folder"),
+      one("terminal"),
+      one("git"),
+      one("docs"),
     ]);
     expect(MENTION_KINDS).toHaveLength(5);
   });
 
-  it("is case-insensitive and keeps first appearance order", () => {
-    expect(parseMentions("@GIT first, then @Docs and @File")).toEqual([
-      { kind: "git", token: "@git" },
-      { kind: "docs", token: "@docs" },
-      { kind: "file", token: "@file" },
-    ]);
+  it("is case-insensitive and keeps the order typed", () => {
+    expect(parseMentions("@GIT first, then @Docs and @File")).toEqual([one("git"), one("docs"), one("file")]);
   });
 
-  it("mentions each kind once however many times it is typed", () => {
-    expect(parseMentions("@file and @file again, plus @file")).toEqual([{ kind: "file", token: "@file" }]);
+  it("makes every mention its own, numbered among those of its kind", () => {
+    expect(parseMentions("compare @file with @file, then @git and @file")).toEqual([
+      { kind: "file", token: "@file", ordinal: 1, of: 3 },
+      { kind: "file", token: "@file", ordinal: 2, of: 3 },
+      { kind: "git", token: "@git", ordinal: 1, of: 1 },
+      { kind: "file", token: "@file", ordinal: 3, of: 3 },
+    ]);
   });
 
   it("leaves emails, unknown kinds and words containing @ as text", () => {
@@ -31,8 +34,17 @@ describe("parseMentions", () => {
   });
 
   it("finds a mention at the very start and after punctuation", () => {
-    expect(parseMentions("@git what changed?")).toEqual([{ kind: "git", token: "@git" }]);
-    expect(parseMentions("(@file) review this")).toEqual([{ kind: "file", token: "@file" }]);
+    expect(parseMentions("@git what changed?")).toEqual([one("git")]);
+    expect(parseMentions("(@file) review this")).toEqual([one("file")]);
     expect(hasMentions("no context here")).toBe(false);
+  });
+});
+
+describe("mentionTitle", () => {
+  it("names the mention, and which of several it is", () => {
+    const [first, second] = parseMentions("@file and @file");
+    expect(mentionTitle(first!)).toBe("@file (1 of 2)");
+    expect(mentionTitle(second!)).toBe("@file (2 of 2)");
+    expect(mentionTitle(parseMentions("@git")[0]!)).toBe("@git");
   });
 });

@@ -48,7 +48,10 @@ describe("the MatterWave extension against a real deployment", function () {
     assert.ok(baseUrl && apiKey, "E2E_BASE_URL and E2E_API_KEY come from e2e/run.mjs");
     const extension = vscode.extensions.getExtension<MatterWaveApi>(EXTENSION_ID);
     assert.ok(extension, `${EXTENSION_ID} is not installed in the test editor`);
-    api = await extension.activate();
+    // The seam is exported under the test runner only; a production host exports nothing.
+    const exported = await extension.activate();
+    assert.ok(exported, "the extension exports its test seam when the editor runs it under tests");
+    api = exported;
     const settings = vscode.workspace.getConfiguration("matterwave");
     await settings.update("baseUrl", baseUrl, vscode.ConfigurationTarget.Global);
     // The extension trusts a private CA through its own setting, as a person

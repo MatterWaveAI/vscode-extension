@@ -11,6 +11,7 @@ import { ChatViewProvider, chatHtml } from "../src/chat/viewProvider";
 import { CONVERSATION, fakeFetch, fixture, json, MODELS, sse, type Call } from "./fakeApi";
 import { FakeWebview, MemorySecrets } from "./vscode-mock";
 import { STREAM_ERROR_COPY } from "../src/streamErrors";
+import { answerUsageLabel } from "../src/chat/usage";
 
 const TOKEN = "mw_abcdefgh_THIS-MUST-NEVER-REACH-THE-WEBVIEW";
 
@@ -182,7 +183,7 @@ describe("ask about file", () => {
     await controller.refresh();
     await controller.askAboutFile("Explain this file.", "export const a = 1;\n", "src/a.ts");
 
-    const upload = calls.find((c) => c.url.startsWith("/api/attachments"));
+    const upload = calls.find((c) => c.method === "POST" && c.url.startsWith("/api/attachments"));
     const file = (upload?.body as FormData).get("file") as File;
     expect(file.name).toBe("src/a.ts");
     expect(file.type).toBe("text/plain");
@@ -233,14 +234,72 @@ describe("@-mentions", () => {
     });
   });
 
-  it("sends nothing when the person backs out of a pick", async () => {
+  it("sends nothing, and creates no conversation, when the person backs out of a pick", async () => {
     const { controller, calls, webview } = await setup({}, { resolveMention: async () => null });
     await controller.refresh();
     await controller.send("Explain @file");
 
     expect(calls.some((c) => c.url === "/api/conversations/c_1/messages")).toBe(false);
+    expect(calls.some((c) => c.method === "POST" && c.url === "/api/conversations")).toBe(false);
+    expect(controller.activeConversationId()).toBeNull();
     expect(lastState(webview.posted).notice).toContain("the message was not sent");
     expect(lastState(webview.posted).transcript).toEqual([]);
+  });
+
+  it("reads no mention or command out of text the editor composed", async () => {
+    let asked = 0;
+    const { controller, calls } = await setup(
+      {},
+      {
+        resolveMention: async () => {
+          asked++;
+          return null;
+        },
+      },
+    );
+    await controller.refresh();
+    const selection = "/clear the cache\n```ts src/a.ts\n/** @file the module */\n```";
+    await controller.sendText(selection);
+    expect(asked).toBe(0);
+    const send = calls.find((c) => c.url === "/api/conversations/c_1/messages");
+    expect(JSON.parse(String(send?.body)).content).toBe(selection);
+  });
+
+  it("resolves every mention before the conversation is created", async () => {
+    const order: string[] = [];
+    const { controller, calls } = await setup(
+      {},
+      {
+        resolveMention: async () => {
+          order.push(`pick after ${calls.filter((c) => c.method === "POST" && c.url === "/api/conversations").length} creates`);
+          return { filename: "x.txt", text: "x" };
+        },
+      },
+    );
+    await controller.refresh();
+    await controller.send("Explain @git");
+    expect(order).toEqual(["pick after 0 creates"]);
+    expect(calls.some((c) => c.url === "/api/conversations/c_1/messages")).toBe(true);
+  });
+
+  it("asks once per mention, so two @file mentions attach two files", async () => {
+    let n = 0;
+    const asked: string[] = [];
+    const { controller, calls } = await setup(
+      { "POST /api/attachments": () => json({ id: `att_${++n}`, filename: "x", content_type: "text/plain", size_bytes: 1 }, 201) },
+      {
+        resolveMention: async (mention) => {
+          const m = mention as { ordinal: number; of: number };
+          asked.push(`${m.ordinal}/${m.of}`);
+          return { filename: `f${m.ordinal}.ts`, text: `${m.ordinal}` };
+        },
+      },
+    );
+    await controller.refresh();
+    await controller.send("Compare @file with @file");
+    expect(asked).toEqual(["1/2", "2/2"]);
+    const send = calls.find((c) => c.url === "/api/conversations/c_1/messages");
+    expect(JSON.parse(String(send?.body)).attachment_ids).toEqual(["att_1", "att_2"]);
   });
 
   it("sends nothing when an upload fails, with the error banner", async () => {
@@ -275,6 +334,105 @@ describe("@-mentions", () => {
   });
 });
 
+
+describe("tokens and cost per answer", () => {
+  const priced = {
+    ...MODELS,
+    data: MODELS.data.map((m) => (m.id === "grt-small" ? { ...m, input_usd_per_m: 0.5, output_usd_per_m: 1.5 } : m)),
+  };
+
+  it("keeps what the turn's context frame said under the answer's id, priced at the model's list price", async () => {
+    const { controller } = await setup({ "GET /api/models": () => json(priced) });
+    await controller.refresh();
+    await controller.send("What time is it?");
+    // The fixture's turn: 1,200 prompt tokens, 34 completion tokens, answer m_asst.
+    expect(controller.snapshot().answerUsage).toEqual({
+      m_asst: { promptTokens: 1200, completionTokens: 34, costUsd: (1200 * 0.5 + 34 * 1.5) / 1_000_000 },
+    });
+  });
+
+  it("gives tokens without a cost when the model list has no price", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    await controller.send("What time is it?");
+    expect(controller.snapshot().answerUsage.m_asst).toEqual({ promptTokens: 1200, completionTokens: 34, costUsd: null });
+  });
+
+  it("shows nothing while the setting hides it", async () => {
+    const { controller } = await setup();
+    await controller.refresh();
+    await controller.send("What time is it?");
+    controller["deps"].showAnswerUsage = () => false;
+    expect(controller.snapshot().answerUsage).toEqual({});
+  });
+});
+
+describe("answerUsageLabel", () => {
+  it("reads tokens in and out, and the cost to the place that shows it", () => {
+    expect(answerUsageLabel({ promptTokens: 1200, completionTokens: 34, costUsd: 0.000651 })).toBe("1,200 in · 34 out · $0.0007");
+    expect(answerUsageLabel({ promptTokens: 90_000, completionTokens: 4_000, costUsd: 1.234 })).toBe("90,000 in · 4,000 out · $1.23");
+    expect(answerUsageLabel({ promptTokens: 3, completionTokens: 1, costUsd: 0.000002 })).toBe("3 in · 1 out · under $0.0001");
+    expect(answerUsageLabel({ promptTokens: 3, completionTokens: 1, costUsd: null })).toBe("3 in · 1 out");
+  });
+});
+
+describe("answerOnce", () => {
+  it("answers in a temporary conversation it then deletes, leaving the chat as it was", async () => {
+    const { controller, calls, webview } = await setup({ "DELETE /api/conversations/c_1": () => new Response(null, { status: 204 }) });
+    await controller.refresh();
+    const before = lastState(webview.posted);
+    const answer = await controller.answerOnce("Write a commit message.");
+
+    expect(answer.length).toBeGreaterThan(0);
+    const create = calls.find((c) => c.method === "POST" && c.url === "/api/conversations");
+    expect(JSON.parse(String(create?.body))).toMatchObject({ temporary: true, model: "grt-small" });
+    expect(calls.some((c) => c.method === "DELETE" && c.url === "/api/conversations/c_1")).toBe(true);
+    expect(controller.activeConversationId()).toBeNull();
+    expect(lastState(webview.posted).conversations).toEqual(before.conversations);
+  });
+
+  it("throws what the API said when no answer came, and still deletes the conversation", async () => {
+    const { controller, calls } = await setup({
+      "POST /api/conversations/c_1/messages": () => json({ detail: "Your plan's allowance is used up." }, 402),
+      "DELETE /api/conversations/c_1": () => new Response(null, { status: 204 }),
+    });
+    await controller.refresh();
+    await expect(controller.answerOnce("x")).rejects.toMatchObject({ status: 402 });
+    expect(calls.some((c) => c.method === "DELETE" && c.url === "/api/conversations/c_1")).toBe(true);
+  });
+});
+
+describe("copy and insert a code block", () => {
+  it("hands the block's code to the editor's clipboard and cursor", async () => {
+    const answer = { ...DONE, parts: [{ type: "text", text: "Use:\n\n```py\nprint(1)\n```" }] };
+    const { controller } = await setup({
+      "GET /api/conversations/c_1": () => json({ ...CONVERSATION, messages: [USER, answer] }),
+      "GET /api/conversations/c_1/tree": () => json({ ...CONVERSATION, messages: [USER, answer] }),
+    });
+    const copied: string[] = [];
+    const inserted: string[] = [];
+    controller["deps"].copyCode = (code) => void copied.push(code);
+    controller["deps"].insertCode = (code) => void inserted.push(code);
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    await controller.handle({ type: "copyCodeBlock", messageId: "m_asst", blockIndex: 0 });
+    await controller.handle({ type: "insertCodeBlock", messageId: "m_asst", blockIndex: 0 });
+    expect(copied).toEqual(["print(1)"]);
+    expect(inserted).toEqual(["print(1)"]);
+  });
+});
+
+describe("prompt names for completion", () => {
+  it("reads the library's names with the rest of the state, and again on request", async () => {
+    let names = ["review"];
+    const { controller } = await setup({}, { prompts: { get: async () => null, names: async () => names } } as never);
+    await controller.refresh();
+    expect(controller.snapshot().promptNames).toEqual(["review"]);
+    names = ["review", "tests"];
+    await controller.reloadPrompts();
+    expect(controller.snapshot().promptNames).toEqual(["review", "tests"]);
+  });
+});
 
 describe("model selection", () => {
   it("refuses a model the plan does not include", async () => {
@@ -341,6 +499,200 @@ function manage(controller: ChatController, extra: Record<string, (call: Call) =
   controller["deps"].client = new MatterWaveClient({ baseUrl: "https://mw.test", getToken: async () => TOKEN, fetch: fake.fetch });
   return fake.calls;
 }
+
+describe("conversation list paging", () => {
+  const row = (id: string, extra: object = {}) => ({ ...CONVERSATION, id, title: id, ...extra });
+
+  it("loads the next page on request, after the rows on hand, until the cursor runs out", async () => {
+    const { controller } = await setup();
+    const calls = manage(controller, {
+      "GET /api/conversations": (call) => {
+        const url = new URL(`https://x${call.url}`);
+        if (url.searchParams.get("filter") === "archived") return json({ data: [], filter: "archived", next_cursor: null });
+        return url.searchParams.get("cursor") === "p2"
+          ? json({ data: [row("c_51"), row("c_1")], filter: "default", next_cursor: null })
+          : json({ data: [row("c_1"), row("c_2")], filter: "default", next_cursor: "p2" });
+      },
+    });
+    await controller.refresh();
+    expect(controller.snapshot()).toMatchObject({ moreConversations: true, moreArchived: false });
+
+    await controller.handle({ type: "loadMoreConversations", archived: false });
+    // c_1 came round again (it moved since): it is not listed twice.
+    expect(controller.snapshot().conversations.map((c) => c.id)).toEqual(["c_1", "c_2", "c_51"]);
+    expect(controller.snapshot().moreConversations).toBe(false);
+    expect(calls.filter((c) => c.url.includes("cursor=p2"))).toHaveLength(1);
+
+    // Past the end, nothing more is asked for.
+    await controller.handle({ type: "loadMoreConversations", archived: false });
+    expect(calls.filter((c) => c.url.includes("cursor="))).toHaveLength(1);
+  });
+
+  it("pages the archive on its own cursor", async () => {
+    const { controller } = await setup();
+    const calls = manage(controller, {
+      "GET /api/conversations": (call) => {
+        const url = new URL(`https://x${call.url}`);
+        if (url.searchParams.get("filter") !== "archived") return json({ data: [], filter: "default", next_cursor: null });
+        return url.searchParams.get("cursor") === "a2"
+          ? json({ data: [row("c_old", { archived_at: CONVERSATION.created_at })], filter: "archived", next_cursor: null })
+          : json({ data: [row("c_arch", { archived_at: CONVERSATION.created_at })], filter: "archived", next_cursor: "a2" });
+      },
+    });
+    await controller.refresh();
+    expect(controller.snapshot()).toMatchObject({ moreConversations: false, moreArchived: true });
+    await controller.handle({ type: "loadMoreConversations", archived: true });
+    expect(controller.snapshot().archivedConversations.map((c) => c.id)).toEqual(["c_arch", "c_old"]);
+    expect(calls.find((c) => c.url.includes("cursor=a2"))?.url).toContain("filter=archived");
+  });
+
+  it("starts again from the first page on a refresh", async () => {
+    const { controller } = await setup();
+    manage(controller, {
+      "GET /api/conversations": (call) =>
+        call.url.includes("cursor=")
+          ? json({ data: [row("c_2")], filter: "default", next_cursor: null })
+          : json({ data: [row("c_1")], filter: "default", next_cursor: call.url.includes("archived") ? null : "p2" }),
+    });
+    await controller.refresh();
+    await controller.handle({ type: "loadMoreConversations", archived: false });
+    expect(controller.snapshot().conversations).toHaveLength(2);
+    await controller.refresh();
+    expect(controller.snapshot().conversations.map((c) => c.id)).toEqual(["c_1"]);
+    expect(controller.snapshot().moreConversations).toBe(true);
+  });
+});
+
+describe("budget and attachment limits", () => {
+  const BUDGET = {
+    period_start: "2026-10-01",
+    included_tokens: 5_000_000,
+    tokens_used: 4_000_000,
+    remaining_tokens: 1_000_000,
+    overage_enabled: false,
+    overage_cap_micros: 0,
+    overage_micros: 0,
+    member_default_cap_micros: null,
+    member_cap: 10_000_000,
+    member_spent: 3_200_000,
+    member_exhausted: false,
+  };
+
+  it("carries the person's own cap beside the allowance", async () => {
+    const { controller } = await setup({ "GET /api/budget": () => json(BUDGET) });
+    await controller.refresh();
+    expect(controller.snapshot().usage?.memberCap).toEqual({ spentUsd: 3.2, capUsd: 10, exhausted: false });
+  });
+
+  it("sends nothing larger than the deployment takes, and says so before uploading", async () => {
+    const limits = { max_upload_bytes: 10, quota_bytes: 1_000_000, quota_used_bytes: 0, quota_remaining_bytes: 1_000_000 };
+    const { controller, calls, webview } = await setup({ "GET /api/attachments/limits/me": () => json(limits) });
+    await controller.refresh();
+    await controller.askAboutFile("Explain.", "far more than ten bytes of text", "src/big.ts");
+    expect(calls.some((c) => c.method === "POST" && c.url.startsWith("/api/attachments"))).toBe(false);
+    expect(calls.some((c) => c.method === "POST" && c.url === "/api/conversations")).toBe(false);
+    expect(lastState(webview.posted).notice).toBe("src/big.ts was not sent. That is 1 KB; this deployment takes at most 1 KB per upload.");
+  });
+
+  it("names what is left of the person's storage when that is what is short", async () => {
+    const limits = { max_upload_bytes: 10 * 1024 * 1024, quota_bytes: 100 * 1024 * 1024, quota_used_bytes: 100 * 1024 * 1024 - 5, quota_remaining_bytes: 5 };
+    const { controller, webview } = await setup({ "GET /api/attachments/limits/me": () => json(limits) });
+    await controller.refresh();
+    await controller.askAboutFile("Explain.", "more than five bytes", "a.ts");
+    expect(lastState(webview.posted).notice).toContain("of your 100 MB attachment storage is left");
+  });
+});
+
+describe("fork, report, ranked search and announcements", () => {
+  const hit = (id: string) => ({ ...CONVERSATION, id, title: id, snippet: `in ${id}`, message_id: null });
+
+  it("pages the ranked search on its cursor while the box holds a query", async () => {
+    const { controller } = await setup();
+    const calls = manage(controller, {
+      "GET /api/search": (call) =>
+        call.url.includes("cursor=s2")
+          ? json({ data: [hit("c_3"), hit("c_1")], query: "clock", next_cursor: null })
+          : json({ data: [hit("c_1"), hit("c_2")], query: "clock", next_cursor: "s2" }),
+    });
+    await controller.refresh();
+    await controller.handle({ type: "searchConversations", query: "clock" });
+    expect(controller.snapshot().moreConversations).toBe(true);
+    await controller.handle({ type: "loadMoreConversations", archived: false });
+    expect(controller.snapshot().searchResults?.map((h) => h.id)).toEqual(["c_1", "c_2", "c_3"]);
+    expect(controller.snapshot().moreConversations).toBe(false);
+    expect(calls.find((c) => c.url.includes("cursor=s2"))?.url).toBe("/api/search?q=clock&cursor=s2");
+  });
+
+  it("forks at a message into a new conversation, which opens", async () => {
+    const forked = { ...CONVERSATION, id: "c_fork", title: "Fork of New chat" };
+    const { controller } = await setup();
+    const calls = manage(controller, {
+      "POST /api/conversations/c_1/fork": () => json(forked, 201),
+      "GET /api/conversations/c_fork": () => json({ ...forked, messages: [USER] }),
+      "GET /api/conversations/c_fork/tree": () => json({ ...forked, messages: [USER] }),
+      "GET /api/conversations/c_1": () => json({ ...CONVERSATION, messages: [USER, DONE] }),
+      "GET /api/conversations/c_1/tree": () => json({ ...CONVERSATION, messages: [USER, DONE] }),
+    });
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    await controller.handle({ type: "forkConversation", messageId: "m_asst" });
+    expect(JSON.parse(String(calls.find((c) => c.url.endsWith("/fork"))?.body))).toEqual({ message_id: "m_asst" });
+    expect(controller.activeConversationId()).toBe("c_fork");
+    expect(controller.snapshot().conversations[0]?.id).toBe("c_fork");
+    expect(controller.snapshot().notice).toContain("Forked into “Fork of New chat”");
+  });
+
+  it("says why a temporary conversation cannot be forked, in the API's words", async () => {
+    const { controller } = await setup();
+    manage(controller, {
+      "POST /api/conversations/c_1/fork": () => json({ detail: "A temporary chat can't be forked." }, 409),
+      "GET /api/conversations/c_1": () => json({ ...CONVERSATION, messages: [USER, DONE] }),
+      "GET /api/conversations/c_1/tree": () => json({ ...CONVERSATION, messages: [USER, DONE] }),
+    });
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    await controller.handle({ type: "forkConversation", messageId: "m_asst" });
+    expect(controller.activeConversationId()).toBe("c_1");
+    expect(controller.snapshot().notice).toBe("A temporary chat can't be forked.");
+  });
+
+  it("hands a report of a message to the editor's report flow", async () => {
+    const { controller } = await setup();
+    const reported: unknown[] = [];
+    controller["deps"].report = (target) => void reported.push(target);
+    manage(controller, {
+      "GET /api/conversations/c_1": () => json({ ...CONVERSATION, messages: [USER, DONE] }),
+      "GET /api/conversations/c_1/tree": () => json({ ...CONVERSATION, messages: [USER, DONE] }),
+    });
+    await controller.refresh();
+    await controller.openConversation("c_1");
+    await controller.handle({ type: "reportMessage", messageId: "m_asst" });
+    expect(reported).toEqual([{ conversationId: "c_1", messageId: "m_asst" }]);
+  });
+
+  it("shows the deployment's announcements until one is dismissed, and keeps an undismissible one", async () => {
+    const dismissed = new Set<string>();
+    const { controller } = await setup();
+    controller["deps"].dismissedAnnouncements = { has: (id) => dismissed.has(id), add: (id) => void dismissed.add(id) };
+    manage(controller, {
+      "GET /api/announcements": () =>
+        json({
+          data: [
+            { id: "an_1", message: "Maintenance at 02:00 UTC.", severity: "warning", link: null, starts_at: "2026-10-31T00:00:00Z", ends_at: null, dismissible: true },
+            { id: "an_2", message: "Read the new terms.", severity: "info", link: "https://mw.test/terms", starts_at: "2026-10-31T00:00:00Z", ends_at: null, dismissible: false },
+          ],
+        }),
+    });
+    await controller.refresh();
+    expect(controller.snapshot().announcements.map((a) => a.id)).toEqual(["an_1", "an_2"]);
+    await controller.handle({ type: "dismissAnnouncement", id: "an_1" });
+    await controller.handle({ type: "dismissAnnouncement", id: "an_2" });
+    expect(controller.snapshot().announcements).toEqual([
+      { id: "an_2", message: "Read the new terms.", severity: "info", link: "https://mw.test/terms", dismissible: false },
+    ]);
+    expect([...dismissed]).toEqual(["an_1"]);
+  });
+});
 
 describe("conversation management", () => {
   it("renames through PATCH, trimmed, and the sidebar row follows", async () => {
@@ -421,18 +773,18 @@ describe("conversation management", () => {
     await controller.refresh();
     let query = "";
     const calls = manage(controller, {
-      "GET /api/conversations/search": (call) => {
+      "GET /api/search": (call) => {
         query = String(new URL(`https://mw.test${call.url}`).searchParams.get("q"));
-        return json({ data: [{ ...CONVERSATION, snippet: "the clock struck" }], query });
+        return json({ data: [{ ...CONVERSATION, snippet: "the clock struck", message_id: "m_1" }], query, next_cursor: null });
       },
     });
     await controller.handle({ type: "searchConversations", query: "clock" });
     expect(query).toBe("clock");
     expect(controller.snapshot().searchResults).toEqual([{ id: "c_1", title: "New chat", pinned: false, archived: false, badge: null, snippet: "the clock struck" }]);
-    const searches = calls.filter((c) => c.url.startsWith("/api/conversations/search")).length;
+    const searches = calls.filter((c) => c.url.startsWith("/api/search")).length;
     await controller.handle({ type: "searchConversations", query: "   " });
     expect(controller.snapshot().searchResults).toBeNull();
-    expect(calls.filter((c) => c.url.startsWith("/api/conversations/search")).length).toBe(searches);
+    expect(calls.filter((c) => c.url.startsWith("/api/search")).length).toBe(searches);
   });
 
   it("badges a row with its folder and tags from one library read per refresh", async () => {
@@ -747,7 +1099,7 @@ describe("temporary chats", () => {
     const temporary = { ...CONVERSATION, id: "c_temp", temporary: true };
     manage(controller, {
       "GET /api/conversations": () => json({ data: [temporary, CONVERSATION], filter: "default" }),
-      "GET /api/conversations/search": () => json({ data: [{ ...temporary, snippet: "leaked" }], query: "x" }),
+      "GET /api/search": () => json({ data: [{ ...temporary, snippet: "leaked", message_id: null }], query: "x", next_cursor: null }),
     });
     await controller.refresh();
     expect(controller.snapshot().conversations.map((c) => c.id)).toEqual(["c_1"]);
@@ -1218,6 +1570,7 @@ describe("notifications and usage", () => {
       state: "warn",
       resetsAt: USAGE.resets_at,
       planName: "Team",
+      memberCap: null,
     });
     // The status bar learns both, for its badge and its tooltip line.
     expect(statuses.at(-1)).toMatchObject({ unreadNotifications: 1, usage: state.usage });
@@ -1382,5 +1735,12 @@ describe("the page itself", () => {
     expect(html).toContain("style-src 'nonce-abc123'");
     // No network at all: the page could not reach the API even with something to reach it with.
     expect(html).not.toContain("connect-src");
+  });
+
+  it("is a labelled main landmark with one polite status region, not an application", () => {
+    const html = chatHtml({ cspSource: "vscode-resource:", scriptUri: "vscode-resource:/webview.js", nonce: "abc123" });
+    expect(html).not.toContain('role="application"');
+    expect(html).toContain('<main id="app" aria-label="MatterWave chat"></main>');
+    expect(html).toContain('<div id="announcer" class="sr-only" role="status" aria-live="polite"></div>');
   });
 });

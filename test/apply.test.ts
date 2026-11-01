@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import * as vscode from "vscode";
-import { commands, window, workspace } from "./vscode-mock";
-import { APPLY_SCHEME, applyToFile, registerApplyContentProvider } from "../src/apply";
+import { commands, EndOfLine, window, workspace, type WorkspaceEdit } from "./vscode-mock";
+import { APPLY_SCHEME, applyToFile, minimalChange, registerApplyContentProvider, withEol } from "../src/apply";
 
 const FILE = vscode.Uri.file("/workspace/src/a.ts");
 
@@ -11,6 +11,10 @@ function answers(...values: unknown[]): void {
 
 beforeEach(() => {
   workspace.files.clear();
+  workspace.documents.clear();
+  workspace.appliedEdits.length = 0;
+  workspace.applyEditAnswer = true;
+  window.shown.length = 0;
   window.informationAnswers.length = 0;
   window.shownDocuments.length = 0;
   commands.executed.length = 0;
@@ -83,5 +87,109 @@ describe("applyToFile", () => {
     answers("Apply");
     await applyToFile(FILE, "code\n", { title: "t", lint: false });
     expect(window.shownDocuments).toHaveLength(0);
+  });
+
+  it("diffs against the unsaved buffer and changes it in place, leaving the person's edits unsaved", async () => {
+    workspace.files.set(FILE.toString(), new TextEncoder().encode("saved\n"));
+    const document = await workspace.openTextDocument(FILE);
+    document.type("unsaved line\nkept\n");
+    const seen: (string | null)[] = [];
+    answers("Apply");
+    const written = await applyToFile(FILE, "unsaved line\nchanged\n", { title: "t", onSnapshot: (before) => void seen.push(before) });
+
+    expect(written).toBe(true);
+    // The checkpoint is what the buffer held, not the file on disk.
+    expect(seen).toEqual(["unsaved line\nkept\n"]);
+    expect(document.getText()).toBe("unsaved line\nchanged\n");
+    // Nothing was written behind the editor's back: the file is as last saved, the buffer still dirty.
+    expect(new TextDecoder().decode(workspace.files.get(FILE.toString()))).toBe("saved\n");
+    expect(document.isDirty).toBe(true);
+  });
+
+  it("goes through one workspace edit over the range that differs", async () => {
+    workspace.files.set(FILE.toString(), new TextEncoder().encode("one\ntwo\nthree\n"));
+    answers("Apply");
+    await applyToFile(FILE, "one\nTWO\nthree\n", { title: "t" });
+
+    expect(workspace.appliedEdits).toHaveLength(1);
+    const [op] = (workspace.appliedEdits[0] as WorkspaceEdit).operations;
+    expect(op).toMatchObject({ kind: "replace", text: "TWO" });
+    if (op?.kind !== "replace") throw new Error("expected a replace");
+    expect([op.range.start.line, op.range.start.character, op.range.end.line, op.range.end.character]).toEqual([1, 0, 1, 3]);
+  });
+
+  it("saves a document that had no unsaved edits, as an apply always left the file", async () => {
+    workspace.files.set(FILE.toString(), new TextEncoder().encode("old\n"));
+    answers("Apply");
+    await applyToFile(FILE, "new\n", { title: "t" });
+
+    const document = await workspace.openTextDocument(FILE);
+    expect(document.isDirty).toBe(false);
+    expect(new TextDecoder().decode(workspace.files.get(FILE.toString()))).toBe("new\n");
+  });
+
+  it("applies nothing when the buffer changed while the diff was open", async () => {
+    workspace.files.set(FILE.toString(), new TextEncoder().encode("old\n"));
+    const document = await workspace.openTextDocument(FILE);
+    const original = window.showInformationMessage;
+    window.showInformationMessage = function (message: string, ...rest: unknown[]) {
+      if (message.startsWith("Apply this code")) document.type("typed during the review\n");
+      return original.call(window, message, ...rest);
+    };
+    try {
+      answers("Apply");
+      expect(await applyToFile(FILE, "new\n", { title: "t" })).toBe(false);
+    } finally {
+      window.showInformationMessage = original;
+    }
+    expect(document.getText()).toBe("typed during the review\n");
+    expect(workspace.appliedEdits).toHaveLength(0);
+    expect(window.shown.at(-1)?.message).toContain("changed while the diff was open");
+  });
+
+  it("keeps a CRLF document's line endings", async () => {
+    workspace.files.set(FILE.toString(), new TextEncoder().encode("a\r\nb\r\n"));
+    answers("Apply");
+    await applyToFile(FILE, "a\nc\n", { title: "t" });
+
+    expect(new TextDecoder().decode(workspace.files.get(FILE.toString()))).toBe("a\r\nc\r\n");
+  });
+
+  it("treats code that differs only in line endings as already applied", async () => {
+    workspace.files.set(FILE.toString(), new TextEncoder().encode("a\r\nb\r\n"));
+    expect(await applyToFile(FILE, "a\nb\n", { title: "t" })).toBe(false);
+    expect(window.shown.at(-1)?.message).toContain("already has this code");
+  });
+
+  it("says so, and changes nothing, when the editor refuses the edit", async () => {
+    workspace.files.set(FILE.toString(), new TextEncoder().encode("old\n"));
+    workspace.applyEditAnswer = false;
+    answers("Apply");
+    expect(await applyToFile(FILE, "new\n", { title: "t" })).toBe(false);
+    expect(window.shown.at(-1)?.message).toContain("could not be changed");
+    expect(new TextDecoder().decode(workspace.files.get(FILE.toString()))).toBe("old\n");
+  });
+});
+
+describe("minimalChange", () => {
+  it("keeps the common prefix and suffix", () => {
+    expect(minimalChange("abcXYZdef", "abc123def")).toEqual({ start: 3, end: 6, text: "123" });
+  });
+
+  it("is an insertion or a deletion where one side is empty", () => {
+    expect(minimalChange("ab", "aXb")).toEqual({ start: 1, end: 1, text: "X" });
+    expect(minimalChange("aXb", "ab")).toEqual({ start: 1, end: 2, text: "" });
+    expect(minimalChange("", "new")).toEqual({ start: 0, end: 0, text: "new" });
+  });
+
+  it("is empty for equal text", () => {
+    expect(minimalChange("same", "same")).toEqual({ start: 4, end: 4, text: "" });
+  });
+});
+
+describe("withEol", () => {
+  it("rewrites every ending to the document's", () => {
+    expect(withEol("a\nb\r\nc\rd", EndOfLine.CRLF)).toBe("a\r\nb\r\nc\r\nd");
+    expect(withEol("a\r\nb", EndOfLine.LF)).toBe("a\nb");
   });
 });

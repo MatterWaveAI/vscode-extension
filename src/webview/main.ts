@@ -1,9 +1,13 @@
 import type { FeedbackReason, Message, Part } from "../api/types";
 import { appendDelta, setPart } from "../chat/assemble";
-import type { FeedbackSummary, HostMessage, NotificationView, TranscriptEntry, UsageView, ViewState, WebviewMessage } from "../chat/protocol";
+import type { AnnouncementView, FeedbackSummary, HostMessage, NotificationView, TranscriptEntry, UsageView, ViewState, WebviewMessage } from "../chat/protocol";
 import { trustedImageDataUri } from "../chat/images";
 import { parseCodeBlocks } from "../chat/codeBlocks";
 import { renderMarkdown } from "./markdown";
+import { answerUsageLabel } from "../chat/usage";
+import { announcement } from "./announce";
+import { tokenize } from "./highlight";
+import { suggestionsAt, type Suggestions } from "./suggest";
 
 /**
  * The chat view's script. It only renders and reports intents: there is no
@@ -55,6 +59,12 @@ const expandedSummaries = new Set<string>();
 const imagePreviews = new Map<string, string>();
 
 const app = document.getElementById("app") as HTMLElement;
+/** The page's one live region (outside #app, so a re-render never re-announces it). */
+const announcer =
+  document.getElementById("announcer") ??
+  document.body.appendChild(Object.assign(document.createElement("div"), { id: "announcer", className: "sr-only" }));
+announcer.setAttribute("role", "status");
+announcer.setAttribute("aria-live", "polite");
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -93,12 +103,29 @@ convoSearch.addEventListener("input", () => {
 });
 const convoList = el("div", { className: "convos-list" });
 const archivedList = el("div", { className: "convos-list" });
+/**
+ * The lists page by cursor: reaching the end of one asks for its next page,
+ * once until the state that carries it arrives. The button says the same
+ * for anyone not scrolling.
+ */
+const loadMoreAsked = { list: false, archived: false };
+function askForMore(archived: boolean): void {
+  const key = archived ? "archived" : "list";
+  if (loadMoreAsked[key]) return;
+  loadMoreAsked[key] = true;
+  send({ type: "loadMoreConversations", archived });
+}
+for (const [list, archived] of [[convoList, false], [archivedList, true]] as const) {
+  list.addEventListener("scroll", () => {
+    const more = archived ? state?.moreArchived : state?.moreConversations;
+    if (more && list.scrollHeight - list.scrollTop - list.clientHeight < 24) askForMore(archived);
+  });
+}
 const archivedBlock = el("details", { className: "archived" }, [el("summary", { text: "Archived" }), archivedList]);
 convos.append(convoSearch, convoList, archivedBlock);
 const meta = el("div", { className: "meta" });
 const banners = el("div");
 const transcript = el("div", { className: "transcript" });
-transcript.setAttribute("aria-live", "polite");
 const input = el("textarea");
 const PLACEHOLDER = "Ask MatterWave…  (@file, @folder, @terminal, @git, @docs add context — Enter to send)";
 const OFFLINE_PLACEHOLDER = "MatterWave cannot be reached. Your draft is kept.";
@@ -146,7 +173,90 @@ instructionsPanel.append(
   instructionsEffective,
 );
 
+// --- autocomplete: @ for context, / for commands and saved prompts ----------------
+
+const suggestionList = el("div", { className: "suggestions" });
+suggestionList.id = "composer-suggestions";
+suggestionList.setAttribute("role", "listbox");
+suggestionList.setAttribute("aria-label", "Suggestions");
+suggestionList.hidden = true;
+composer.insertBefore(suggestionList, input.nextSibling);
+input.setAttribute("aria-autocomplete", "list");
+input.setAttribute("aria-controls", suggestionList.id);
+let offered: Suggestions | null = null;
+let chosen = 0;
+
+function closeSuggestions(): void {
+  offered = null;
+  suggestionList.hidden = true;
+  suggestionList.replaceChildren();
+  input.removeAttribute("aria-activedescendant");
+}
+
+function renderSuggestions(): void {
+  if (!offered) return closeSuggestions();
+  suggestionList.replaceChildren(
+    ...offered.items.map((item, at) => {
+      const option = el("div", {}, [el("span", { text: item.insert }), el("span", { className: "detail", text: item.detail })]);
+      option.id = `composer-suggestion-${at}`;
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", String(at === chosen));
+      // mousedown, not click: the textarea keeps its focus and caret.
+      option.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        chosen = at;
+        acceptSuggestion();
+      });
+      return option;
+    }),
+  );
+  suggestionList.hidden = false;
+  input.setAttribute("aria-activedescendant", `composer-suggestion-${chosen}`);
+}
+
+function updateSuggestions(): void {
+  const next = suggestionsAt(input.value, input.selectionStart ?? input.value.length, state?.promptNames ?? []);
+  if (!next) return closeSuggestions();
+  if (offered?.items.map((i) => i.insert).join() !== next.items.map((i) => i.insert).join()) chosen = 0;
+  offered = next;
+  renderSuggestions();
+}
+
+/** Put the chosen suggestion in place of the token, and a space after it. */
+function acceptSuggestion(): void {
+  const item = offered?.items[chosen];
+  if (!offered || !item) return;
+  const before = input.value.slice(0, offered.start);
+  const after = input.value.slice(offered.end).replace(/^\s*/, "");
+  input.value = `${before}${item.insert} ${after}`;
+  const caret = before.length + item.insert.length + 1;
+  input.setSelectionRange(caret, caret);
+  closeSuggestions();
+}
+
+input.addEventListener("input", updateSuggestions);
+input.addEventListener("blur", closeSuggestions);
+
 input.addEventListener("keydown", (event) => {
+  if (offered) {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const count = offered.items.length;
+      chosen = (chosen + (event.key === "ArrowDown" ? 1 : count - 1)) % count;
+      renderSuggestions();
+      return;
+    }
+    if ((event.key === "Tab" || event.key === "Enter") && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      acceptSuggestion();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeSuggestions();
+      return;
+    }
+  }
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     submit();
@@ -242,10 +352,22 @@ function renderConversations(s: ViewState): void {
   } else {
     convoList.replaceChildren(...rows.map((row) => conversationRow(row, s)));
   }
+  // During a search the end of the list is the end of its hits, paged the same way.
+  if (s.moreConversations) convoList.append(loadMoreRow(false));
   // The archive folds away, and never during a search: the results are what is asked about.
   archivedBlock.open = archivedBlock.open && !s.searchResults;
   archivedBlock.hidden = s.searchResults !== null || s.archivedConversations.length === 0;
   archivedList.replaceChildren(...s.archivedConversations.map((row) => archivedRow(row)));
+  if (s.moreArchived) archivedList.append(loadMoreRow(true));
+}
+
+function loadMoreRow(archived: boolean): HTMLElement {
+  return el("div", { className: "row" }, [
+    button("Load more", () => askForMore(archived), {
+      className: "link",
+      title: archived ? "Load older archived conversations" : "Load older conversations",
+    }),
+  ]);
 }
 
 function conversationRow(row: ViewState["conversations"][number], s: ViewState): HTMLElement {
@@ -377,9 +499,16 @@ function usageLine(usage: UsageView): HTMLElement {
           : "";
   return el("span", {
     className: `usage${usage.state === "ok" ? "" : " warn"}`,
-    text: `${compactTokens(usage.used)} / ${compactTokens(usage.included)} tokens · ${pct}%${suffix}`,
+    text: `${compactTokens(usage.used)} / ${compactTokens(usage.included)} tokens · ${pct}%${suffix}${capLine(usage)}`,
     title: `${usage.used.toLocaleString()} of ${usage.included.toLocaleString()} tokens used on the ${usage.planName} plan; resets ${new Date(usage.resetsAt).toLocaleDateString()}`,
   });
+}
+
+/** The person's own cap, when one applies: what they spent of it, and whether it has stopped them. */
+function capLine(usage: UsageView): string {
+  const cap = usage.memberCap;
+  if (!cap) return "";
+  return ` · your cap $${cap.spentUsd.toFixed(2)} of $${cap.capUsd.toFixed(2)}${cap.exhausted ? " (reached)" : ""}`;
 }
 
 /** 1234567 as "1.2M", 12345 as "12.3k", the rest as itself: a line, not a column. */
@@ -397,6 +526,7 @@ function compactTokens(n: number): string {
 
 function renderBanners(s: ViewState): void {
   const nodes: Node[] = [];
+  for (const a of s.announcements) nodes.push(announcementBanner(a));
   if (s.temporary) nodes.push(el("div", { className: "notice", text: TEMPORARY_NOTICE }));
   if (s.notice) nodes.push(el("div", { className: "notice", text: s.notice }));
   if (s.error) {
@@ -414,6 +544,20 @@ function renderBanners(s: ViewState): void {
     );
   }
     banners.replaceChildren(...nodes);
+}
+
+/** One of the deployment's announcements: its words, where it leads, and Dismiss when it may be. */
+function announcementBanner(a: AnnouncementView): HTMLElement {
+  const actions = el("div", { className: "actions" });
+  if (a.link) {
+    const link = a.link;
+    // The host decides where it goes, as for a notification's link.
+    actions.appendChild(button("Open", () => send({ type: "openNotification", id: a.id, url: link }), { className: "link", title: "Open where this leads" }));
+  }
+  if (a.dismissible) {
+    actions.appendChild(button("Dismiss", () => send({ type: "dismissAnnouncement", id: a.id }), { className: "link", title: "Hide this announcement" }));
+  }
+  return el("div", { className: `notice announcement ${a.severity}` }, [el("div", { text: a.message }), actions]);
 }
 
 /** The per-chat instructions editor: the conversation's own text, or "use mine". */
@@ -557,8 +701,24 @@ function renderEntry(entry: TranscriptEntry, isLast: boolean, streaming: boolean
         }, { className: `link${fb?.rating === -1 ? " rated" : ""}`, title: feedbackTitle(fb) }),
       );
       actions.appendChild(button("Regenerate", () => send({ type: "regenerate", messageId: m.id }), { className: "link" }));
+      actions.appendChild(
+        button("Report", () => send({ type: "reportMessage", messageId: m.id }), { className: "link", title: "Report this answer as unsafe or unhelpful" }),
+      );
+    }
+    // A temporary conversation cannot be forked: the API refuses, so the action is not offered.
+    if (!state?.temporary) {
+      actions.appendChild(
+        button("Fork", () => send({ type: "forkConversation", messageId: m.id }), {
+          className: "link",
+          title: "Start a new conversation from the turns down to here",
+        }),
+      );
     }
     node.appendChild(actions);
+  }
+  const used = state?.answerUsage[m.id];
+  if (used && m.role === "assistant") {
+    node.appendChild(el("div", { className: "answer-usage", text: answerUsageLabel(used), title: "Tokens this answer used, and their cost at the model's list price" }));
   }
   if (m.id && feedbackPickerId === m.id && m.role === "assistant") node.appendChild(feedbackPicker(m));
   return node;
@@ -663,7 +823,20 @@ function markdown(text: string): HTMLElement {
   // Safe by construction: renderMarkdown escapes the source and its output
   // passes the allowlist sanitiser before it gets here.
   node.innerHTML = renderMarkdown(text);
+  for (const code of Array.from(node.querySelectorAll<HTMLElement>("pre > code"))) highlight(code);
   return node;
+}
+
+/**
+ * Colour a code block by its fence's language: its text becomes spans
+ * built with `textContent`, so nothing the model wrote is parsed as HTML,
+ * and the colours are the editor theme's (the page's `tok-` classes).
+ */
+function highlight(code: HTMLElement): void {
+  const language = /(?:^|\s)language-([\w+#.-]+)/.exec(code.className)?.[1] ?? null;
+  const tokens = tokenize(code.textContent ?? "", language);
+  if (tokens.every((token) => token.kind === "text")) return;
+  code.replaceChildren(...tokens.map((token) => (token.kind === "text" ? document.createTextNode(token.text) : el("span", { className: `tok-${token.kind}`, text: token.text }))));
 }
 
 /**
@@ -681,12 +854,20 @@ function markdownWithApply(text: string, messageId: string): HTMLElement {
     const block = blocks[at];
     if (!block || !block.code.trim()) return;
     const bar = el("div", { className: "apply-bar" });
-    bar.appendChild(
+    bar.append(
       button(
         block.filename ? `Apply → ${block.filename}` : "Apply…",
         () => send({ type: "applyCodeBlock", messageId, blockIndex: block.index }),
         { className: "link", title: "Review a diff of this code against the file, then apply it" },
       ),
+      button("Insert", () => send({ type: "insertCodeBlock", messageId, blockIndex: block.index }), {
+        className: "link",
+        title: "Put this code at the editor's cursor",
+      }),
+      button("Copy", () => send({ type: "copyCodeBlock", messageId, blockIndex: block.index }), {
+        className: "link",
+        title: "Copy this code to the clipboard",
+      }),
     );
     const wrap = el("div", { className: "apply-wrap" });
     pre.replaceWith(wrap);
@@ -746,7 +927,12 @@ function prettyJson(raw: string): string {
 window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
   const message = event.data;
   if (message.type === "state") {
+    const said = announcement(state, message.state);
+    if (said) announcer.textContent = said;
     state = message.state;
+    // The page that was asked for has landed (or failed): the end of a list may ask again.
+    loadMoreAsked.list = false;
+    loadMoreAsked.archived = false;
     // The host's feedback map is the record; this session's optimistic copy
     // has done its job the moment a full state arrives.
     feedbackSession.clear();

@@ -1,11 +1,18 @@
 import * as vscode from "vscode";
+import { whereItLands } from "./targets";
 
 /**
- * Applying code to a file, the only way the extension ever writes one: a
- * diff of the file as it is against the code as it would be, in a virtual
- * document, and the write happens only on the person's Apply. Afterwards
- * the file is reopened (without stealing focus) so its language server
- * re-lints what landed and the Problems panel says so.
+ * Applying code to a file, the only way the extension ever changes one: a
+ * diff of the document as it is against the code as it would be, in a
+ * virtual document, and the change happens only on the person's Apply.
+ *
+ * The change goes through a `WorkspaceEdit`, never a write to disk: it
+ * lands in the editor's buffer beside any unsaved edits, joins the
+ * document's undo stack, and never races the editor's own copy into a save
+ * conflict. What the diff, the checkpoint and the comparison read is the
+ * document's text -- unsaved edits included -- not the file on disk.
+ * Afterwards the document is shown (without stealing focus) so its
+ * language server re-lints what landed and the Problems panel says so.
  */
 
 /** The scheme of the virtual right-hand side of a diff preview. */
@@ -26,55 +33,94 @@ export interface ApplyOptions {
   /** What to show in the confirm dialog besides the file's name. */
   detail?: string;
   /**
-   * Called with the file's current contents once the person has said Apply
-   * but before anything is written -- the moment a checkpoint is taken.
-   * Null when the file does not exist yet.
+   * Called with the document's current text once the person has said Apply
+   * but before anything changes -- the moment a checkpoint is taken. Null
+   * when the file does not exist yet.
    */
   onSnapshot?: (before: string | null) => Promise<void> | void;
-  /** Reopen the file after the write so diagnostics refresh; on by default. */
+  /** Show the document after the change so diagnostics refresh; on by default. */
   lint?: boolean;
 }
 
 /**
- * Show the diff, ask, and write on Apply. True when the file was written,
- * false when the code already matched or the person kept the file as it was.
+ * Show the diff, ask, and change the document on Apply. True when it
+ * changed, false when the code already matched, the person kept the file as
+ * it was, or the document moved on while the diff was open.
  */
 export async function applyToFile(target: vscode.Uri, newContent: string, opts: ApplyOptions): Promise<boolean> {
-  const name = vscode.workspace.asRelativePath(target, false);
-  const before = await readFileOrNull(target);
-  if (before !== null && before === newContent) {
+  const name = vscode.workspace.asRelativePath(target, true);
+  let document: vscode.TextDocument | null;
+  try {
+    document = await documentOrNull(target);
+  } catch (error) {
+    void vscode.window.showErrorMessage(
+      `${name} could not be opened as text, so nothing was applied: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return false;
+  }
+  const before = document ? document.getText() : null;
+  // The answer's lines end in \n; a CRLF document compares and previews in its own endings.
+  const content = document ? withEol(newContent, document.eol) : newContent;
+  if (before !== null && before === content) {
     void vscode.window.showInformationMessage(`${name} already has this code; nothing to apply.`);
     return false;
   }
   const empty = vscode.Uri.parse(`${APPLY_SCHEME}:empty`);
   const preview = vscode.Uri.parse(`${APPLY_SCHEME}:${target.path.replace(/^\//, "")}`);
-  virtualDocuments.set(preview.toString(), newContent);
+  virtualDocuments.set(preview.toString(), content);
   virtualDocuments.set(empty.toString(), "");
-  await vscode.commands.executeCommand("vscode.diff", before === null ? empty : target, preview, opts.title);
+  // The left side is the document itself, so the diff shows its unsaved edits.
+  await vscode.commands.executeCommand("vscode.diff", document ? target : empty, preview, opts.title);
+  // The dialog names where the change lands, resolved, not the name the
+  // answer gave: the two differ exactly when it matters.
   const answer = await vscode.window.showInformationMessage(
     `Apply this code to ${name}?`,
-    { modal: true, detail: opts.detail ?? "The file becomes exactly the code on the right." },
+    {
+      modal: true,
+      detail: `${opts.detail ?? "The file becomes exactly the code on the right."}\n\nWrites to ${whereItLands(target)}`,
+    },
     "Apply",
   );
   if (answer !== "Apply") {
     void vscode.window.showInformationMessage(`Kept ${name} as it was.`);
     return false;
   }
-  await opts.onSnapshot?.(before);
-  if (before === null) {
-    // A new file's directory may not exist either.
-    await vscode.workspace.fs.createDirectory(directoryOf(target));
+  if (document && document.getText() !== before) {
+    void vscode.window.showWarningMessage(
+      `${name} changed while the diff was open, so nothing was applied. Apply again to review it against the new text.`,
+    );
+    return false;
   }
-  await vscode.workspace.fs.writeFile(target, new TextEncoder().encode(newContent));
+  await opts.onSnapshot?.(before);
+  const wasDirty = document?.isDirty ?? false;
+  const edit = new vscode.WorkspaceEdit();
+  if (document && before !== null) {
+    const change = minimalChange(before, content);
+    edit.replace(target, new vscode.Range(document.positionAt(change.start), document.positionAt(change.end)), change.text);
+  } else {
+    // The editor's file service makes any missing parent directories.
+    edit.createFile(target, { ignoreIfExists: false });
+    edit.insert(target, new vscode.Position(0, 0), content);
+  }
+  if (!(await vscode.workspace.applyEdit(edit))) {
+    void vscode.window.showErrorMessage(`${name} could not be changed; nothing was applied.`);
+    return false;
+  }
+  // A document the person had not touched is saved, as an apply always
+  // left the file; one holding their unsaved edits stays theirs to save.
+  if (!wasDirty) {
+    const changed = await vscode.workspace.openTextDocument(target);
+    await changed.save();
+  }
   if (opts.lint !== false) await lintAfterApply(target);
   void vscode.window.showInformationMessage(`Applied to ${name}.`);
   return true;
 }
 
 /**
- * Reopen the file so its language server lints the new content and the
- * Problems panel reflects the applied change. Best-effort: a file that
- * cannot be opened leaves no lint to refresh.
+ * Show the document so its language server lints the new content and the
+ * Problems panel reflects the applied change. Best-effort: a document that
+ * cannot be shown leaves no lint to refresh.
  */
 export async function lintAfterApply(uri: vscode.Uri): Promise<void> {
   try {
@@ -85,16 +131,41 @@ export async function lintAfterApply(uri: vscode.Uri): Promise<void> {
   }
 }
 
-async function readFileOrNull(uri: vscode.Uri): Promise<string | null> {
+/**
+ * The file's document -- the editor's buffer when it is open, unsaved edits
+ * and all -- or null when there is no such file yet. A file that exists but
+ * will not open as text throws.
+ */
+async function documentOrNull(uri: vscode.Uri): Promise<vscode.TextDocument | null> {
+  const open = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
+  if (open) return open;
   try {
-    return new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
+    await vscode.workspace.fs.stat(uri);
   } catch {
     return null;
   }
+  return vscode.workspace.openTextDocument(uri);
 }
 
-function directoryOf(uri: vscode.Uri): vscode.Uri {
-  const path = uri.path.replace(/^\//, "");
-  const at = path.lastIndexOf("/");
-  return at < 0 ? vscode.Uri.parse(`${uri.scheme}:`) : vscode.Uri.parse(`${uri.scheme}:${path.slice(0, at)}`);
+/** `text` with every line ending the document's own. */
+export function withEol(text: string, eol: vscode.EndOfLine): string {
+  return text.replace(/\r\n|\r|\n/g, eol === vscode.EndOfLine.CRLF ? "\r\n" : "\n");
+}
+
+/**
+ * The one range `before` and `after` differ in, as offsets into `before` and
+ * the text that replaces it: the common prefix and suffix stay untouched, so
+ * the edit moves no marker, fold or cursor outside what changed.
+ */
+export function minimalChange(before: string, after: string): { start: number; end: number; text: string } {
+  const max = Math.min(before.length, after.length);
+  let start = 0;
+  while (start < max && before.charCodeAt(start) === after.charCodeAt(start)) start++;
+  let endBefore = before.length;
+  let endAfter = after.length;
+  while (endBefore > start && endAfter > start && before.charCodeAt(endBefore - 1) === after.charCodeAt(endAfter - 1)) {
+    endBefore--;
+    endAfter--;
+  }
+  return { start, end: endBefore, text: after.slice(start, endAfter) };
 }
