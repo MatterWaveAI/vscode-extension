@@ -9,8 +9,9 @@ import { shellFor } from "../lib/sdk/agent/modes";
  * Stop and the timeout end the whole process tree, not just the shell: a
  * test runner the shell started would otherwise outlive it. On POSIX the
  * shell leads its own process group and the group is killed; on Windows
- * `taskkill /T /F` walks the tree. Either way the promise settles within a
- * moment of the kill, even if a stray grandchild still holds a pipe open.
+ * `taskkill /T /F` walks the tree. Either way the promise settles a moment
+ * after the kill is sent, without waiting on it, and a stray grandchild
+ * that still holds a pipe open cannot hang it.
  */
 
 export interface ShellResult {
@@ -37,14 +38,26 @@ export interface ShellOptions {
   platform?: NodeJS.Platform;
 }
 
-/** How long a killed process is given to exit before the result is settled anyway. */
-const SETTLE_AFTER_KILL_MS = 1_500;
+/**
+ * After a kill, how long output already in flight is still collected before
+ * the result is settled. The kill itself runs on (taskkill on Windows takes
+ * most of a second): the person who pressed Stop is not kept waiting for it.
+ */
+const SETTLE_AFTER_KILL_MS = 100;
 /**
  * After the shell exits, how long its pipes may stay open before the result
  * is settled: output written just before the exit still arrives, and a
  * background process the command left holding the pipes does not hang it.
  */
 const SETTLE_AFTER_EXIT_MS = 200;
+
+/**
+ * On Windows the tree is killed by `taskkill`, a process of its own, which a
+ * loaded machine can take seconds to start. If the shell is still alive this
+ * long after Stop, it is terminated directly, so the command itself always
+ * ends in time; by then taskkill has normally walked the tree.
+ */
+const TERMINATE_SHELL_AFTER_MS = 1_200;
 
 /** PowerShell 5.1 writes redirected output in the OEM code page; UTF-8 keeps non-ASCII output readable. */
 const POWERSHELL_UTF8 = "$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); ";
@@ -64,6 +77,10 @@ export function killTree(child: ChildProcess, platform: NodeJS.Platform = proces
     // Not spawnSync: the extension host's event loop keeps running while the tree dies.
     const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
     killer.on("error", () => child.kill());
+    if (child.exitCode === null && child.signalCode === null) {
+      const fallback = setTimeout(() => child.kill("SIGKILL"), TERMINATE_SHELL_AFTER_MS);
+      child.once("exit", () => clearTimeout(fallback));
+    }
     return;
   }
   try {
@@ -161,7 +178,6 @@ export function runShell(command: string, options: ShellOptions): Promise<ShellR
     };
     const kill = () => {
       killTree(child, platform);
-      // Settled when the shell exits; this only bounds a kill that did not take.
       killTimer = setTimeout(() => finish(null), SETTLE_AFTER_KILL_MS);
     };
     const onAbort = () => {

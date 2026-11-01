@@ -6,15 +6,31 @@ import type { ReviewHandle, ReviewSurface } from "../../src/agent/session";
 import type { Approvals, ChangeRequest, ConfirmRequest } from "../../src/agent/tools";
 import type { ChatCompletionChunk, ChatCompletionRequest } from "../../src/agent/wire";
 
-/** A real folder with `files` in it (paths `/`-separated), resolved, removed by `cleanup`. */
-export function workspace(files: Record<string, string> = {}): { root: string; cleanup(): void } {
+/**
+ * A real folder with `files` in it (paths `/`-separated), resolved, removed
+ * by `cleanup`. Removal is retried for a few seconds: on Windows a command
+ * that was just stopped in the folder holds it until the OS lets go.
+ */
+export function workspace(files: Record<string, string> = {}): { root: string; cleanup(): Promise<void> } {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "mw-agent-")));
   for (const [path, content] of Object.entries(files)) {
     const absolute = join(root, ...path.split("/"));
     mkdirSync(dirname(absolute), { recursive: true });
     writeFileSync(absolute, content);
   }
-  return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  const cleanup = async () => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        rmSync(root, { recursive: true, force: true });
+        return;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if ((code !== "EPERM" && code !== "EBUSY") || attempt >= 50) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+  };
+  return { root, cleanup };
 }
 
 export function textChunk(text: string): ChatCompletionChunk {

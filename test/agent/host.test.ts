@@ -54,9 +54,9 @@ beforeEach(() => {
   outside = workspace({ "secret.txt": "outside the root\n" });
 });
 
-afterEach(() => {
-  ws.cleanup();
-  outside.cleanup();
+afterEach(async () => {
+  await ws.cleanup();
+  await outside.cleanup();
 });
 
 function tool(name: string, options: Parameters<typeof contractTools>[0] = {}): ToolSpec {

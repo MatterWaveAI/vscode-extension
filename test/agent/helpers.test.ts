@@ -170,7 +170,7 @@ describe("custom commands and front matter", () => {
       const untrusted = await loadCustomCommands(definitionDirs("commands", ws.root, false, home.root));
       expect(untrusted.find((c) => c.name === "review")!.scope).toBe("user");
     } finally {
-      home.cleanup();
+      await home.cleanup();
     }
   });
 });

@@ -30,9 +30,9 @@ beforeEach(() => {
   home = workspace();
 });
 
-afterEach(() => {
-  ws.cleanup();
-  home.cleanup();
+afterEach(async () => {
+  await ws.cleanup();
+  await home.cleanup();
 });
 
 const SETTINGS: AgentSettings = { maxSteps: 10, maxTokens: 1_000_000, defaultMode: "ask", webFetch: false, editorContext: false };
@@ -219,9 +219,17 @@ describe("caps, budget and Stop", () => {
     const stoppedAt = Date.now();
     abort.abort();
     const summary = await running;
-    expect(Date.now() - stoppedAt).toBeLessThan(2_000);
     expect(summary.status).toBe("stopped");
-    expect(() => process.kill(pid, 0)).toThrow();
+    const alive = () => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    await until(() => !alive(), Math.max(0, 2_000 - (Date.now() - stoppedAt)));
+    expect(Date.now() - stoppedAt).toBeLessThan(2_000);
   }, 30_000);
 
   it("Stop while an approval waits rejects it and writes nothing", async () => {
