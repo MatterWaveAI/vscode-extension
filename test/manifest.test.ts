@@ -68,6 +68,16 @@ describe("the extension manifest", () => {
     }
   });
 
+  it("pins every action to a commit and gives the workflow token read access by default", () => {
+    for (const workflow of ["ci.yml", "release.yml"]) {
+      const text = readFileSync(root(`.github/workflows/${workflow}`), "utf8");
+      const uses = [...text.matchAll(/uses:\s*(\S+)/g)].map((m) => m[1] ?? "");
+      expect(uses.length, workflow).toBeGreaterThan(0);
+      for (const action of uses) expect(action, `${workflow}: ${action}`).toMatch(/@[0-9a-f]{40}$/);
+      expect(text, workflow).toMatch(/^permissions:\n {2}contents: read$/m);
+    }
+  });
+
   it("ships the licence and the changelog in the .vsix", () => {
     const ignore = readFileSync(root(".vscodeignore"), "utf8").split(/\r?\n/);
     expect(ignore).toContain("!LICENSE");
