@@ -78,6 +78,10 @@ describe("the extension manifest", () => {
     }
   });
 
+  it("checks in CI that no tracked file names a private ticket id", () => {
+    expect(readFileSync(root(".github/workflows/ci.yml"), "utf8")).toContain("sh scripts/check-ticket-ids.sh");
+  });
+
   it("ships the licence and the changelog in the .vsix", () => {
     const ignore = readFileSync(root(".vscodeignore"), "utf8").split(/\r?\n/);
     expect(ignore).toContain("!LICENSE");

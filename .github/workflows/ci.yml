@@ -24,6 +24,8 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
+      - name: No private ticket ids in tracked files
+        run: sh scripts/check-ticket-ids.sh
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
