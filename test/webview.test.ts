@@ -290,7 +290,7 @@ describe("the chat webview", () => {
   it("offers Load more under the archive on its own", () => {
     post({
       type: "state",
-      state: state({ moreArchived: true, archivedConversations: [{ id: "c_9", title: "Old", pinned: false, archived: true, badge: null }] }),
+      state: state({ moreArchived: true, archivedConversations: [{ id: "c_9", title: "Old", pinned: false, archived: true, badge: null, source: null }] }),
     });
     const archive = document.querySelectorAll<HTMLElement>(".convos-list")[1];
     sent.length = 0;
