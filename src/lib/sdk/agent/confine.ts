@@ -1,0 +1,167 @@
+/**
+ * Path confinement: the check every tool runs before it touches a path.
+ * Node only (it reads the filesystem), so it ships in the
+ * `@matterwave/sdk/agent` entry and not in the browser-safe main one.
+ *
+ * `confine(root, path)` resolves `path` against the workspace root, follows
+ * its links (symbolic links, and junctions on Windows) and returns where it
+ * really leads, or throws `PathRefusedError` before anything is read or
+ * written: for a `..` segment, an absolute path outside the root, a link
+ * that leads out of it, a path on the deny list (by its own name or its
+ * target's), or, for a write, a protected path.
+ *
+ * Confinement is not a sandbox. It keeps the file tools inside the root;
+ * `run_shell` can reach anything the user can, which is why commands ask.
+ */
+
+import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
+import * as nodePath from "node:path";
+import { DenyList, PROTECTED_LIST, PathRefusedError, isAbsolute } from "./deny.js";
+import { DENY_FILE } from "./types.js";
+
+const MAX_LINK_HOPS = 40;
+
+/**
+ * Where a tool's path really leads: `absolute`, with every link followed,
+ * and `relative`, the same place relative to the resolved root with `/`
+ * separators (`.` for the root itself).
+ */
+export interface ConfinedPath {
+  absolute: string;
+  relative: string;
+}
+
+function lexists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isLink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function stripVerbatim(path: string): string {
+  for (const prefix of ["\\\\?\\", "\\??\\"]) {
+    if (path.startsWith(prefix)) return path.slice(prefix.length);
+  }
+  return path;
+}
+
+/**
+ * `path` with every link in it followed, whether or not its target exists:
+ * the deepest part that exists is resolved by the OS, and a dangling link is
+ * read and followed by hand, so a write through it is caught as well as a
+ * read.
+ */
+export function resolveLinks(path: string): string {
+  let current = nodePath.resolve(path);
+  for (let hop = 0; hop < MAX_LINK_HOPS; hop++) {
+    let head = current;
+    let rest = "";
+    while (!lexists(head)) {
+      const parent = nodePath.dirname(head);
+      if (parent === head) break;
+      const name = nodePath.basename(head);
+      rest = rest ? nodePath.join(name, rest) : name;
+      head = parent;
+    }
+    if (isLink(head) && !existsSync(head)) {
+      const target = stripVerbatim(readlinkSync(head));
+      const base = nodePath.isAbsolute(target) ? target : nodePath.join(nodePath.dirname(head), target);
+      current = nodePath.resolve(rest ? nodePath.join(base, rest) : base);
+      continue;
+    }
+    let real = head;
+    try {
+      real = realpathSync.native(head);
+    } catch {
+      // Nothing of the path exists (a missing drive): it is its own answer.
+    }
+    return rest ? nodePath.join(real, rest) : real;
+  }
+  throw new Error(`too many levels of links resolving ${path}`);
+}
+
+function normcase(path: string): string {
+  const normal = nodePath.normalize(path);
+  return process.platform === "win32" ? normal.toLowerCase() : normal;
+}
+
+function within(child: string, parent: string): boolean {
+  const c = normcase(child);
+  const p = normcase(parent);
+  return c === p || c.startsWith(p.replace(/[\\/]+$/, "") + nodePath.sep);
+}
+
+function relativeTo(child: string, parent: string): string {
+  const rel = nodePath.relative(parent, child);
+  return rel === "" || rel === "." ? "" : rel.split(nodePath.sep).join("/");
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** The contract's defaults plus every pattern line of `<root>/.matterwaveignore`. */
+export function loadDenyList(root: string): DenyList {
+  const file = nodePath.join(root, DENY_FILE);
+  try {
+    if (statSync(file).isFile()) return DenyList.withIgnoreFile(readFileSync(file, "utf-8"));
+  } catch {
+    // No deny file: the defaults alone.
+  }
+  return new DenyList();
+}
+
+/**
+ * Where `path` leads inside `root`, or `PathRefusedError`. `deny` defaults to
+ * the root's `loadDenyList`; `write: true` also refuses the protected paths,
+ * which can be read but not changed.
+ */
+export function confine(root: string, path: string, options: { deny?: DenyList; write?: boolean } = {}): ConfinedPath {
+  if (!path || path.trim() === "") throw new PathRefusedError("empty", path ?? "");
+  if (path.includes("\0")) throw new PathRefusedError("outside", path.split("\0").join(""));
+  if (path.split(/[\\/]/).includes("..")) throw new PathRefusedError("parent", path);
+
+  const givenRoot = nodePath.resolve(root);
+  const realRoot = resolveLinks(givenRoot);
+  let lexical: string;
+  let lexicalRel: string;
+  if (isAbsolute(path)) {
+    lexical = nodePath.normalize(nodePath.resolve(path));
+    if (within(lexical, realRoot)) lexicalRel = relativeTo(lexical, realRoot);
+    else if (within(lexical, givenRoot)) lexicalRel = relativeTo(lexical, givenRoot);
+    else throw new PathRefusedError("outside", path);
+  } else {
+    lexical = nodePath.normalize(nodePath.join(realRoot, path));
+    lexicalRel = relativeTo(lexical, realRoot);
+  }
+
+  const real = resolveLinks(lexical);
+  if (!within(real, realRoot)) throw new PathRefusedError("symlink", path);
+  const realRel = relativeTo(real, realRoot);
+
+  const deny = options.deny ?? loadDenyList(realRoot);
+  const isDir = isDirectory(real);
+  for (const rel of [lexicalRel, realRel]) {
+    if (rel && deny.matches(rel, { isDir })) throw new PathRefusedError("denied", path);
+  }
+  if (options.write) {
+    for (const rel of [lexicalRel, realRel]) {
+      if (rel && PROTECTED_LIST.matches(rel, { isDir })) throw new PathRefusedError("protected", path);
+    }
+  }
+  return { absolute: real, relative: realRel || "." };
+}
