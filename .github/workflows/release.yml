@@ -1,9 +1,10 @@
 name: Release
 
-# A tag cut from a green main: the same gates CI runs, then a packaged
-# .vsix attached to a GitHub release, and a publish to the Visual Studio
-# Code Marketplace and Open VSX (each skipped with a warning when its
-# token is not configured).
+# A tag cut from a green main: the same gates CI runs, then a GitHub
+# release whose notes are the version's CHANGELOG section, carrying the
+# packaged .vsix and a CycloneDX SBOM of what it bundles, and a publish of
+# that same .vsix to the Visual Studio Code Marketplace and Open VSX (each
+# skipped with a warning when its token is not configured).
 on:
   push:
     tags: ["v*"]
@@ -19,6 +20,15 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # The tag must name the version it releases (v0.3.1 tags 0.3.1, nothing
+      # else), and that version must have its CHANGELOG section: both are
+      # checked before anything is built.
+      - name: The tag names the manifest version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: node scripts/release.mjs check-tag "$TAG"
+      - name: Release notes from the CHANGELOG
+        run: node scripts/release.mjs notes > notes.md
       # The packageManager field pins the version; no `version:` needed here.
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -30,22 +40,23 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
-      # The tag must name the version it releases: v0.3.1 tags 0.3.1, nothing else.
-      - name: Check the tag against the manifest version
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          version="$(node -p "require('./package.json').version")"
-          if [ "$tag" != "$version" ]; then
-            echo "Tag ${GITHUB_REF_NAME} does not match package.json's ${version}" >&2
-            exit 1
-          fi
       # The packaging gate: a manifest problem (a missing icon, a bad
       # activation event) fails here rather than at the release.
       - run: pnpm exec vsce package --no-dependencies --out "matterwave-${GITHUB_REF_NAME#v}.vsix"
-      - uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2.3.2
+      - name: CycloneDX SBOM of what the .vsix bundles
+        run: node scripts/sbom.mjs > "matterwave-${GITHUB_REF_NAME#v}.cdx.json"
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-file notes.md \
+            matterwave-*.vsix matterwave-*.cdx.json
+      # The registries get the exact file the release carries.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          files: matterwave-*.vsix
-          generate_release_notes: true
+          name: vsix
+          path: matterwave-*.vsix
 
   # Publishes to both registries after the release lands. Two tokens, as
   # repo (or org) secrets:
@@ -72,7 +83,9 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm build
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: vsix
       - name: Publish to the Visual Studio Code Marketplace
         env:
           VSCE_TOKEN: ${{ secrets.VSCE_TOKEN }}
@@ -81,7 +94,7 @@ jobs:
             echo "::warning::VSCE_TOKEN is not set; skipping the Marketplace publish"
             exit 0
           fi
-          pnpm exec vsce publish --no-dependencies -p "$VSCE_TOKEN"
+          pnpm exec vsce publish --packagePath matterwave-*.vsix -p "$VSCE_TOKEN"
       - name: Publish to Open VSX
         env:
           OVSX_TOKEN: ${{ secrets.OVSX_TOKEN }}
@@ -90,4 +103,4 @@ jobs:
             echo "::warning::OVSX_TOKEN is not set; skipping the Open VSX publish"
             exit 0
           fi
-          npx --yes ovsx publish --no-dependencies -p "$OVSX_TOKEN"
+          npx --yes ovsx publish matterwave-*.vsix -p "$OVSX_TOKEN"
