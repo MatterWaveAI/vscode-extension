@@ -44,7 +44,7 @@ import type { ApiKeyListing, ImportRecord } from "./api/types";
 import { pickerRows, resolvePick, type PickerRow } from "./models";
 import { DEFAULT_BASE_URL, normalizeServerUrl, serverUrlProblem, shouldPromptForServer } from "./settings";
 import { StatusBar } from "./statusBar";
-import { normalizePromptName, PromptLibrary, MAX_PROMPTS, MAX_PROMPT_TEXT, type PromptRow, type PromptScope } from "./promptLibrary";
+import { normalizePromptName, PromptLibrary, MAX_PROMPTS, MAX_PROMPT_TEXT, PROMPTS_KEY, type PromptRow, type PromptScope } from "./promptLibrary";
 import { currentFolder, editorFolders, resolveNamedFile, whereItLands } from "./targets";
 import { pickWorkspaceFile as pickFile } from "./fileSearch";
 import { execFile } from "node:child_process";
@@ -121,6 +121,9 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
   const tokens = new TokenStore(context.secrets, baseUrl);
   const statusBar = new StatusBar();
   const view = new ChatViewProvider(context.extensionUri, () => void promptForServer(context));
+  // Settings Sync carries the prompt library and the picked model to the
+  // person's other machines; checkpoints and first-run flags stay per machine.
+  context.globalState.setKeysForSync([PROMPTS_KEY, MODEL_KEY]);
   // A window with no folder open has no workspace of its own to keep prompts for.
   const prompts = new PromptLibrary(context.globalState, vscode.workspace.workspaceFolders?.length ? context.workspaceState : null);
   // Snapshots are files in the extension's own storage, under one cap for every chat and workspace.

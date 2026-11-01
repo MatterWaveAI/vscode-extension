@@ -4,9 +4,14 @@ import { activate, exportsFor, type MatterWaveApi } from "../src/extension";
 import type { Memento } from "../src/promptLibrary";
 import { commands, ExtensionMode, FakeWebview, MemorySecrets, Uri, window, workspace } from "./vscode-mock";
 
-function fakeMemento(): Memento {
+function fakeMemento(): Memento & { synced: string[]; setKeysForSync(keys: readonly string[]): void } {
   const values = new Map<string, unknown>();
+  const synced: string[] = [];
   return {
+    synced,
+    setKeysForSync(keys: readonly string[]) {
+      synced.splice(0, synced.length, ...keys);
+    },
     get<T>(key: string): T | undefined {
       return values.get(key) as T | undefined;
     },
@@ -48,6 +53,12 @@ describe("activation", () => {
     view.resolveWebviewView({ webview: new FakeWebview(), onDidDispose: () => ({ dispose() {} }), show() {} });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(window.inputBoxes).toEqual(["MatterWave server"]);
+  });
+
+  it("lets Settings Sync carry the prompt library and the picked model, and nothing machine-bound", () => {
+    const context = contextIn(ExtensionMode.Production);
+    activate(context);
+    expect((context.globalState as unknown as { synced: string[] }).synced).toEqual(["matterwave.prompts", "matterwave.model"]);
   });
 
   it("has a command to open the chat and one to show the request log", () => {
