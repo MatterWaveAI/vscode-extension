@@ -58,7 +58,7 @@ signed in as, and whether MatterWave can be reached.
 Tick **Agent** under the composer and what you type goes to the coding agent instead of the chat.
 The agent works in one workspace folder (the root, named beside the toggle; with several folders
 open, click it to pick another) through the shared MatterWave tool contract (agent contract
-1.1.0): `read_file`, `list_dir`, `glob`, `grep`, `edit`, `write_file` and `run_shell`, which
+1.2.0): `read_file`, `list_dir`, `glob`, `grep`, `edit`, `write_file` and `run_shell`, which
 return the same text here as in every other MatterWave client. The tools run here, in the
 extension host; the server only relays the model's calls (`/v1/chat/completions`) and never sees
 your files except what the tools return. A run is stored in the conversation
@@ -135,8 +135,10 @@ case, plus anything in a `.matterwaveignore` at the root (gitignore syntax). `gl
 (`!` re-includes, case ignored); `list_dir` still lists the protected files above, which can be
 read. The project's notes, commands and subagents and `@path` mentions are
 read through the same rules, so a `MATTERWAVE.md` that links to a key outside the root is refused,
-not sent. `grep` runs the model's pattern off the editor's thread and gives up on one that takes
-more than 5 s. This is confinement, not a sandbox: an approved command runs as you and can reach
+not sent. A pipe, socket or device is never opened: every tool answers that it is not a file,
+and searches leave it out. `glob` and `grep` let the editor keep working while they walk, Stop
+answers them at once, and `grep` runs the model's pattern off the editor's thread and gives up on
+a search that takes more than 60 s. This is confinement, not a sandbox: an approved command runs as you and can reach
 anything you can. Everything the agent reads goes to MatterWave and to the model; the deny list is
 a floor, not a guarantee.
 
@@ -246,7 +248,9 @@ two suites. The agent suite always runs: a scratch folder is the workspace, and 
 scripted fake `/v1` from inside the extension host, so it needs no deployment. It checks that a
 rejected diff leaves the file byte-identical, that an accepted change undoes with Ctrl+Z, that
 an edited proposal writes your version, and that Stop ends a command and a process it detached
-(`cmd /c start /b` on Windows) within 2 s. The deployment suite runs against a real deployment.
+(`cmd /c start /b` on Windows) within 2 s. With `E2E_VSIX=<file>` (after `pnpm run package`) it
+runs the packaged extension instead, installed into the test editor, so the .vsix is what is
+tested. The deployment suite runs against a real deployment.
 `e2e/run.mjs` signs in as the standing e2e account (`E2E_ADMIN_EMAIL` / `E2E_ADMIN_PASSWORD`;
 without them the run is skipped), approves a device login as that account to mint a device key
 for the run (which works on every plan), and the suite in `e2e/suite` signs the extension in
@@ -268,7 +272,7 @@ their output, the approval decisions, the refusals and the system prompt. `pnpm 
 re-copies every `src/agent/*.ts` from a `typescript-sdk` checkout or worktree (`--sdk <dir>` or
 `MATTERWAVE_SDK_DIR`, by default one beside this repository) at a git ref (`--ref` or
 `MATTERWAVE_SDK_REF`, default `develop`) and records it in `src/lib/sdk/VENDORED.json`; `pnpm
-sdk:check` compares the copy with the ref it was taken from. The copy is agent contract 1.1.0,
+sdk:check` compares the copy with the ref it was taken from. The copy is agent contract 1.2.0,
 from the SDK's `agent-contract-1.1` (`pnpm sdk:sync --sdk <checkout> --ref agent-contract-1.1`).
 `test/sdkVendor.test.ts` fails on a hand edit of the copy, and
 `test/agent/conformance.test.ts` runs the contract's conformance cases through the extension's own

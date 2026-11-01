@@ -1,38 +1,29 @@
-import { readFile, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import * as nodePath from "node:path";
 import {
   DenyList,
   EditError,
-  LIMITS,
   PathRefusedError,
   TOOLS_BY_NAME,
   ToolError,
   allowed,
   applyEdit,
   confine,
-  decodeText,
-  formatGlob,
-  formatGrep,
   formatReadFile,
   formatShell,
-  globMatches,
-  grepLine,
   isAbsolute,
   isBinary,
-  loadDenyList,
-  loadSearchIgnore,
+  limit,
   refusal,
+  runGlobAsync,
+  runGrepAsync,
   runListDir,
   runReadFile,
-  textLines,
   unifiedDiff,
-  walk,
-  type LimitName,
   type Limits,
-  type SearchIgnore,
   type ToolName,
 } from "../lib/sdk/agent/node";
-import { PatternTooSlow, RegexWorker, type FileLines, type LineMatch } from "./regexWorker";
+import { readBytes } from "./readConfined";
 import { runShell as spawnShell, type ShellOptions, type ShellResult } from "./shell";
 import { failure, intArg, isOutcome, ok, rejectedOutcome, stringArg, toolSpec, type ToolContext, type ToolOutcome, type ToolSpec } from "./tools";
 
@@ -41,19 +32,18 @@ import { failure, intArg, isOutcome, ok, rejectedOutcome, stringArg, toolSpec, t
  * workspace root: `read_file`, `list_dir`, `glob`, `grep`, `edit`,
  * `write_file` and `run_shell`.
  *
- * What they return is the SDK's: `runReadFile` and `runListDir`, and for the
- * searches its walker (`walk`, with the .gitignore and .matterwaveignore
- * rules of `SearchIgnore`), `globMatches` and the `format*` functions, so the
- * text matches every other client's. Every path goes through the SDK's
- * `confine` before anything is read or written. Three things are the
- * extension's own: the searches let the editor breathe while they walk (and
- * stop at MAX_WALKED files), grep runs the model's pattern in a worker
- * against a deadline (regexWorker.ts), and a write never touches the disk
- * here -- the change goes to `approvals.change`, which shows the diff, waits
- * for the person when it asks, and applies it through the editor after
- * `stale()` confirms that the path still leads where it did and the file
- * still holds what the diff was made from. A command runs as a child process
- * in the root (shell.ts), its text the SDK's `formatShell`.
+ * What they return is the SDK's: `runReadFile` and `runListDir`, and
+ * `runGlobAsync` and `runGrepAsync` for the searches, which walk with the
+ * .gitignore and .matterwaveignore rules and let the editor breathe as they
+ * go; grep runs the model's pattern on a worker thread the SDK ends at
+ * GREP_TIMEOUT_S. Every path goes through the SDK's `confine` before anything
+ * is read or written. Two things are the extension's own: Stop answers a
+ * search at once, and a write never touches the disk here -- the change goes
+ * to `approvals.change`, which shows the diff, waits for the person when it
+ * asks, and applies it through the editor after `stale()` confirms that the
+ * path still leads where it did and the file still holds what the diff was
+ * made from. A command runs as a child process in the root (shell.ts), its
+ * text the SDK's `formatShell`.
  */
 
 export interface HostOptions {
@@ -67,15 +57,19 @@ export interface HostOptions {
   runShell?: (command: string, options: ShellOptions) => Promise<ShellResult>;
   /** Overrides for the contract's limits, by name (the conformance cases set some). */
   limits?: Limits;
+  /** grep's deadline in seconds; GREP_TIMEOUT_S by default. */
+  grepTimeoutS?: number;
 }
 
-/** A search stops walking after this many files: the extension's own limit, beside the contract's. */
-const MAX_WALKED = 100_000;
-/** A walk lets the extension host's event loop run, and checks for Stop, every this many files. */
-const WALK_YIELD_EVERY = 200;
-/** grep hands files to its matcher in batches of about this much text, or this many files. */
-const GREP_BATCH_BYTES = 1024 * 1024;
-const GREP_BATCH_FILES = 200;
+/**
+ * The most a whole grep may take, in seconds: the SDK runs the model's
+ * pattern on a worker thread and ends the search here with the contract's
+ * `timeout`, which tells the model to narrow it. A pattern can take
+ * exponential time on one line (`(a+)+$` on a line of `a`s, perhaps copied
+ * from a file that asked for it). The deadline counts the walk and the reads
+ * as well, so it leaves a large workspace on a slow disk room to finish.
+ */
+export const GREP_TIMEOUT_S = 60;
 
 /** A leading byte-order mark is dropped, as the editor drops it: an edit must not write it back as text. */
 const decoder = new TextDecoder("utf-8");
@@ -90,10 +84,6 @@ const decoder = new TextDecoder("utf-8");
  * into a process the editor starts.
  */
 export const EDITOR_CONFIG = new DenyList([".vscode/", "*.code-workspace"]);
-
-function limit(name: LimitName, options: HostOptions): number {
-  return options.limits?.[name] ?? LIMITS[name];
-}
 
 /** The contract's sentence for a refused path or a tool that cannot answer, as the tool's error result. */
 function failed(error: unknown): ToolOutcome {
@@ -117,25 +107,30 @@ function samePath(a: string, b: string): boolean {
   return norm(a) === norm(b);
 }
 
-async function kindOf(path: string): Promise<"file" | "dir" | null> {
+/** What is at `path`, its links followed: a regular file, a folder, something else (a pipe, a socket, a device), or null for nothing. */
+async function kindOf(path: string): Promise<"file" | "dir" | "special" | null> {
   try {
     const info = await stat(path);
-    return info.isDirectory() ? "dir" : info.isFile() ? "file" : null;
+    return info.isDirectory() ? "dir" : info.isFile() ? "file" : "special";
   } catch {
     return null;
   }
 }
 
-/** A file's text for a change (the editor's copy when it has one); `ToolError` when it is too large or not text. */
+/**
+ * A file's text for a change (the editor's copy when it has one); `ToolError`
+ * when it is too large, not text, or not a regular file. No more than
+ * `read_max_file_bytes` + 1 bytes are read, and a pipe is never waited on.
+ */
 async function readForChange(absolute: string, relative: string, options: HostOptions): Promise<string> {
   const open = await options.readText?.(absolute);
   if (typeof open === "string") return open;
-  const info = await stat(absolute);
-  const cap = limit("read_max_file_bytes", options);
-  if (info.size > cap) throw new ToolError("too_large", { path: relative, size: info.size, limit: cap });
-  const bytes = await readFile(absolute);
-  if (isBinary(bytes, options.limits)) throw new ToolError("binary", { path: relative });
-  return decoder.decode(bytes);
+  const cap = limit("read_max_file_bytes", options.limits);
+  const read = await readBytes(absolute, cap + 1);
+  if (read === null) throw new ToolError("special_file", { path: relative });
+  if (read.size > cap) throw new ToolError("too_large", { path: relative, size: read.size, limit: cap });
+  if (isBinary(read.bytes, options.limits)) throw new ToolError("binary", { path: relative });
+  return decoder.decode(read.bytes);
 }
 
 /** Where a write leads, and whether it asks the person whatever the mode says. */
@@ -185,6 +180,7 @@ function staleCheck(root: string, target: WriteTarget, before: string | null, op
     if (!samePath(now.absolute, absolute)) return `${relative} now leads somewhere else: a folder or link on its path changed while the change waited.`;
     const kind = await kindOf(absolute);
     if (before === null) return kind === null ? null : `${relative} was created by something else while the change waited.`;
+    if (kind === "special") return new ToolError("special_file", { path: relative }).message;
     if (kind !== "file") return `${relative} was removed while the change waited.`;
     let current: string;
     try {
@@ -197,45 +193,19 @@ function staleCheck(root: string, target: WriteTarget, before: string | null, op
   };
 }
 
-// --- the searches ---------------------------------------------------------------
-
-interface SearchStart {
-  /** The confined path, relative to the root (`.` for the root). */
-  relative: string;
-  isFile: boolean;
-  rules: SearchIgnore;
-}
-
-/** The path a search starts from: confined, and a file or a folder (`not_found` otherwise). */
-async function searchStart(root: string, path: string): Promise<SearchStart> {
-  const deny = loadDenyList(root);
-  const target = confine(root, path, { deny });
-  const kind = await kindOf(target.absolute);
-  if (kind === null) throw new ToolError("not_found", { path: target.relative });
-  return { relative: target.relative, isFile: kind === "file", rules: loadSearchIgnore(root, { deny }) };
-}
-
 /**
- * The SDK's walk, in its order, with the editor let through every
- * WALK_YIELD_EVERY files (Stop takes effect there) and no further than
- * MAX_WALKED files.
+ * A search's answer, or an AbortError as soon as Stop comes. The SDK's
+ * searches cannot be called off: one that Stop overtook runs out in the
+ * background, still yielding to the editor (a grep no longer than its
+ * deadline), and what it finds is dropped.
  */
-async function* walkFiles(root: string, start: SearchStart, signal: AbortSignal): AsyncGenerator<string> {
-  let walked = 0;
-  for (const relative of walk(root, start.relative, { deny: start.rules.deny, ignore: start.rules })) {
-    yield relative;
-    walked += 1;
-    if (walked >= MAX_WALKED) return;
-    if (walked % WALK_YIELD_EVERY === 0) {
-      await new Promise((resolve) => setImmediate(resolve));
-      if (signal.aborted) throw aborted();
-    }
-  }
-}
-
-/** `relative` below the search's base folder, which glob patterns are matched against. */
-function under(relative: string, base: string): string {
-  return base ? relative.slice(base.length + 1) : relative;
+function unlessStopped<T>(search: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(aborted());
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+    void search.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
 }
 
 // --- the tools ------------------------------------------------------------------
@@ -277,30 +247,10 @@ async function globTool(args: Record<string, unknown>, ctx: ToolContext, options
   const path = stringArg(args, "path", false);
   if (isOutcome(path)) return path;
   try {
-    if (pattern!.trim() === "") throw new ToolError("empty_pattern");
-    const start = await searchStart(ctx.root, path || ".");
-    if (start.isFile) throw new ToolError("not_directory", { path: start.relative });
-    const base = start.relative === "." ? "" : start.relative;
-    const cap = limit("search_max_results", options);
-    const found: string[] = [];
-    let truncated = false;
-    for await (const relative of walkFiles(ctx.root, start, ctx.signal)) {
-      if (!globMatches(pattern!, under(relative, base))) continue;
-      if (found.length === cap) {
-        truncated = true;
-        break;
-      }
-      found.push(relative);
-    }
-    return ok(formatGlob(pattern!, found, { truncated, limits: options.limits }));
+    return ok(await unlessStopped(runGlobAsync(ctx.root, pattern!, { path: path || undefined, limits: options.limits }), ctx.signal));
   } catch (error) {
     return failed(error);
   }
-}
-
-/** A matching line as the worker hands it back, then as grep shows it (see regexWorker.ts on `more`). */
-function shown(match: LineMatch): [string, number, string] {
-  return [match.relative, match.line, grepLine(match.more ? `${match.text}.` : match.text)];
 }
 
 async function grepTool(args: Record<string, unknown>, ctx: ToolContext, options: HostOptions): Promise<ToolOutcome> {
@@ -310,64 +260,17 @@ async function grepTool(args: Record<string, unknown>, ctx: ToolContext, options
   if (isOutcome(path)) return path;
   const glob = stringArg(args, "glob", false);
   if (isOutcome(glob)) return glob;
-  const flags = args.ignore_case === true ? "i" : "";
-  let matcher: RegexWorker | null = null;
   try {
-    if (pattern === "") throw new ToolError("empty_pattern");
-    try {
-      new RegExp(pattern!, flags);
-    } catch (error) {
-      throw new ToolError("invalid_regex", { pattern: pattern!, error: error instanceof Error ? error.message : String(error) });
-    }
-    const start = await searchStart(ctx.root, path || ".");
-    const base = start.isFile
-      ? start.relative.includes("/")
-        ? start.relative.slice(0, start.relative.lastIndexOf("/"))
-        : ""
-      : start.relative === "."
-        ? ""
-        : start.relative;
-    const cap = limit("search_max_results", options);
-    const maxFile = limit("grep_max_file_bytes", options);
-    const found: [string, number, string][] = [];
-    let truncated = false;
-    // The model's pattern runs in a worker, against a deadline: see regexWorker.ts.
-    matcher = new RegexWorker(pattern!, flags);
-    let batch: FileLines[] = [];
-    let batchBytes = 0;
-    const flush = async (): Promise<boolean> => {
-      if (batch.length === 0) return true;
-      const files = batch;
-      batch = [];
-      batchBytes = 0;
-      const room = cap - found.length;
-      const matches = await matcher!.match(files, room + 1, ctx.signal);
-      found.push(...matches.slice(0, room).map(shown));
-      truncated = matches.length > room;
-      return !truncated;
-    };
-    for await (const relative of walkFiles(ctx.root, start, ctx.signal)) {
-      if (glob && !globMatches(glob, under(relative, base))) continue;
-      const absolute = nodePath.join(ctx.root, ...relative.split("/"));
-      let bytes: Buffer;
-      try {
-        if ((await stat(absolute)).size > maxFile) continue;
-        bytes = await readFile(absolute);
-      } catch {
-        continue;
-      }
-      if (isBinary(bytes, options.limits)) continue;
-      batch.push({ relative, lines: textLines(decodeText(bytes)) });
-      batchBytes += bytes.length;
-      if ((batchBytes >= GREP_BATCH_BYTES || batch.length >= GREP_BATCH_FILES) && !(await flush())) break;
-    }
-    if (!truncated) await flush();
-    return ok(formatGrep(pattern!, found, { truncated, limits: options.limits }));
+    const search = runGrepAsync(ctx.root, pattern!, {
+      path: path || undefined,
+      glob: glob || undefined,
+      ignoreCase: args.ignore_case === true,
+      limits: options.limits,
+      timeoutS: options.grepTimeoutS ?? GREP_TIMEOUT_S,
+    });
+    return ok(await unlessStopped(search, ctx.signal));
   } catch (error) {
-    if (error instanceof PatternTooSlow) return failure(error.message);
     return failed(error);
-  } finally {
-    matcher?.close();
   }
 }
 
@@ -416,6 +319,7 @@ async function editTool(args: Record<string, unknown>, decision: "allow" | "ask"
     const kind = await kindOf(target.absolute);
     if (kind === null) throw new EditError("missing", target.relative);
     if (kind === "dir") throw new ToolError("is_directory", { path: target.relative });
+    if (kind === "special") throw new ToolError("special_file", { path: target.relative });
     const before = await readForChange(target.absolute, target.relative, options);
     const after = applyEdit(before, oldString!, newString!, { path: target.relative });
     const outcome = await ctx.approvals.change(
@@ -446,6 +350,7 @@ async function writeFileTool(args: Record<string, unknown>, decision: "allow" | 
     const target = writeTarget(ctx.root, path!);
     const kind = await kindOf(target.absolute);
     if (kind === "dir") throw new ToolError("is_directory", { path: target.relative });
+    if (kind === "special") throw new ToolError("special_file", { path: target.relative });
     const before = kind === "file" ? await readForChange(target.absolute, target.relative, options) : null;
     if (before === content) return ok(`${target.relative} already has exactly this content; nothing was written.`);
     const outcome = await ctx.approvals.change(
@@ -467,24 +372,25 @@ async function writeFileTool(args: Record<string, unknown>, decision: "allow" | 
   }
 }
 
-/** run_shell's text for a finished command: the SDK's `formatShell`, over output whose middle may already be cut (shell.ts). */
+/**
+ * run_shell's text for a finished command: the SDK's `formatShell` over the
+ * start and end the capture kept (shell.ts), with the bytes it dropped from
+ * between them as `omitted`.
+ */
 export function shellText(result: ShellResult, timeoutS: number, limits?: Limits): string {
-  const status = { exitCode: result.exitCode, timedOut: result.timedOut, stopped: result.stopped, timeoutS, limits };
-  if (result.omitted === 0) return formatShell(result.output, status);
-  // The head, the contract's marker and the tail are there already: nothing more to cut.
-  return formatShell(result.output, { ...status, limits: { ...limits, shell_output_max_bytes: Number.MAX_SAFE_INTEGER } });
+  return formatShell(result.output, { exitCode: result.exitCode, timedOut: result.timedOut, stopped: result.stopped, timeoutS, limits, omitted: result.omitted });
 }
 
 async function runShellTool(args: Record<string, unknown>, decision: "allow" | "ask", ctx: ToolContext, options: HostOptions): Promise<ToolOutcome> {
   const command = stringArg(args, "command");
   if (isOutcome(command)) return command;
   if (!command!.trim()) return failure("The command is empty.");
-  const max = limit("shell_timeout_s_max", options);
+  const max = limit("shell_timeout_s_max", options.limits);
   const given = args.timeout_s;
   if (given !== undefined && given !== null && (typeof given !== "number" || !Number.isInteger(given) || given < 1 || given > max)) {
     return failure(new ToolError("bad_timeout", { max }).message);
   }
-  const timeoutS = typeof given === "number" ? given : limit("shell_timeout_s_default", options);
+  const timeoutS = typeof given === "number" ? given : limit("shell_timeout_s_default", options.limits);
   if (decision === "ask") {
     const answer = await ctx.approvals.confirm(
       { kind: "shell", tool: "run_shell", title: `Run a command in ${ctx.root} (time limit ${timeoutS}s)`, detail: command! },
@@ -496,7 +402,7 @@ async function runShellTool(args: Record<string, unknown>, decision: "allow" | "
   const result = await run(command!, {
     cwd: ctx.root,
     timeoutMs: timeoutS * 1000,
-    maxBytes: limit("shell_output_max_bytes", options),
+    maxBytes: limit("shell_output_max_bytes", options.limits),
     signal: ctx.signal,
     onOutput: ctx.onOutput,
   });

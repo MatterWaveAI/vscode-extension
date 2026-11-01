@@ -1,3 +1,4 @@
+import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { PathRefusedError } from "../lib/sdk/agent/deny";
 import { confine } from "../lib/sdk/agent/confine";
@@ -17,31 +18,46 @@ export const MAX_READ_BYTES = 512 * 1024;
 
 export type ConfinedRead = { text: string; relative: string; truncated: boolean } | { refused: string } | null;
 
-/** The first `maxBytes` of a regular file as UTF-8, or null when there is no such file (a folder, a pipe, a device count as none). */
-export async function readHead(absolute: string, maxBytes = MAX_READ_BYTES): Promise<{ text: string; truncated: boolean } | null> {
-  let handle;
-  try {
-    handle = await open(absolute, "r");
-  } catch {
-    return null;
-  }
+// Non-blocking, so a pipe put where a file was is never waited on (Windows
+// has no such flag, nor pipes in the filesystem).
+const OPEN_FLAGS = constants.O_RDONLY | ((constants as Partial<Record<string, number>>).O_NONBLOCK ?? 0);
+const CHUNK = 1 << 20;
+
+/**
+ * At most `maxBytes` of the regular file at `absolute`, and its size (at
+ * least the bytes read, so a file that grew while it was read still counts
+ * as larger); null when it is not a regular file (a folder, a pipe, a
+ * device). An error opening or reading it is thrown.
+ */
+export async function readBytes(absolute: string, maxBytes: number): Promise<{ bytes: Buffer; size: number } | null> {
+  const handle = await open(absolute, OPEN_FLAGS);
   try {
     const info = await handle.stat();
     if (!info.isFile()) return null;
-    const size = Math.min(info.size, maxBytes);
-    const buffer = Buffer.alloc(size);
+    const chunks: Buffer[] = [];
     let read = 0;
-    while (read < size) {
-      const { bytesRead } = await handle.read(buffer, read, size - read, read);
+    while (read < maxBytes) {
+      const chunk = Buffer.allocUnsafe(Math.min(maxBytes - read, CHUNK, Math.max(info.size - read + 1, 8192)));
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
       if (bytesRead === 0) break;
+      chunks.push(chunk.subarray(0, bytesRead));
       read += bytesRead;
     }
-    return { text: new TextDecoder("utf-8").decode(buffer.subarray(0, read)), truncated: info.size > read };
-  } catch {
-    return null;
+    return { bytes: Buffer.concat(chunks, read), size: Math.max(info.size, read) };
   } finally {
     await handle.close();
   }
+}
+
+/** The first `maxBytes` of a regular file as UTF-8, or null when there is no such file (a folder, a pipe, a device count as none). */
+export async function readHead(absolute: string, maxBytes = MAX_READ_BYTES): Promise<{ text: string; truncated: boolean } | null> {
+  let read;
+  try {
+    read = await readBytes(absolute, maxBytes);
+  } catch {
+    return null;
+  }
+  return read && { text: new TextDecoder("utf-8").decode(read.bytes), truncated: read.size > read.bytes.length };
 }
 
 /** `relative` under `root`, confined, then read: the text, a refusal (the confinement's sentence), or null when it does not exist. */

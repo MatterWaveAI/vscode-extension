@@ -25,17 +25,21 @@
 //   E2E_AUTH=none                          an API started with MW_AUTH_MODE=none
 //                                          (a laptop run): no account, no
 //                                          sign-in, the dev principal approves
+//   E2E_VSIX                               a built .vsix: the agent suite runs it,
+//                                          installed into the test editor, instead
+//                                          of this checkout (what ships is what is
+//                                          tested, grep's worker thread included)
 //
 // A device key, not the session, signs the extension in: that is how a
 // person signs it in, it works on every plan, and the session is the
 // browser's.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
-import { runTests } from "@vscode/test-electron";
+import { runTests, runVSCodeCommand } from "@vscode/test-electron";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -45,6 +49,8 @@ const noAuth = process.env.E2E_AUTH === "none";
 const baseUrl = (process.env.E2E_BASE_URL || "").replace(/\/+$/, "");
 const model = process.env.E2E_MODEL || "grt-nano";
 const caFile = process.env.E2E_CA_FILE ? path.resolve(process.env.E2E_CA_FILE) : "";
+const vsix = process.env.E2E_VSIX ? path.resolve(process.env.E2E_VSIX) : "";
+const cachePath = path.join(root, ".vscode-test");
 
 /** Why the deployment suite cannot run here, or null when it can. */
 const deploymentSkip =
@@ -53,6 +59,10 @@ const deploymentSkip =
     : !baseUrl
       ? "E2E_BASE_URL is not set"
       : null;
+if (vsix && !existsSync(vsix)) {
+  console.error(`vscode e2e: the .vsix ${vsix} does not exist (E2E_VSIX).`);
+  process.exit(1);
+}
 if (caFile && !existsSync(caFile)) {
   console.error(`vscode e2e: the CA file ${caFile} does not exist (E2E_CA_FILE).`);
   process.exit(1);
@@ -181,16 +191,39 @@ const LAUNCH_FLAGS = [
   ...(process.platform === "linux" ? ["--password-store=basic", "--disable-gpu", "--disable-dev-shm-usage"] : []),
 ];
 
+/**
+ * The folder E2E_VSIX installs to, through the test editor's own CLI, in an
+ * extensions folder of the run's own: exactly the files the .vsix carries.
+ */
+async function installVsix() {
+  const extensionsDir = path.join(cachePath, "vsix-extensions");
+  rmSync(extensionsDir, { recursive: true, force: true });
+  await runVSCodeCommand(["--install-extension", vsix, `--extensions-dir=${extensionsDir}`], { cachePath });
+  const installed = readdirSync(extensionsDir).find((name) => name.startsWith("matterwave.matterwave-"));
+  if (!installed) throw new Error(`installing ${vsix} left no matterwave.matterwave-* in ${extensionsDir}`);
+  console.log(`vscode e2e: the agent suite runs the installed ${path.basename(vsix)} (${installed})`);
+  return path.join(extensionsDir, installed);
+}
+
 /** The agent suite: a scratch folder as the workspace, the fake /v1 inside the suite. */
 async function runAgentSuite() {
+  let extensionDevelopmentPath = root;
+  let suite = path.join(root, "dist", "e2e");
+  if (vsix) {
+    extensionDevelopmentPath = await installVsix();
+    // The suite runs from inside the installed extension's folder: VS Code gives a file the
+    // `vscode` API of the extension it sits in, and the suite stubs that extension's prompts.
+    suite = path.join(extensionDevelopmentPath, "e2e-suite");
+    cpSync(path.join(root, "dist", "e2e"), suite, { recursive: true });
+  }
   const workspace = mkdtempSync(path.join(tmpdir(), "mw-e2e-agent-"));
   mkdirSync(path.join(workspace, "src"));
   writeFileSync(path.join(workspace, "src", "greet.ts"), "");
   try {
     await runTests({
-      extensionDevelopmentPath: root,
-      extensionTestsPath: path.join(root, "dist", "e2e", "index.js"),
-      cachePath: path.join(root, ".vscode-test"),
+      extensionDevelopmentPath,
+      extensionTestsPath: path.join(suite, "index.js"),
+      cachePath,
       launchArgs: [workspace, ...LAUNCH_FLAGS],
       extensionTestsEnv: { ELECTRON_RUN_AS_NODE: undefined, E2E_SUITE: "agent", E2E_WORKSPACE: workspace },
     });
@@ -214,7 +247,7 @@ async function main() {
     await runTests({
       extensionDevelopmentPath: root,
       extensionTestsPath: path.join(root, "dist", "e2e", "index.js"),
-      cachePath: path.join(root, ".vscode-test"),
+      cachePath,
       launchArgs: LAUNCH_FLAGS,
       extensionTestsEnv: {
         E2E_SUITE: "deployment",

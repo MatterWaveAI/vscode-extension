@@ -1,8 +1,7 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { fill } from "../lib/sdk/agent/fill";
-import { OUTPUTS, shellFor, utf8Head, utf8Tail } from "../lib/sdk/agent/node";
+import { fill, shellFor } from "../lib/sdk/agent/node";
 import { childEnv } from "./env";
 
 /**
@@ -42,11 +41,12 @@ export interface ShellResult {
   /** The exit code, or null when the process was killed (by Stop or the timeout). */
   exitCode: number | null;
   /**
-   * What the command wrote, whole; or, past what is kept, its head and tail
-   * with the contract's cut marker between them (`omitted` > 0).
+   * What the command wrote, whole; or, past what is kept, its start and its
+   * end joined, with `omitted` the bytes dropped from between them. The
+   * SDK's `formatShell(output, { omitted })` makes the cut the model sees.
    */
   output: string;
-  /** Bytes of output dropped from the middle and named by the marker in `output`; 0 when nothing was. */
+  /** Bytes of output dropped from between the start and the end in `output`; 0 when nothing was. */
   omitted: number;
   timedOut: boolean;
   stopped: boolean;
@@ -338,10 +338,10 @@ export function systemdScopes(platform: NodeJS.Platform = process.platform): Pro
 
 /**
  * A command's output as it streams, kept to what the model can be shown: the
- * first half of the cap and the last half, plus a few bytes either side so a
- * character cut at the edge decodes as it would whole, and a count of the
- * rest. The cut itself is the SDK's (`utf8Head`, `utf8Tail` and the
- * contract's marker), made here because the middle is never held.
+ * first half of the cap and the last half, plus a few bytes either side so
+ * each end still holds its half in whole characters, and a count of the
+ * bytes dropped between them. That is what `formatShell` needs to cut the
+ * text exactly as it would cut the whole output, which is never held.
  */
 export class CappedOutput {
   private readonly head: Buffer[] = [];
@@ -350,14 +350,13 @@ export class CappedOutput {
   private tailBytes = 0;
   private dropped = 0;
   private total = 0;
-  private readonly half: number;
   private readonly headRoom: number;
   private readonly tailRoom: number;
 
   constructor(private readonly maxBytes: number) {
-    this.half = Math.floor(maxBytes / 2);
-    this.headRoom = this.half + 3;
-    this.tailRoom = maxBytes - this.half + 3;
+    const half = Math.floor(maxBytes / 2);
+    this.headRoom = half + 3;
+    this.tailRoom = maxBytes - half + 3;
   }
 
   push(chunk: Buffer): void {
@@ -391,15 +390,33 @@ export class CappedOutput {
     return this.total > this.maxBytes;
   }
 
-  /** The output whole when all of it is still held; otherwise the head, the marker and the tail. */
+  /**
+   * The output whole when all of it is still held; otherwise the start and
+   * the end kept, each to whole characters, joined, and the bytes dropped
+   * from between them (a character the edge of either end cut included).
+   */
   result(): { output: string; omitted: number } {
     if (this.dropped === 0) return { output: Buffer.concat([...this.head, ...this.tail]).toString("utf8"), omitted: 0 };
-    const head = Buffer.concat(this.head).toString("utf8");
-    const tail = Buffer.concat(this.tail).toString("utf8");
-    const kept = { head: utf8Head(head, this.half), tail: utf8Tail(tail, this.maxBytes - this.half) };
-    const omitted = this.total - Buffer.byteLength(kept.head) - Buffer.byteLength(kept.tail);
-    return { output: `${kept.head}\n${fill(OUTPUTS.shell.cut, { omitted: String(omitted) })}\n${kept.tail}`, omitted };
+    const head = Buffer.concat(this.head);
+    const tail = Buffer.concat(this.tail);
+    const headEnd = wholeEnd(head);
+    let tailStart = 0;
+    while (tailStart < 3 && tailStart < tail.length && (tail[tailStart]! & 0xc0) === 0x80) tailStart += 1;
+    return {
+      output: head.subarray(0, headEnd).toString("utf8") + tail.subarray(tailStart).toString("utf8"),
+      omitted: this.dropped + (head.length - headEnd) + tailStart,
+    };
   }
+}
+
+/** Where `bytes` stop holding whole UTF-8 characters: before a last one cut short, or at their end. */
+function wholeEnd(bytes: Buffer): number {
+  let lead = bytes.length - 1;
+  while (lead > bytes.length - 4 && lead > 0 && (bytes[lead]! & 0xc0) === 0x80) lead -= 1;
+  const first = bytes[lead];
+  if (first === undefined) return bytes.length;
+  const length = first >= 0xf8 ? 1 : first >= 0xf0 ? 4 : first >= 0xe0 ? 3 : first >= 0xc0 ? 2 : 1;
+  return bytes.length - lead < length ? lead : bytes.length;
 }
 
 /**

@@ -12,6 +12,7 @@ import { MAX_TOOLS_PER_SERVER, McpManager, uniqueToolName } from "../../src/agen
 import { isMatterWaveMcp, resolveMcpServers, serverKey, type PendingServer } from "../../src/agent/mcpConfig";
 import { AgentSession, revealInvisible, type AgentSessionDeps, type AgentSettings } from "../../src/agent/session";
 import { runShell, type ShellResult } from "../../src/agent/shell";
+import { ToolError } from "../../src/lib/sdk/agent/node";
 import type { ModeName } from "../../src/lib/sdk/agent/types";
 import { FakeModel, FakeReview, MemoryState, ScriptedApprovals, callChunk, textChunk, until, workspace } from "./helpers";
 
@@ -150,25 +151,43 @@ describe("/restore", () => {
 });
 
 describe("grep with a pattern that backtracks without end", () => {
-  it("gives up after its deadline with a sentence for the model, and the extension host keeps running meanwhile", async () => {
+  function grep(grepTimeoutS: number, signal = new AbortController().signal) {
     writeFileSync(join(ws.root, "src", "trap.txt"), `${"a".repeat(40)}!\n`);
-    const spec = contractTools().find((t) => t.name === "grep")!;
+    const spec = contractTools({ grepTimeoutS }).find((t) => t.name === "grep")!;
+    return spec.run({ pattern: "(a+)+$", path: "src" }, "allow", {
+      root: ws.root,
+      mode: "ask",
+      signal,
+      approvals: new ScriptedApprovals(),
+      call: { id: "g", type: "function", function: { name: "grep", arguments: "{}" } },
+    });
+  }
+
+  it("gives up at its deadline with the contract's timeout, and the extension host keeps running meanwhile", async () => {
     let ticks = 0;
     const ticker = setInterval(() => (ticks += 1), 100);
+    const started = Date.now();
     try {
-      const out = await spec.run({ pattern: "(a+)+$", path: "src" }, "allow", {
-        root: ws.root,
-        mode: "ask",
-        signal: new AbortController().signal,
-        approvals: new ScriptedApprovals(),
-        call: { id: "g", type: "function", function: { name: "grep", arguments: "{}" } },
-      });
-      expect(out.isError).toBe(true);
-      expect(out.content).toContain("took longer than 5s to search src/");
-      expect(ticks).toBeGreaterThan(20);
+      const out = await grep(2);
+      expect(out).toEqual({ content: new ToolError("timeout", { pattern: "(a+)+$", timeout_s: "2" }).message, isError: true });
+      expect(out.content).toBe("The search for (a+)+$ stopped after 2 s without finishing. Try a simpler pattern, a narrower path or a glob.");
+      expect(Date.now() - started).toBeLessThan(10_000);
+      expect(ticks).toBeGreaterThan(10);
     } finally {
       clearInterval(ticker);
     }
+  }, 30_000);
+
+  it("answers Stop at once, without waiting for the deadline", async () => {
+    const stop = new AbortController();
+    const running = grep(3, stop.signal);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const stoppedAt = Date.now();
+    stop.abort();
+    await expect(running).rejects.toMatchObject({ name: "AbortError" });
+    expect(Date.now() - stoppedAt).toBeLessThan(1_000);
+    // The search Stop overtook ends at its own deadline; let it, so no worker outlives the test.
+    await new Promise((resolve) => setTimeout(resolve, 3_500));
   }, 30_000);
 });
 

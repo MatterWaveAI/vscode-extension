@@ -7,10 +7,12 @@
  * its links (symbolic links, and junctions on Windows) and returns where it
  * really leads, or throws `PathRefusedError` before anything is read or
  * written: for a `..` segment, an absolute path outside the root, a link
- * that leads out of it, a name Windows would read as another file or a
- * device (a `:` stream, a trailing dot or space, `NUL` and the other reserved
- * names, a verbatim or UNC path), a path on the deny list (by its own name or
- * its target's), or, for a write, a protected path the user has not approved.
+ * that leads out of it or loops, a name Windows would read as another file or
+ * a device (a `:` stream, a trailing dot or space, `NUL` and the other
+ * reserved names, a verbatim or UNC path; only the names below the root
+ * count), a path on the deny list (by its own name or its target's), or, for
+ * a write, a protected path the user has not approved. Nothing else escapes
+ * it: whatever the OS makes of a path, the error is a `PathRefusedError`.
  *
  * Confinement is not a sandbox. It keeps the file tools inside the root;
  * `run_shell` can reach anything the user can, which is why commands ask.
@@ -61,7 +63,8 @@ function stripVerbatim(path: string): string {
  * `path` with every link in it followed, whether or not its target exists:
  * the deepest part that exists is resolved by the OS, and a dangling link is
  * read and followed by hand, so a write through it is caught as well as a
- * read.
+ * read. An error with `code` `ELOOP` when the links loop, or take more than
+ * 40 hops.
  */
 export function resolveLinks(path: string): string {
   let current = nodePath.resolve(path);
@@ -89,7 +92,7 @@ export function resolveLinks(path: string): string {
     }
     return rest ? nodePath.join(real, rest) : real;
   }
-  throw new Error(`too many levels of links resolving ${path}`);
+  throw Object.assign(new Error(`ELOOP: too many levels of links, ${path}`), { code: "ELOOP", path });
 }
 
 function normcase(path: string): string {
@@ -143,11 +146,28 @@ export function confine(
   if (!path || path.trim() === "") throw new PathRefusedError("empty", path ?? "");
   if (path.includes("\0")) throw new PathRefusedError("outside", path.split("\0").join(""));
   if (path.split(/[\\/]/).includes("..")) throw new PathRefusedError("parent", path);
-  const alias = windowsAlias(path);
-  if (alias !== null) throw new PathRefusedError(alias, path);
+  try {
+    return confineResolved(root, path, options);
+  } catch (error) {
+    if (error instanceof PathRefusedError) throw error;
+    const code = (error as { code?: unknown } | null)?.code;
+    throw new PathRefusedError(code === "ELOOP" ? "loop" : "outside", path);
+  }
+}
 
+function confineResolved(
+  root: string,
+  path: string,
+  options: { deny?: DenyList; write?: boolean; approved?: boolean },
+): ConfinedPath {
   const givenRoot = nodePath.resolve(root);
   const realRoot = resolveLinks(givenRoot);
+  // Only the names below the root are the agent's; the folders above it are
+  // the user's, whatever they are called.
+  let alias = windowsAlias(path, givenRoot);
+  if (alias !== null && realRoot !== givenRoot) alias = windowsAlias(path, realRoot);
+  if (alias !== null) throw new PathRefusedError(alias, path);
+
   let lexical: string;
   let lexicalRel: string;
   if (isAbsolute(path)) {

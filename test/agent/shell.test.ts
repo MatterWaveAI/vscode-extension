@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { describe, expect, it } from "vitest";
+import { shellText } from "../../src/agent/host";
 import { CappedOutput, runShell, shellArgv, strays } from "../../src/agent/shell";
 import { until } from "./helpers";
 
@@ -48,8 +49,8 @@ describe("runShell", () => {
     expect(result.truncated).toBe(true);
     expect(result.output).toContain("line 1");
     expect(result.output).toContain("line 4000");
-    expect(result.output).toMatch(/\n\[\.\.\. \d+ bytes of output cut from the middle \.\.\.\]\n/);
     expect(result.omitted).toBeGreaterThan(0);
+    expect(shellText(result, 55)).toMatch(/\n\[\.\.\. \d+ bytes of output cut from the middle \.\.\.\]\n/);
   }, 60_000);
 
   it("stops a command at its timeout", async () => {
@@ -199,7 +200,23 @@ describe("the shell's output capture", () => {
     const large = new CappedOutput(10);
     for (const piece of ["01234", "56789", "ABCDE", "FGHIJ", "KLMNO"]) large.push(Buffer.from(piece));
     expect(large.truncated).toBe(true);
-    expect(large.result()).toEqual({ output: "01234\n[... 15 bytes of output cut from the middle ...]\nKLMNO", omitted: 15 });
+    // Half the cap and 3 bytes at each end, joined; the SDK's formatShell makes the cut.
+    expect(large.result()).toEqual({ output: "01234567HIJKLMNO", omitted: 9 });
+    expect(shellText({ ...large.result(), exitCode: 0, timedOut: false, stopped: false, truncated: true, durationMs: 0 }, 1, { shell_output_max_bytes: 10 })).toBe(
+      "Exit code 0\n01234\n[... 15 bytes of output cut from the middle ...]\nKLMNO",
+    );
+  });
+
+  it("counts a character either end cut, and bytes that are not UTF-8, among the bytes dropped", () => {
+    const euros = new CappedOutput(10);
+    euros.push(Buffer.from("€".repeat(10)));
+    // 8 bytes at each end hold two whole euro signs; the rest of the 30 bytes are dropped.
+    expect(euros.result()).toEqual({ output: "€€€€", omitted: 18 });
+    const binary = new CappedOutput(10);
+    binary.push(Buffer.alloc(40, 0xff));
+    const kept = binary.result();
+    expect(kept.omitted).toBe(24);
+    expect(() => shellText({ ...kept, exitCode: 0, timedOut: false, stopped: false, truncated: true, durationMs: 0 }, 1, { shell_output_max_bytes: 10 })).not.toThrow();
   });
 
   it("finds a POSIX command's strays by parent and by session, never the extension host", () => {

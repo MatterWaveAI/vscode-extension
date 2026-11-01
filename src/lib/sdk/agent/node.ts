@@ -4,7 +4,10 @@
  * VS Code extension host, a CLI). Browser code imports the `agent`
  * namespace from `@matterwave/sdk` instead, which is everything here but
  * `confine`, `loadDenyList`, `resolveLinks` and the search: `walk`,
- * `loadSearchIgnore`, `runReadFile`, `runListDir`, `runGlob` and `runGrep`.
+ * `loadSearchIgnore`, `runReadFile`, `runListDir`, `runGlob` and `runGrep`,
+ * and their async forms `walkAsync`, `runGlobAsync` and `runGrepAsync`, which
+ * yield to the event loop (`runGrepAsync` with `timeoutS` runs the regex on a
+ * worker thread it ends at the deadline).
  *
  *     import { confine, applyEdit, unifiedDiff, PathRefusedError } from "@matterwave/sdk/agent";
  *
@@ -17,4 +20,14 @@
 export * from "./index.js";
 export { confine, loadDenyList, resolveLinks } from "./confine.js";
 export type { ConfinedPath } from "./confine.js";
-export { loadSearchIgnore, runGlob, runGrep, runListDir, runReadFile, walk } from "./search.js";
+export {
+  loadSearchIgnore,
+  runGlob,
+  runGlobAsync,
+  runGrep,
+  runGrepAsync,
+  runListDir,
+  runReadFile,
+  walk,
+  walkAsync,
+} from "./search.js";

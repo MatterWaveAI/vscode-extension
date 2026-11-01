@@ -3,7 +3,7 @@
  * browser-safe. The main entry re-exports this as the `agent` namespace:
  *
  *     import { agent } from "@matterwave/sdk";
- *     agent.CONTRACT_VERSION;                  // "1.1.0"
+ *     agent.CONTRACT_VERSION;                  // "1.2.0"
  *     const tools = agent.toolsForMode("plan"); // the `tools` for /v1: read-only
  *     agent.allowed("edit", "ask");            // "ask"
  *     agent.allowed("web_fetch", "ask", "network");            // "ask": a client's own tool, by kind
@@ -12,8 +12,9 @@
  *
  * Path confinement and the search walker read the filesystem, so they are in
  * the Node-only entry, `@matterwave/sdk/agent`, which exports all of this plus
- * `confine`, `loadDenyList`, `resolveLinks`, `walk`, `loadSearchIgnore` and
- * the read tools `runReadFile`, `runListDir`, `runGlob` and `runGrep`.
+ * `confine`, `loadDenyList`, `resolveLinks`, `walk`, `loadSearchIgnore`, the
+ * read tools `runReadFile`, `runListDir`, `runGlob` and `runGrep`, and the
+ * async `walkAsync`, `runGlobAsync` and `runGrepAsync`.
  *
  * The contract is generated from the Python SDK's contract.json, the one
  * source both SDKs share.
@@ -76,10 +77,21 @@ export { allowed, mode, platformName, refusal, shellFor, systemPrompt, toolsForM
 export type { PromptTool } from "./modes.js";
 export { EditError, applyEdit, occurrences } from "./edit.js";
 export { NO_NEWLINE, splitLines, unifiedDiff } from "./diff.js";
-export { DenyList, PROTECTED_LIST, PathRefusedError, globToRegex, isAbsolute, isProtected, windowsAlias } from "./deny.js";
+export {
+  DenyList,
+  GlobError,
+  PROTECTED_LIST,
+  PathRefusedError,
+  globToRegex,
+  isAbsolute,
+  isProtected,
+  windowsAlias,
+} from "./deny.js";
+export { fill } from "./fill.js";
 export { IgnoreFile, SearchIgnore } from "./ignore.js";
 export {
   ToolError,
+  checkLines,
   compareCodePoints,
   decodeText,
   formatGlob,
@@ -90,6 +102,7 @@ export {
   globMatches,
   grepLine,
   isBinary,
+  limit,
   textLines,
   utf8Head,
   utf8Tail,

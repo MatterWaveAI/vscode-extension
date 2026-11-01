@@ -3,11 +3,11 @@
 // Do not edit: change the JSON there and regenerate.
 
 /** SHA-256 of the contract's canonical JSON; tests/agent-contract.test.ts recomputes it. */
-export const CONTRACT_SHA256 = "90ead3765a901d2b44b7e9b05e551a263a4910540a4359895e1acf640a0eea8b";
+export const CONTRACT_SHA256 = "86240640559d7c90e3a88f4ea18e39b09a070a542f7999ca4c6d7ffac138dc76";
 
 /** The agent tool contract, as decoded from contract.json. */
 export const CONTRACT = {
-  "contract_version": "1.1.0",
+  "contract_version": "1.2.0",
   "about": "The MatterWave agent tool contract: the local tools a coding client offers the model, the approval modes that gate them, the paths they may touch and the agent-mode system prompt, the text the read tools and run_shell return, and the conformance cases every client must reproduce. This file is the one source; the TypeScript SDK's copy is generated from it by scripts/gen_agent_contract.py. Versioning: major when a tool, field or mode is removed or changes meaning, minor when one is added, patch when only text changes.",
   "tools": [
     {
@@ -314,7 +314,7 @@ export const CONTRACT = {
     }
   },
   "confinement": {
-    "rules": "Every path is resolved against the workspace root and must stay under it after symbolic links (and Windows junctions) are followed. A path with a `..` segment is refused outright, an absolute path is allowed only when it resolves under the root, and a path that matches the deny list, by its own name or by where its links lead, is refused for reading as well as writing. On every platform, so that the clients agree, a path is refused when Windows could read it as something other than the file it seems to name: a ':' in a name (an alternate data stream such as key.pem:x, or a drive-relative path), a name that ends in a dot or a space (Windows drops them), a reserved device name (CON, PRN, AUX, NUL, COM1-9, LPT1-9, CONIN$, CONOUT$, any case, with or without an extension), or a \\\\?\\, \\\\.\\, \\??\\ or network (UNC) path; a refusal is always the SDK's own error. Protected paths (the deny file, the agent's settings folder, the context files, and the shell startup files and credential folders that matter when the root is the home folder or above it) can be read, but every write to one asks the user first, in each mode that allows writes, yolo included; `confine` refuses such a write unless it says the user approved it.",
+    "rules": "Every path is resolved against the workspace root and must stay under it after symbolic links (and Windows junctions) are followed. A path with a `..` segment is refused outright, an absolute path is allowed only when it resolves under the root, and a path that matches the deny list, by its own name or by where its links lead, is refused for reading as well as writing. On every platform, so that the clients agree, a path is refused when Windows could read it as something other than the file it seems to name: a ':' in a name (an alternate data stream such as key.pem:x, or a drive-relative path), a name that ends in a dot or a space (Windows drops them), a reserved device name (CON, PRN, AUX, NUL, COM1-9, LPT1-9, CONIN$, CONOUT$, any case, with or without an extension), or a \\\\?\\, \\\\.\\, \\??\\ or network (UNC) path. The UNC check reads the whole path, but the name checks read only the names below the root: an absolute path whose leading names are the root's (the root as given or as its links resolve, compared name by name with case ignored and / and \\ both separators) is checked from the name after them, so a root inside a folder such as /x/con/ or /x/a:b/ still takes absolute paths, and any other path is checked whole. Links are followed for at most 40 hops; a link that loops, or needs more, is refused as `loop`. A refusal is always the SDK's own error, whatever the OS makes of the path. Protected paths (the deny file, the agent's settings folder, the context files, and the shell startup files and credential folders that matter when the root is the home folder or above it) can be read, but every write to one asks the user first, in each mode that allows writes, yolo included; `confine` refuses such a write unless it says the user approved it.",
     "deny": [
       ".env*",
       "*.pem",
@@ -344,15 +344,16 @@ export const CONTRACT = {
     "settings_dir": ".matterwave/",
     "context_files": [
       "MATTERWAVE.md",
-      "MATTERWAVE.local.md",
-      "AGENTS.md"
+      "AGENTS.md",
+      "MATTERWAVE.local.md"
     ],
-    "pattern_syntax": "One pattern per line of the deny file; blank lines and lines starting with # are skipped, and a line starting with ! is ignored because a deny cannot be undone. A pattern with no / other than a trailing one matches any segment of the path, and a match on a directory covers everything under it. A trailing / matches directories only. A pattern with a / elsewhere is anchored at the workspace root (a leading / is dropped). * and ? match within one segment, [...] is a character class, ** matches any number of segments. Matching ignores case.",
+    "pattern_syntax": "A leading UTF-8 byte-order mark is dropped. One pattern per line of the deny file; blank lines and lines starting with # are skipped, and a line starting with ! is ignored because a deny cannot be undone. A pattern with no / other than a trailing one matches any segment of the path, and a match on a directory covers everything under it. A trailing / matches directories only. A pattern with a / elsewhere is anchored at the workspace root (a leading / is dropped). * and ? match within one segment, [...] is a character class (as search.pattern_syntax spells it), ** matches any number of segments. Matching ignores case. A line whose pattern is invalid (a [...] range that runs backwards, such as [z-a]) is skipped, as git skips it.",
     "refusals": {
       "empty": "Refused: the path is empty.",
       "parent": "Refused: {path} goes through '..'. Paths must stay inside the workspace.",
       "outside": "Refused: {path} is outside the workspace root.",
       "symlink": "Refused: {path} is a link that leads outside the workspace root.",
+      "loop": "Refused: {path} is a link that loops back on itself or goes through too many links, so it leads nowhere.",
       "denied": "Refused: {path} is protected (a secret, a key, .git or an entry in .matterwaveignore) and is not sent to the model.",
       "protected": "Refused: {path} can be read but not changed by the agent.",
       "stream": "Refused: {path} has a ':' in a name, which Windows reads as an alternate data stream or another drive, not the file it seems to name.",
@@ -362,11 +363,11 @@ export const CONTRACT = {
     }
   },
   "search": {
-    "rules": "glob, grep and list_dir leave out what the deny list refuses and what the ignore files ignore. Each directory from the workspace root down may hold a .gitignore and a .matterwaveignore; their patterns apply to that directory and everything under it, and no file above the root is read. A path is checked against every rule that applies to it, from the root's files down to its own directory's, the .gitignore before the .matterwaveignore in each, and the last rule that matches decides, so a ! rule re-includes. A path inside an ignored directory stays ignored whatever a ! rule says. The path a search is given is not itself checked against the ignore rules, though what is under it is; the deny list applies throughout. A link to a file is followed when it leads inside the root to a path that is not denied; a link to a directory is listed by list_dir but not walked into.",
-    "pattern_syntax": "The .gitignore syntax: blank lines and lines starting with # are skipped (\\# for a literal #); trailing spaces are dropped unless escaped with a backslash; a leading ! re-includes (\\! for a literal !); a trailing / matches directories only; a / at the start or in the middle anchors the pattern at the directory holding the file, and a pattern with no such / matches a name at any depth under it. * and ? match within one segment, [...] is a character class, ** matches any number of segments, and a backslash makes the next character literal. Matching ignores case, as the deny list's does, so every client on every platform skips the same files.",
+    "rules": "glob, grep and list_dir leave out what the deny list refuses and what the ignore files ignore. Each directory from the workspace root down may hold a .gitignore and a .matterwaveignore; their patterns apply to that directory and everything under it, and no file above the root is read. A path is checked against every rule that applies to it, from the root's files down to its own directory's, the .gitignore before the .matterwaveignore in each, and the last rule that matches decides, so a ! rule re-includes. A path inside an ignored directory stays ignored whatever a ! rule says. The path a search is given is not itself checked against the ignore rules, though what is under it is; the deny list applies throughout. A link to a file is followed when it leads inside the root to a path that is not denied; a link to a directory is listed by list_dir but not walked into. Only regular files and directories are walked and searched: a pipe, socket or device, or a link to one, is left out, and a tool given one as its path returns `special_file` without waiting on it.",
+    "pattern_syntax": "The .gitignore syntax, a leading UTF-8 byte-order mark dropped: blank lines and lines starting with # are skipped (\\# for a literal #); trailing spaces are dropped unless escaped with a backslash; a leading ! re-includes (\\! for a literal !); a trailing / matches directories only; a / at the start or in the middle anchors the pattern at the directory holding the file, and a pattern with no such / matches a name at any depth under it. * and ? match within one segment, [...] is a character class (a ! or ^ right after the [ negates it, a ] right after the [ or the negation is a literal ], a-z is a range and every other character stands for itself; a [ with no ] after it is a literal [), ** matches any number of segments, and a backslash makes the next character literal. Matching ignores case, as the deny list's does, so every client on every platform skips the same files. A line whose pattern is invalid (a [...] range that runs backwards, such as [z-a]) is skipped, as git skips it.",
     "order": "glob and grep report in walk order: depth first, and within a directory its files before its subdirectories, each in code-point order of their names. list_dir lists directories first, then files, each in code-point order.",
-    "glob": "A glob pattern is matched against a file's path relative to the search's `path`; a leading / anchors it there and a leading ./ is dropped. A pattern with no other / matches the file's name at any depth. Only files match, and matching ignores case. grep's `glob` filter follows the same rule, against the file's name when `path` is a file.",
-    "grep": "The pattern is a regular expression in the client's own dialect, tried against each line on its own; the conformance cases keep to what every dialect shares. Binary files and files over grep_max_file_bytes are skipped. A line is reported once however often it matches."
+    "glob": "A glob pattern is matched against a file's path relative to the search's `path`; a leading / anchors it there and a leading ./ is dropped. A pattern with no other / matches the file's name at any depth. Only files match, and matching ignores case. grep's `glob` filter follows the same rule, against the file's name when `path` is a file. A glob with a [...] range that runs backwards ([z-a]) is invalid: glob, and grep for its glob filter, return `invalid_glob` before anything is searched.",
+    "grep": "The pattern is a regular expression in the client's own dialect, tried against each line on its own; the conformance cases keep to what every dialect shares. Binary files and files over grep_max_file_bytes are skipped. A line is reported once however often it matches. A client may bound the whole search with a time limit of its own; past it grep returns `timeout` and no matches. Run the pattern where it can be stopped (a worker thread, another process): a pattern can take exponential time on one line."
   },
   "edit": {
     "crlf_fallback": true,
@@ -418,7 +419,7 @@ export const CONTRACT = {
   "outputs": {
     "rules": "What the read tools and run_shell return to the model; {placeholders} are filled literally. Paths in output are relative to the workspace root with / separators (. for the root). A file is binary when a NUL byte is in its first binary_sniff_bytes; text is decoded as UTF-8, an invalid byte becoming U+FFFD. Lines split at LF, each line's trailing CR is dropped, and a final LF does not start another line. An error is returned as the tool's result with the client's error flag set, as is a refusal from confinement or approval.",
     "read_file": {
-      "rules": "The lines from start_line (default 1) to end_line (default, and at most, the last line), each as `line`, joined with LF and no LF after the last. Output stops before a line that would pass read_max_lines lines or read_max_bytes bytes (each line counted in UTF-8 with its LF) and `cut` follows on a line of its own; a first line that alone passes read_max_bytes is shown up to that many bytes, ending on a character boundary, and `line_cut` follows instead. An empty file gives `empty`. Errors, checked in this order: `bad_line`, `end_before_start`, then `not_found`, `is_directory`, `too_large` (over read_max_file_bytes), `binary` and `past_end`.",
+      "rules": "The lines from start_line (default 1) to end_line (default, and at most, the last line), each as `line`, joined with LF and no LF after the last. Output stops before a line that would pass read_max_lines lines or read_max_bytes bytes (each line counted in UTF-8 with its LF) and `cut` follows on a line of its own; a first line that alone passes read_max_bytes is shown up to that many bytes, ending on a character boundary, and `line_cut` follows instead. An empty file gives `empty`. Errors, checked in this order: `bad_line`, `end_before_start`, then `not_found`, `special_file` (a pipe, socket or device), `is_directory`, `too_large` (over read_max_file_bytes), `binary` and `past_end`. No more than read_max_file_bytes + 1 bytes are read, so a file that grows after its size is checked is still `too_large`.",
       "line": "{n}\t{text}",
       "empty": "({path} is empty.)",
       "cut": "[Cut off at the read limit: showing lines {first}-{last} of {total}. Pass start_line={next} to read on.]",
@@ -443,7 +444,7 @@ export const CONTRACT = {
       "cut": "[Stopped at {limit} matches: narrow the pattern, the path or the glob to see the rest.]"
     },
     "shell": {
-      "rules": "The status line, then the output (stdout and stderr together, as they arrived) or `no_output`, on the lines after it. Output over shell_output_max_bytes keeps its first half and its last half (half rounded down for the first, in UTF-8 bytes, each cut back to a character boundary) with `cut` on a line of its own between them; `omitted` counts the bytes left out. A timeout outranks a stop by the user, which outranks the exit code.",
+      "rules": "The status line, then the output (stdout and stderr together, as they arrived) or `no_output`, on the lines after it. Output over shell_output_max_bytes keeps its first half and its last half (half rounded down for the first, in UTF-8 bytes, each cut back to a character boundary) with `cut` on a line of its own between them; `omitted` counts the bytes left out. A timeout outranks a stop by the user, which outranks the exit code. A client that kept only the start and the end of a long output passes the two joined and `omitted`, the bytes it dropped from between them: the text is cut as though it were the whole output (the first half from its start, the last half from what follows that), `omitted` is added to the count, and `cut` always shows. Keeping at least the first and the last half of shell_output_max_bytes, in whole characters, gives the text the whole output would.",
       "exit": "Exit code {code}",
       "signal": "Exit code none: the process was ended by a signal.",
       "timeout": "Stopped after {timeout_s} s: the command ran past its timeout, and it and its child processes were ended.",
@@ -462,7 +463,10 @@ export const CONTRACT = {
       "past_end": "start_line {start_line} is past the end of {path} ({total} lines).",
       "empty_pattern": "The pattern is empty.",
       "invalid_regex": "The pattern {pattern} is not a valid regular expression: {error}",
-      "bad_timeout": "timeout_s must be a whole number of seconds from 1 to {max}."
+      "bad_timeout": "timeout_s must be a whole number of seconds from 1 to {max}.",
+      "invalid_glob": "The glob {glob} is not valid: a range in a [...] class runs backwards (z-a rather than a-z).",
+      "special_file": "{path} is a pipe, socket or device, not a file or directory, so it is not opened.",
+      "timeout": "The search for {pattern} stopped after {timeout_s} s without finishing. Try a simpler pattern, a narrower path or a glob."
     }
   },
   "system_prompt": {
@@ -475,7 +479,7 @@ export const CONTRACT = {
       "mode_summary",
       "tools"
     ],
-    "slots": "Two optional sections follow the template, each after a blank line, and the prompt is the template alone when neither is used. Extra tools (a client's own: web_fetch, MCP tools, todo_write) are given as a name and a description; their names join {tools} after the contract's, and `extra_tools` lists them, each description made one line (every run of whitespace becomes one space, the ends are trimmed) and cut to description_max_chars code points, the last of them an ellipsis, when longer. Context files (MATTERWAVE.md, AGENTS.md, MATTERWAVE.local.md) are given as a path, the content and whether the user trusts them; an untrusted file is left out, and `context_files` holds the rest in the order given, each between `open` and `close`: its trailing line breaks dropped, cut to max_chars code points with `cut` on a line after it when longer, then every <project-instructions or </project-instructions in it (any case) escaped with a backslash after the <. In the path, & \" < > CR and LF are written as XML character references.",
+    "slots": "Two optional sections follow the template, each after a blank line, and the prompt is the template alone when neither is used. Extra tools (a client's own: web_fetch, MCP tools, todo_write) are given as a name and a description; their names join {tools} after the contract's, and `extra_tools` lists them, each description made one line (every run of whitespace becomes one space, the ends are trimmed) and cut to description_max_chars code points, the last of them an ellipsis, when longer. Context files (MATTERWAVE.md, AGENTS.md, MATTERWAVE.local.md) are given as a path, the content and whether the user trusts them, in the order they apply, from the most shared to the most personal: a user-wide file first, then the project's shared MATTERWAVE.md and AGENTS.md, and the user's own MATTERWAVE.local.md last (confinement.context_files lists the project's files in that order), since where two disagree the later one wins; an untrusted file is left out, and `context_files` holds the rest in the order given, each between `open` and `close`: its trailing line breaks dropped, cut to max_chars code points with `cut` on a line after it when longer, then every <project-instructions or </project-instructions in it (any case) escaped with a backslash after the <. In the path, & \" < > CR and LF are written as XML character references.",
     "extra_tools": {
       "heading": [
         "More tools",
@@ -516,10 +520,10 @@ export const CONTRACT = {
     ]
   },
   "conformance": {
-    "about": "Cases every client's tools must reproduce; both SDKs' suites run them. Write `tree` out as a workspace first (each path to its UTF-8 text). Each of `tools` names a tool, its arguments and any `limits` to override, and gives the `expected` text, or an `error` (a key of outputs.errors) or a `refused` (a confinement refusal) code with its `message` (`message_prefix` where the rest is the regex dialect's own words). `ignore` asks the search rules alone about a path, with the tree's ignore files and its .matterwaveignore as the deny file; `ancestors: false` checks the path without the directories above it, as a walker does. `shell` gives run_shell's text for a command's result. `paths` is what `confine` makes of a path in the same tree (`write` for a write, unapproved): the `relative` path, or the `refused` code and its `message`; a client on any platform must agree with every one.",
+    "about": "Cases every client's tools must reproduce; both SDKs' suites run them. Write `tree` out as a workspace first (each path to its UTF-8 text). Each of `tools` names a tool, its arguments and any `limits` to override, and gives the `expected` text, or an `error` (a key of outputs.errors) or a `refused` (a confinement refusal) code with its `message` (`message_prefix` where the rest is the regex dialect's own words). `ignore` asks the search rules alone about a path, with the tree's ignore files and its .matterwaveignore as the deny file; `ancestors: false` checks the path without the directories above it, as a walker does. `shell` gives run_shell's text for a command's result. `paths` is what `confine` makes of a path in the same tree (`write` for a write, unapproved): the `relative` path, or the `refused` code and its `message`; a client on any platform must agree with every one. `links` (each path to the target its symbolic link holds, relative to the link's folder) and `fifos` (named pipes) are made after `tree` where the platform can; a case that `needs` them is skipped where it cannot. `alias_roots` is what `windows_alias(path, root)` makes of a path for a root inside folders whose names are Windows aliases: only the names below the root count, `refused` null when none is one. A `shell` case with `omitted` passes the kept output and the bytes cut from it.",
     "tree": {
       ".gitignore": "# build output\nbuild/\n*.log\n!keep.log\n!build/keep.txt\n/dist\ndocs/*.tmp\n\\#hash.txt\n\\!bang.txt\ntrail.txt   \n**/cache/\n",
-      ".matterwaveignore": "# denied for reading too\nprivate/\n",
+      ".matterwaveignore": "﻿private/\n# denied for reading too; a range that runs backwards is skipped\n[z-a]\n",
       ".env": "KEY=1\n",
       ".git/HEAD": "ref: refs/heads/main\n",
       "#hash.txt": "hash\n",
@@ -536,7 +540,7 @@ export const CONTRACT = {
       "build/a.txt": "built\n",
       "build/keep.txt": "still ignored\n",
       "dist/b.txt": "dist\n",
-      "docs/.matterwaveignore": "*.draft\n",
+      "docs/.matterwaveignore": "﻿*.draft\n",
       "docs/a.tmp": "tmp\n",
       "docs/dist/c.txt": "c\n",
       "docs/guide.md": "TODO: write\n",
@@ -544,7 +548,7 @@ export const CONTRACT = {
       "logs/Debug.LOG": "debug\n",
       "logs/x.log": "x\n",
       "private/secret.md": "denied\n",
-      "src/.gitignore": "generated/\n!important.log\n",
+      "src/.gitignore": "﻿generated/\n[z-a]*\n!important.log\n",
       "src/BUILD/out.txt": "out\n",
       "src/Upper.PY": "pass\n",
       "src/build.py": "# TODO: build\n",
@@ -555,6 +559,13 @@ export const CONTRACT = {
       "src/main.py": "import os\n\ndef main():\n    return os.getcwd()\n",
       "src/util.py": "def helper():\n    return 'TODO: tidy'\n"
     },
+    "links": {
+      "loop.lnk": "loop.lnk",
+      "pipe.lnk": "pipe.fifo"
+    },
+    "fifos": [
+      "pipe.fifo"
+    ],
     "paths": [
       {
         "path": "key.pem:x",
@@ -834,6 +845,30 @@ export const CONTRACT = {
         "path": ".config/other/x",
         "write": true,
         "relative": ".config/other/x"
+      },
+      {
+        "path": "loop.lnk",
+        "needs": [
+          "links"
+        ],
+        "refused": "loop",
+        "message": "Refused: loop.lnk is a link that loops back on itself or goes through too many links, so it leads nowhere."
+      },
+      {
+        "path": "loop.lnk/x.txt",
+        "write": true,
+        "needs": [
+          "links"
+        ],
+        "refused": "loop",
+        "message": "Refused: loop.lnk/x.txt is a link that loops back on itself or goes through too many links, so it leads nowhere."
+      },
+      {
+        "path": "pipe.fifo",
+        "needs": [
+          "fifos"
+        ],
+        "relative": "pipe.fifo"
       }
     ],
     "tools": [
@@ -1235,6 +1270,106 @@ export const CONTRACT = {
         },
         "refused": "denied",
         "message": "Refused: .env is protected (a secret, a key, .git or an entry in .matterwaveignore) and is not sent to the model."
+      },
+      {
+        "tool": "read_file",
+        "args": {
+          "path": "pipe.fifo"
+        },
+        "needs": [
+          "fifos"
+        ],
+        "error": "special_file",
+        "message": "pipe.fifo is a pipe, socket or device, not a file or directory, so it is not opened."
+      },
+      {
+        "tool": "read_file",
+        "args": {
+          "path": "pipe.lnk"
+        },
+        "needs": [
+          "links",
+          "fifos"
+        ],
+        "error": "special_file",
+        "message": "pipe.fifo is a pipe, socket or device, not a file or directory, so it is not opened."
+      },
+      {
+        "tool": "list_dir",
+        "args": {
+          "path": "pipe.fifo"
+        },
+        "needs": [
+          "fifos"
+        ],
+        "error": "special_file",
+        "message": "pipe.fifo is a pipe, socket or device, not a file or directory, so it is not opened."
+      },
+      {
+        "tool": "glob",
+        "args": {
+          "pattern": "*",
+          "path": "pipe.fifo"
+        },
+        "needs": [
+          "fifos"
+        ],
+        "error": "special_file",
+        "message": "pipe.fifo is a pipe, socket or device, not a file or directory, so it is not opened."
+      },
+      {
+        "tool": "grep",
+        "args": {
+          "pattern": "x",
+          "path": "pipe.fifo"
+        },
+        "needs": [
+          "fifos"
+        ],
+        "error": "special_file",
+        "message": "pipe.fifo is a pipe, socket or device, not a file or directory, so it is not opened."
+      },
+      {
+        "tool": "read_file",
+        "args": {
+          "path": "loop.lnk"
+        },
+        "needs": [
+          "links"
+        ],
+        "refused": "loop",
+        "message": "Refused: loop.lnk is a link that loops back on itself or goes through too many links, so it leads nowhere."
+      },
+      {
+        "tool": "glob",
+        "args": {
+          "pattern": "src/[!bm]*.py"
+        },
+        "expected": "src/Upper.PY\nsrc/util.py"
+      },
+      {
+        "tool": "glob",
+        "args": {
+          "pattern": "[]w]*"
+        },
+        "expected": "wide.txt"
+      },
+      {
+        "tool": "glob",
+        "args": {
+          "pattern": "[z-a].py"
+        },
+        "error": "invalid_glob",
+        "message": "The glob [z-a].py is not valid: a range in a [...] class runs backwards (z-a rather than a-z)."
+      },
+      {
+        "tool": "grep",
+        "args": {
+          "pattern": "TODO",
+          "glob": "src/[9-0]*"
+        },
+        "error": "invalid_glob",
+        "message": "The glob src/[9-0]* is not valid: a range in a [...] class runs backwards (z-a rather than a-z)."
       }
     ],
     "ignore": [
@@ -1390,6 +1525,14 @@ export const CONTRACT = {
       {
         "path": "AGENTS.md",
         "ignored": false
+      },
+      {
+        "path": "src/z.py",
+        "ignored": false
+      },
+      {
+        "path": "z",
+        "ignored": false
       }
     ],
     "shell": [
@@ -1436,6 +1579,97 @@ export const CONTRACT = {
           "shell_output_max_bytes": 5
         },
         "expected": "Exit code 2\né\n[... 6 bytes of output cut from the middle ...]\né"
+      },
+      {
+        "output": "01234BCDEF",
+        "omitted": 6,
+        "exit_code": 0,
+        "limits": {
+          "shell_output_max_bytes": 10
+        },
+        "expected": "Exit code 0\n01234\n[... 6 bytes of output cut from the middle ...]\nBCDEF"
+      },
+      {
+        "output": "0123456efghij",
+        "omitted": 7,
+        "exit_code": 1,
+        "limits": {
+          "shell_output_max_bytes": 10
+        },
+        "expected": "Exit code 1\n01234\n[... 10 bytes of output cut from the middle ...]\nfghij"
+      },
+      {
+        "output": "ab",
+        "omitted": 3,
+        "exit_code": 0,
+        "expected": "Exit code 0\nab\n[... 3 bytes of output cut from the middle ...]\n"
+      }
+    ],
+    "alias_roots": [
+      {
+        "root": "/x/con/repo",
+        "path": "/x/con/repo/src/main.py",
+        "refused": null
+      },
+      {
+        "root": "/x/a:b/repo",
+        "path": "/x/a:b/repo/README.md",
+        "refused": null
+      },
+      {
+        "root": "/x/x./repo",
+        "path": "/x/x./repo/notes.txt",
+        "refused": null
+      },
+      {
+        "root": "/x/con/repo/",
+        "path": "/x/con/repo",
+        "refused": null
+      },
+      {
+        "root": "/x/CON/Repo",
+        "path": "/x/con/repo/a.txt",
+        "refused": null
+      },
+      {
+        "root": "C:\\x\\aux.d\\repo",
+        "path": "c:/x/AUX.d/repo/src/a.py",
+        "refused": null
+      },
+      {
+        "root": "/x/con/repo",
+        "path": "/x/con/repo/nul.txt",
+        "refused": "device"
+      },
+      {
+        "root": "/x/con/repo",
+        "path": "/x/con/repo/src/a:b",
+        "refused": "stream"
+      },
+      {
+        "root": "/x/con/repo",
+        "path": "/x/con/repo/a. ",
+        "refused": "trailing"
+      },
+      {
+        "root": "/x/con/repo",
+        "path": "/x/con/other/a.txt",
+        "refused": "device"
+      },
+      {
+        "root": "/x/con/repo",
+        "path": "src/con.h",
+        "refused": "device"
+      },
+      {
+        "root": "/x/con/repo",
+        "path": "//x/con/repo/a.txt",
+        "refused": "unc"
+      },
+      {
+        "root": "C:\\work",
+        "path": "C:foo.txt",
+        "refused": "stream"
       }
     ]
   }

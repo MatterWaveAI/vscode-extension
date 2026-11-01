@@ -265,7 +265,7 @@ describe("agent mode in a real editor, against a scripted /v1", function () {
     assert.ok(told.content.includes("changed while the change waited"), told.content);
   });
 
-  it("greps the workspace from the bundled extension, the pattern matched off the editor's thread", async function () {
+  it("greps the workspace from the bundled extension, the pattern matched on the SDK's worker thread", async function () {
     fake.script.push([
       {
         choices: [

@@ -1,8 +1,10 @@
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { contractTools } from "../../src/agent/host";
+import { readBytes } from "../../src/agent/readConfined";
 import type { ShellOptions, ShellResult } from "../../src/agent/shell";
 import type { ToolOutcome, ToolSpec } from "../../src/agent/tools";
 import type { ModeName } from "../../src/lib/sdk/agent/types";
@@ -105,6 +107,44 @@ describe("read_file", () => {
     writeFileSync(join(ws.root, "blob.bin"), Buffer.from([1, 0, 2, 3]));
     expect((await run("read_file", { path: "blob.bin" })).content).toContain("binary file");
   });
+
+  it.skipIf(process.platform === "win32")(
+    `answers special_file for a pipe from every tool, the writes included, and never waits on it${process.platform === "win32" ? " (skipped: Windows has no named pipes in the filesystem)" : ""}`,
+    async () => {
+      execFileSync("mkfifo", [join(ws.root, "src", "pipe")]);
+      const said = "src/pipe is a pipe, socket or device, not a file or directory, so it is not opened.";
+      const approvals = new ScriptedApprovals();
+      expect(await run("read_file", { path: "src/pipe" })).toEqual({ content: said, isError: true });
+      expect(await run("grep", { pattern: "x", path: "src/pipe" })).toEqual({ content: said, isError: true });
+      expect(await run("edit", { path: "src/pipe", old_string: "a", new_string: "b" }, { approvals, mode: "yolo" })).toEqual({ content: said, isError: true });
+      expect(await run("write_file", { path: "src/pipe", content: "x" }, { approvals, mode: "yolo" })).toEqual({ content: said, isError: true });
+      expect(approvals.changes).toHaveLength(0);
+      // A search leaves it out.
+      expect((await run("glob", { pattern: "*", path: "src" })).content.split("\n")).toEqual(["src/app.ts", "src/util.ts"]);
+    },
+    10_000,
+  );
+});
+
+describe("the file a change is made from", () => {
+  it("is read no further than the cap, and one past it is too_large", async () => {
+    const options = { limits: { read_max_file_bytes: 10 } };
+    const approvals = new ScriptedApprovals();
+    writeFileSync(join(ws.root, "big.txt"), "0123456789AB");
+    expect(await run("edit", { path: "big.txt", old_string: "0", new_string: "x" }, { approvals, options })).toEqual({
+      content: "big.txt is 12 bytes, over the 10 bytes read_file reads.",
+      isError: true,
+    });
+    writeFileSync(join(ws.root, "big.txt"), "0123456789");
+    expect(await run("edit", { path: "big.txt", old_string: "0", new_string: "x" }, { approvals, options, mode: "auto-edit" })).toMatchObject({ isError: false });
+  });
+
+  it("reads at most the bytes asked for, and says how large the file is", async () => {
+    writeFileSync(join(ws.root, "big.txt"), "0123456789AB");
+    const read = await readBytes(join(ws.root, "big.txt"), 5);
+    expect([read!.bytes.toString(), read!.size]).toEqual(["01234", 12]);
+    expect(await readBytes(join(ws.root, "src"), 5)).toBeNull();
+  });
 });
 
 describe("confinement: refused before anything happens", () => {
@@ -204,7 +244,7 @@ describe("list_dir, glob and grep", () => {
     expect((await run("grep", { pattern: "hunter2" })).content).toBe("No matches for hunter2.");
     expect((await run("grep", { pattern: "RETURN", ignore_case: true, glob: "*.ts" })).content).toBe("src/util.ts:2:   return n * 2;");
     expect((await run("grep", { pattern: "(" })).content).toContain("not a valid regular expression");
-  });
+  }, 30_000);
 });
 
 describe("edit and write_file", () => {

@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import * as nodePath from "node:path";
-import type { ContextFile } from "../lib/sdk/agent/types";
+import { CONTEXT_FILES, type ContextFile } from "../lib/sdk/agent/types";
 import { readConfined, readHead } from "./readConfined";
 
 /**
@@ -11,7 +11,8 @@ import { readConfined, readHead } from "./readConfined";
  * prompt through the SDK's `systemPrompt(..., { contextFiles })`, which
  * fences each one, cuts it at the contract's length and puts them after the
  * contract's rules, the later winning where two disagree: the person's own
- * notes first, then the project's, then the personal override.
+ * notes first, then the root's in the contract's `CONTEXT_FILES` order (the
+ * shared ones, then the personal MATTERWAVE.local.md, which wins).
  *
  * A cloned repository's notes are whatever its author wrote, so they load
  * only in a folder the person has trusted; in an untrusted one they are
@@ -20,8 +21,6 @@ import { readConfined, readHead } from "./readConfined";
  * refused, not sent.
  */
 
-export const PROJECT_CONTEXT_FILES = ["MATTERWAVE.md", "AGENTS.md"] as const;
-export const PERSONAL_CONTEXT_FILE = "MATTERWAVE.local.md";
 /** How the person's own notes are named in the prompt and the view. */
 export const USER_CONTEXT_NAME = "~/.matterwave/MATTERWAVE.md";
 
@@ -59,10 +58,9 @@ export async function loadProjectContext(root: string, options: ContextFileOptio
       files.push(USER_CONTEXT_NAME);
     }
   }
-  const projectNames = [...PROJECT_CONTEXT_FILES, PERSONAL_CONTEXT_FILE];
   if (!options.trusted) {
     const present: string[] = [];
-    for (const name of projectNames) if ((await readConfined(root, name)) !== null) present.push(name);
+    for (const name of CONTEXT_FILES) if ((await readConfined(root, name)) !== null) present.push(name);
     return {
       contextFiles,
       files,
@@ -73,7 +71,7 @@ export async function loadProjectContext(root: string, options: ContextFileOptio
     };
   }
   const refused: string[] = [];
-  for (const name of projectNames) {
+  for (const name of CONTEXT_FILES) {
     const read = await readConfined(root, name);
     if (read && "refused" in read) {
       refused.push(name);

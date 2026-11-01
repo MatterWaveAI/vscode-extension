@@ -80,6 +80,8 @@ export interface ExtraTool {
  * A file of instructions for the agent (MATTERWAVE.md, AGENTS.md,
  * MATTERWAVE.local.md) for `systemPrompt`: where it is, its text, and
  * whether the user trusts it. An untrusted file is left out of the prompt.
+ * Pass them from the most shared to the most personal (`CONTEXT_FILES`
+ * order, MATTERWAVE.local.md last): the later file wins where two disagree.
  */
 export interface ContextFile {
   readonly path: string;
@@ -117,6 +119,11 @@ export const SEARCH_IGNORE_FILES: readonly string[] = CONTRACT.confinement.searc
 export const PROTECTED: readonly string[] = CONTRACT.confinement.protected;
 export const REFUSALS: Readonly<Record<Refusal, string>> = CONTRACT.confinement.refusals;
 export const SETTINGS_DIR: string = CONTRACT.confinement.settings_dir;
+/**
+ * The context files a client reads from the root, in the order to pass them
+ * to `systemPrompt`: the shared MATTERWAVE.md and AGENTS.md, then the user's
+ * own MATTERWAVE.local.md last, so that it wins where they disagree.
+ */
 export const CONTEXT_FILES: readonly string[] = CONTRACT.confinement.context_files;
 
 export const EDIT_CRLF_FALLBACK: boolean = CONTRACT.edit.crlf_fallback;

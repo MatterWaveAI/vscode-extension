@@ -5,7 +5,9 @@
  * `IgnoreFile` is one file's rules, for the directory holding it, in the
  * .gitignore syntax: comments, `!` to re-include, a trailing `/` for
  * directories only, a leading or middle `/` to anchor at that directory,
- * `**`, and a backslash to escape. `SearchIgnore` stacks every file that
+ * `**`, and a backslash to escape; a leading byte-order mark is dropped and a
+ * line whose pattern is invalid (a `[...]` range that runs backwards) is
+ * skipped, as git does. `SearchIgnore` stacks every file that
  * applies to a path, root first, with the deny list on top: the last rule
  * that matches decides, a path inside an ignored directory stays ignored, and
  * the deny list cannot be re-included. Matching ignores case, so every client
@@ -19,6 +21,8 @@
 
 import { DenyList, escapeRegex, globToRegex } from "./deny.js";
 import { SEARCH_IGNORE_FILES } from "./types.js";
+
+const BOM = "\ufeff";
 
 interface Rule {
   regex: RegExp;
@@ -56,10 +60,18 @@ function parse(line: string): Rule | null {
   const anchored = text.includes("/");
   if (text.startsWith("/")) text = text.slice(1);
   if (text === "") return null;
-  return { regex: new RegExp(`^(?:${patternRegex(text)})$`, "i"), negate, dirOnly, anchored };
+  try {
+    return { regex: new RegExp(`^(?:${patternRegex(text)})$`, "i"), negate, dirOnly, anchored };
+  } catch {
+    return null;
+  }
 }
 
-/** The rules of one .gitignore-syntax file, for the directory holding it (`base`, relative to the workspace root, `""` for the root). */
+/**
+ * The rules of one .gitignore-syntax file, for the directory holding it
+ * (`base`, relative to the workspace root, `""` for the root). A leading
+ * byte-order mark is dropped, and an invalid line is skipped.
+ */
 export class IgnoreFile {
   readonly base: string;
   readonly patterns: readonly string[];
@@ -67,7 +79,7 @@ export class IgnoreFile {
 
   constructor(text: string, base = "") {
     this.base = base.replace(/^\/+|\/+$/g, "");
-    this.patterns = text.split("\n");
+    this.patterns = (text.startsWith(BOM) ? text.slice(BOM.length) : text).split("\n");
     this.rules = this.patterns.map(parse).filter((r): r is Rule => r !== null);
   }
 

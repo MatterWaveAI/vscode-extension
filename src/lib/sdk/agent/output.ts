@@ -101,7 +101,7 @@ export function compareCodePoints(a: string, b: string): number {
   return i < a.length ? 1 : j < b.length ? -1 : 0;
 }
 
-/** @internal The argument errors read_file checks before it looks at the file. */
+/** The argument errors read_file checks before it looks at the file: `bad_line` for a line number under 1, then `end_before_start`. */
 export function checkLines(startLine?: number, endLine?: number): void {
   for (const [name, value] of [
     ["start_line", startLine],
@@ -224,12 +224,28 @@ export function formatGrep(
  * run_shell's result: the status line (a timeout, a stop by the user, the
  * exit code, or an end by a signal when `exitCode` is null), then the
  * output, its middle cut out past `shell_output_max_bytes`.
+ *
+ * `omitted` is for a client that kept only the start and the end of a long
+ * output: pass the two joined as `output` and the number of bytes dropped
+ * from between them as `omitted`. The text is cut as though it were the
+ * whole output, and the cut is always shown. Keep at least the first and the
+ * last half of `shell_output_max_bytes` (whole characters) and the result is
+ * the one the whole output would give.
  */
 export function formatShell(
   output: string,
-  options: { exitCode?: number | null; timedOut?: boolean; stopped?: boolean; timeoutS?: number; limits?: Limits } = {},
+  options: {
+    exitCode?: number | null;
+    timedOut?: boolean;
+    stopped?: boolean;
+    timeoutS?: number;
+    limits?: Limits;
+    omitted?: number;
+  } = {},
 ): string {
   const spec = OUTPUTS.shell;
+  const omitted = options.omitted ?? 0;
+  if (!(omitted >= 0)) throw new RangeError("omitted counts bytes and cannot be negative");
   let status: string;
   if (options.timedOut) {
     const seconds = options.timeoutS ?? limit("shell_timeout_s_default", options.limits);
@@ -241,29 +257,38 @@ export function formatShell(
   } else {
     status = fill(spec.exit, { code: String(options.exitCode) });
   }
-  if (output === "") return `${status}\n${spec.no_output}`;
+  if (output === "" && omitted === 0) return `${status}\n${spec.no_output}`;
   const cap = limit("shell_output_max_bytes", options.limits);
-  const total = utf8(output).length;
+  const total = utf8(output).length + omitted;
   let body = output;
-  if (total > cap) {
+  if (total > cap || omitted > 0) {
     const half = Math.floor(cap / 2);
     const head = utf8Head(output, half);
-    const tail = utf8Tail(output, cap - half);
-    const omitted = total - utf8(head).length - utf8(tail).length;
-    body = `${head}\n${fill(spec.cut, { omitted: String(omitted) })}\n${tail}`;
+    // The tail comes from what follows the head, so text a client kept short
+    // of the cap is never shown twice.
+    const tail = utf8Tail(output.slice(head.length), cap - half);
+    const cut = total - utf8(head).length - utf8(tail).length;
+    body = `${head}\n${fill(spec.cut, { omitted: String(cut) })}\n${tail}`;
   }
   return `${status}\n${body}`;
 }
 
 const GLOBS = new Map<string, { regex: RegExp; wholePath: boolean }>();
 
-function compileGlob(pattern: string): { regex: RegExp; wholePath: boolean } {
+/** @internal glob's `pattern` compiled, or `ToolError` (`invalid_glob`). */
+export function compileGlob(pattern: string): { regex: RegExp; wholePath: boolean } {
   let found = GLOBS.get(pattern);
   if (found === undefined) {
     let text = pattern.startsWith("./") ? pattern.slice(2) : pattern;
     const anchored = text.startsWith("/");
     text = text.replace(/^\/+/, "");
-    found = { regex: new RegExp(`^(?:${globToRegex(text)})$`, "i"), wholePath: anchored || text.includes("/") };
+    let regex: RegExp;
+    try {
+      regex = new RegExp(`^(?:${globToRegex(text)})$`, "i");
+    } catch {
+      throw new ToolError("invalid_glob", { glob: pattern });
+    }
+    found = { regex, wholePath: anchored || text.includes("/") };
     if (GLOBS.size >= 256) GLOBS.clear();
     GLOBS.set(pattern, found);
   }
@@ -273,7 +298,8 @@ function compileGlob(pattern: string): { regex: RegExp; wholePath: boolean } {
 /**
  * Whether glob's `pattern` matches a file at `relative` (to the search's
  * `path`, `/`-separated): the whole path when the pattern has a `/`,
- * otherwise the file's name at any depth. Case is ignored.
+ * otherwise the file's name at any depth. Case is ignored. `ToolError`
+ * (`invalid_glob`) for a pattern whose `[...]` range runs backwards.
  */
 export function globMatches(pattern: string, relative: string): boolean {
   const { regex, wholePath } = compileGlob(pattern);
