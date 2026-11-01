@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import * as vscode from "vscode";
 import { activate, exportsFor, type MatterWaveApi } from "../src/extension";
 import type { Memento } from "../src/promptLibrary";
-import { commands, ExtensionMode, MemorySecrets, Uri, workspace } from "./vscode-mock";
+import { commands, ExtensionMode, FakeWebview, MemorySecrets, Uri, window, workspace } from "./vscode-mock";
 
 function fakeMemento(): Memento {
   const values = new Map<string, unknown>();
@@ -34,6 +34,28 @@ beforeEach(() => {
   workspace.settings.clear();
   // A configured server keeps the first-run prompt out of these runs.
   workspace.settings.set("matterwave.baseUrl", "https://mw.test");
+});
+
+describe("activation", () => {
+  it("asks nothing while activating, and asks for the server when the chat view first opens", async () => {
+    workspace.settings.delete("matterwave.baseUrl");
+    window.inputBoxes.length = 0;
+    activate(contextIn(ExtensionMode.Production));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(window.inputBoxes).toEqual([]);
+
+    const view = window.viewProviders["matterwave.chat"] as { resolveWebviewView(view: unknown): void };
+    view.resolveWebviewView({ webview: new FakeWebview(), onDidDispose: () => ({ dispose() {} }), show() {} });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(window.inputBoxes).toEqual(["MatterWave server"]);
+  });
+
+  it("has a command to open the chat and one to show the request log", () => {
+    activate(contextIn(ExtensionMode.Production));
+    expect(commands.registered.has("matterwave.openChat")).toBe(true);
+    expect(commands.registered.has("matterwave.showLog")).toBe(true);
+    expect(window.channels.at(-1)?.name).toBe("MatterWave");
+  });
 });
 
 describe("the extension's exports", () => {

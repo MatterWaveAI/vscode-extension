@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { MatterWaveClient } from "./api/client";
+import { MatterWaveClient, requestLogLine } from "./api/client";
 import { ApiError } from "./api/errors";
 import { createFetch } from "./api/transport";
 import { DeviceLoginError, pollForDeviceToken } from "./auth/deviceLogin";
@@ -57,10 +57,12 @@ function caFile(): string {
 }
 
 /**
- * On the first activation that finds the default server in force, ask
- * which deployment this editor is for, prefilled, and keep the answer as
- * the user setting. Dismissed, the default stands and the question is not
- * asked again; the setting is always there to change it.
+ * The first time the chat view opens (or a sign-in starts) with the
+ * default server in force, ask which deployment this editor is for,
+ * prefilled, and keep the answer as the user setting. Never on install or
+ * at start-up: nothing is asked until MatterWave is used. Dismissed, the
+ * default stands and the question is not asked again; the setting is
+ * always there to change it.
  */
 async function promptForServer(context: vscode.ExtensionContext): Promise<void> {
   const config = vscode.workspace.getConfiguration("matterwave");
@@ -98,10 +100,17 @@ export function exportsFor(mode: vscode.ExtensionMode, api: MatterWaveApi): Matt
   return mode === vscode.ExtensionMode.Test ? api : undefined;
 }
 
+/**
+ * Activated by the chat view or a command (VS Code reads both from the
+ * manifest), never at start-up: installing the extension shows nothing
+ * until it is used.
+ */
 export function activate(context: vscode.ExtensionContext): MatterWaveApi | undefined {
+  // Request ids, status and timing of every request; never content.
+  const log = vscode.window.createOutputChannel("MatterWave", { log: true });
   const tokens = new TokenStore(context.secrets, baseUrl);
   const statusBar = new StatusBar();
-  const view = new ChatViewProvider(context.extensionUri);
+  const view = new ChatViewProvider(context.extensionUri, () => void promptForServer(context));
   // A window with no folder open has no workspace of its own to keep prompts for.
   const prompts = new PromptLibrary(context.globalState, vscode.workspace.workspaceFolders?.length ? context.workspaceState : null);
   // Snapshots are files in the extension's own storage, under one cap for every chat and workspace.
@@ -123,6 +132,11 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
       chat.lastRequestId = id;
     },
     onReachability: (online) => chat.setOffline(!online),
+    onRequest: (entry) => {
+      const line = requestLogLine(entry);
+      if (entry.status === null || entry.status >= 400) log.warn(line);
+      else log.info(line);
+    },
   });
   const chat: ChatController = new ChatController({
     client,
@@ -155,6 +169,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
     context.subscriptions.push(vscode.commands.registerCommand(id, run));
 
   context.subscriptions.push(
+    log,
     statusBar,
     registerApplyContentProvider(),
     vscode.window.registerWebviewViewProvider(ChatViewProvider.viewId, view, {
@@ -172,8 +187,17 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
     }),
   );
 
-  command("matterwave.signInWithDeviceCode", () => signInWithDeviceCode(client, tokens));
-  command("matterwave.signInWithApiKey", () => signInWithApiKey(client, tokens));
+  // A sign-in goes to the server, so the first one settles which server that is.
+  command("matterwave.signInWithDeviceCode", async () => {
+    await promptForServer(context);
+    await signInWithDeviceCode(client, tokens);
+  });
+  command("matterwave.signInWithApiKey", async () => {
+    await promptForServer(context);
+    await signInWithApiKey(client, tokens);
+  });
+  command("matterwave.openChat", () => view.reveal());
+  command("matterwave.showLog", () => log.show(true));
   command("matterwave.signOut", async () => {
     switch (await signOut(client, tokens)) {
       case "not_signed_in":
@@ -262,7 +286,6 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
   });
 
   void chat.refresh();
-  void promptForServer(context);
 
   return exportsFor(context.extensionMode, {
     chat,

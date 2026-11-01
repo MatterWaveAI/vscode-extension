@@ -72,6 +72,28 @@ export interface ClientOptions {
   onRequestId?: (id: string) => void;
   /** Told whether the last request reached the API at all. */
   onReachability?: (online: boolean) => void;
+  /** Told of every request once it is answered or fails: never its body, its query or its credential. */
+  onRequest?: (entry: RequestLogEntry) => void;
+}
+
+/** One request as the log records it. */
+export interface RequestLogEntry {
+  method: string;
+  /** The URL's path, without its query. */
+  path: string;
+  /** Null when no answer came. */
+  status: number | null;
+  requestId: string | null;
+  /** Until the answer's headers (a streamed turn goes on after that). */
+  ms: number;
+  /** What the runtime said when no answer came; null otherwise. */
+  error: string | null;
+}
+
+/** The log line for a request: method, path, status or failure, time, and the reference to quote. */
+export function requestLogLine(entry: RequestLogEntry): string {
+  const outcome = entry.status !== null ? String(entry.status) : `failed: ${entry.error ?? "no answer"}`;
+  return `${entry.method} ${entry.path} -> ${outcome} in ${entry.ms} ms${entry.requestId ? ` (request ${entry.requestId})` : ""}`;
 }
 
 /** How long one Retry-After is honoured before giving up instead. */
@@ -553,16 +575,30 @@ export class MatterWaveClient {
 
   /** Every request, the SDK's and this file's own, reports reachability and the request id here. */
   private readonly observed: Fetch = async (input, init) => {
+    const started = Date.now();
+    const method = (init.method ?? "GET").toUpperCase();
+    // The path alone: a query can carry what the person typed (a search).
+    const path = new URL(input).pathname;
     let response: Response;
     try {
       response = await this.fetchImpl(input, init);
     } catch (error) {
-      if (!init.signal?.aborted) this.options.onReachability?.(false);
+      const aborted = Boolean(init.signal?.aborted);
+      if (!aborted) this.options.onReachability?.(false);
+      this.options.onRequest?.({
+        method,
+        path,
+        status: null,
+        requestId: null,
+        ms: Date.now() - started,
+        error: aborted ? "aborted" : error instanceof Error ? error.message : String(error),
+      });
       throw error;
     }
     this.options.onReachability?.(true);
     const requestId = response.headers.get("x-request-id");
     if (requestId) this.options.onRequestId?.(requestId);
+    this.options.onRequest?.({ method, path, status: response.status, requestId, ms: Date.now() - started, error: null });
     return response;
   };
 

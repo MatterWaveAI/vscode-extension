@@ -98,7 +98,20 @@ export const window = {
     this.shown.push({ kind: "error", message, options: rest });
     return Promise.resolve(this.informationAnswers.shift());
   },
-  showInputBox: () => Promise.resolve(undefined),
+  /** Every input box shown, by title. */
+  inputBoxes: [] as string[],
+  showInputBox(options?: { title?: string }): Promise<string | undefined> {
+    window.inputBoxes.push(options?.title ?? "");
+    return Promise.resolve(undefined);
+  },
+  /** The output channels created, with every line written to them. */
+  channels: [] as { name: string; lines: string[] }[],
+  createOutputChannel(name: string) {
+    const channel = { name, lines: [] as string[] };
+    window.channels.push(channel);
+    const write = (level: string) => (line: string) => void channel.lines.push(`${level} ${line}`);
+    return { info: write("info"), warn: write("warn"), error: write("error"), show() {}, dispose() {} };
+  },
   showQuickPick: () => Promise.resolve(undefined),
   showOpenDialog: () => Promise.resolve(undefined),
   showSaveDialog: () => Promise.resolve(undefined),

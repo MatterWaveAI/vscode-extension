@@ -13,7 +13,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
   private controller: ChatController | undefined;
 
-  constructor(private readonly extensionUri: vscode.Uri) {}
+  /** `onOpen` runs each time the view is shown afresh: the first-run questions wait for it. */
+  constructor(
+    private readonly extensionUri: vscode.Uri,
+    private readonly onOpen?: () => void,
+  ) {}
 
   attach(controller: ChatController): void {
     this.controller = controller;
@@ -48,6 +52,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     view.onDidDispose(() => {
       this.view = undefined;
     });
+    this.onOpen?.();
   }
 }
 

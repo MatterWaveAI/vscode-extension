@@ -50,6 +50,16 @@ async function writeDisk(uri: vscode.Uri, text: string): Promise<void> {
   await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(text));
 }
 
+describe("activation in a real editor", function () {
+  it("stays inactive at start-up, and activates on its first command", async function () {
+    const extension = vscode.extensions.getExtension("matterwave.matterwave");
+    assert.ok(extension, "the extension under development is installed");
+    assert.equal(extension.isActive, false, "nothing runs until MatterWave is used");
+    await vscode.commands.executeCommand("matterwave.showLog");
+    assert.equal(extension.isActive, true);
+  });
+});
+
 describe("finding a workspace file in a real editor", function () {
   it("reaches a file past any fixed count by searching for it, whatever its case", async function () {
     const found = await searchWorkspaceFiles("FILE-0599");

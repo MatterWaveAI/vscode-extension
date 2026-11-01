@@ -50,6 +50,28 @@ describe("the extension manifest", () => {
     expect(fallback.when).not.toContain("inlineChat");
   });
 
+  it("activates on the view or a command, never at start-up", () => {
+    expect(manifest.activationEvents).toEqual([]);
+  });
+
+  it("binds open chat, new chat and ask about selection on every platform", () => {
+    for (const command of ["matterwave.openChat", "matterwave.newChat", "matterwave.askAboutSelection"]) {
+      const binding = manifest.contributes.keybindings.find((k: { command: string }) => k.command === command);
+      expect(binding?.key, command).toMatch(/^ctrl\+alt\+m /);
+      expect(binding?.mac, command).toMatch(/^ctrl\+cmd\+m /);
+    }
+  });
+
+  it("has a walkthrough whose steps' pages exist and whose buttons run its own commands", () => {
+    const [walkthrough] = manifest.contributes.walkthroughs;
+    expect(walkthrough.steps.map((s: { id: string }) => s.id)).toEqual(["signIn", "askAboutSelection", "apply", "inlineEdit"]);
+    const commands = new Set(manifest.contributes.commands.map((c: { command: string }) => c.command));
+    for (const step of walkthrough.steps) {
+      expect(readFileSync(root(step.media.markdown), "utf8").length, step.id).toBeGreaterThan(0);
+      for (const [, command] of step.description.matchAll(/\(command:([\w.]+)\)/g)) expect(commands.has(command), command).toBe(true);
+    }
+  });
+
   it("binds and menus only commands it contributes", () => {
     const commands = new Set(manifest.contributes.commands.map((c: { command: string }) => c.command));
     for (const binding of manifest.contributes.keybindings) expect(commands.has(binding.command), binding.command).toBe(true);

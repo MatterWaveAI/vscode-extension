@@ -1,6 +1,6 @@
 import { setSleep } from "../src/lib/matterwaveClient";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { MatterWaveClient } from "../src/api/client";
+import { MatterWaveClient, requestLogLine, type RequestLogEntry } from "../src/api/client";
 import { ApiError, parseRetryAfter } from "../src/api/errors";
 import { CONVERSATION, fakeFetch, fixture, json, sse } from "./fakeApi";
 
@@ -508,5 +508,46 @@ describe("MatterWaveClient", () => {
     expect((form.get("file") as File).name).toBe("conversations.json");
     await expect(api.importStatus("imp_1")).resolves.toMatchObject({ status: "running" });
     expect(calls[1]?.url).toBe("/api/me/imports/imp_1");
+  });
+});
+
+describe("the request log", () => {
+  it("records each request's method, path, status, request id and time -- never its query, body or key", async () => {
+    const entries: RequestLogEntry[] = [];
+    const fake = fakeFetch({
+      "GET /api/conversations/search": () => json({ data: [], query: "private words" }),
+      "POST /api/conversations": () => json(CONVERSATION, 201),
+    });
+    const api = new MatterWaveClient({
+      baseUrl: "https://mw.test",
+      getToken: async () => "mw_abcdefgh_secret",
+      fetch: fake.fetch,
+      onRequest: (entry) => void entries.push(entry),
+    });
+    await api.searchConversations("private words");
+    await api.createConversation({ title: "My secret plan" });
+    expect(entries.map((e) => [e.method, e.path, e.status, e.requestId, e.error])).toEqual([
+      ["GET", "/api/conversations/search", 200, "req-test", null],
+      ["POST", "/api/conversations", 201, "req-test", null],
+    ]);
+    expect(entries.every((e) => typeof e.ms === "number" && e.ms >= 0)).toBe(true);
+    const logged = entries.map(requestLogLine).join("\n");
+    expect(logged).not.toMatch(/private|secret|plan/);
+    expect(requestLogLine(entries[0] as RequestLogEntry)).toMatch(/^GET \/api\/conversations\/search -> 200 in \d+ ms \(request req-test\)$/);
+  });
+
+  it("records a request that got no answer, with what the runtime said", async () => {
+    const entries: RequestLogEntry[] = [];
+    const api = new MatterWaveClient({
+      baseUrl: "https://mw.test",
+      getToken: async () => null,
+      fetch: async () => {
+        throw new Error("connect ECONNREFUSED 10.0.0.1:443");
+      },
+      onRequest: (entry) => void entries.push(entry),
+    });
+    await expect(api.models()).rejects.toMatchObject({ status: 0 });
+    expect(entries[0]).toMatchObject({ method: "GET", path: "/api/models", status: null, error: "connect ECONNREFUSED 10.0.0.1:443" });
+    expect(requestLogLine(entries[0] as RequestLogEntry)).toMatch(/^GET \/api\/models -> failed: connect ECONNREFUSED 10\.0\.0\.1:443 in \d+ ms$/);
   });
 });

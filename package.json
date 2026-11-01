@@ -42,9 +42,7 @@
     }
   },
   "main": "./dist/extension.js",
-  "activationEvents": [
-    "onStartupFinished"
-  ],
+  "activationEvents": [],
   "contributes": {
     "configuration": {
       "title": "MatterWave",
@@ -95,6 +93,11 @@
       {
         "command": "matterwave.signOut",
         "title": "Sign Out",
+        "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.openChat",
+        "title": "Open Chat",
         "category": "MatterWave"
       },
       {
@@ -187,6 +190,11 @@
         "command": "matterwave.importHistory",
         "title": "Import ChatGPT or Claude History",
         "category": "MatterWave"
+      },
+      {
+        "command": "matterwave.showLog",
+        "title": "Show Log",
+        "category": "MatterWave"
       }
     ],
     "menus": {
@@ -227,6 +235,76 @@
         "key": "ctrl+alt+m i",
         "mac": "ctrl+cmd+m i",
         "when": "editorTextFocus && editorHasSelection && isWorkspaceTrusted"
+      },
+      {
+        "command": "matterwave.openChat",
+        "key": "ctrl+alt+m c",
+        "mac": "ctrl+cmd+m c"
+      },
+      {
+        "command": "matterwave.newChat",
+        "key": "ctrl+alt+m n",
+        "mac": "ctrl+cmd+m n"
+      },
+      {
+        "command": "matterwave.askAboutSelection",
+        "key": "ctrl+alt+m a",
+        "mac": "ctrl+cmd+m a",
+        "when": "editorTextFocus && editorHasSelection"
+      }
+    ],
+    "walkthroughs": [
+      {
+        "id": "matterwave.gettingStarted",
+        "title": "Get started with MatterWave",
+        "description": "Sign in, ask about your code, and let MatterWave change it under review.",
+        "steps": [
+          {
+            "id": "signIn",
+            "title": "Sign in",
+            "description": "Confirm a code in your browser, or paste an API key. The credential stays in the editor's secret storage.\n[Sign In](command:matterwave.signInWithDeviceCode)",
+            "media": {
+              "markdown": "media/walkthrough/sign-in.md"
+            },
+            "completionEvents": [
+              "onCommand:matterwave.signInWithDeviceCode",
+              "onCommand:matterwave.signInWithApiKey"
+            ]
+          },
+          {
+            "id": "askAboutSelection",
+            "title": "Ask about a selection",
+            "description": "Select some code and ask about it; the answer streams into the chat view.\n[Ask about Selection](command:matterwave.askAboutSelection)",
+            "media": {
+              "markdown": "media/walkthrough/ask.md"
+            },
+            "completionEvents": [
+              "onCommand:matterwave.askAboutSelection"
+            ]
+          },
+          {
+            "id": "apply",
+            "title": "Apply an answer's code",
+            "description": "Every code block in an answer has Apply. A diff opens first, and the change lands in the editor, where Undo takes it back.\n[Open Chat](command:matterwave.openChat)",
+            "media": {
+              "markdown": "media/walkthrough/apply.md"
+            },
+            "completionEvents": [
+              "onCommand:matterwave.openChat"
+            ]
+          },
+          {
+            "id": "inlineEdit",
+            "title": "Edit in place",
+            "description": "Select lines, say what should change, and review the diff before it lands.\n[Edit Selection](command:matterwave.inlineEdit)",
+            "media": {
+              "markdown": "media/walkthrough/inline-edit.md"
+            },
+            "completionEvents": [
+              "onCommand:matterwave.inlineEdit"
+            ]
+          }
+        ]
       }
     ]
   },
