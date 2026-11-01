@@ -30,3 +30,19 @@ jobs:
           name: vsix
           path: matterwave.vsix
           retention-days: 7
+
+  # The extension inside a real VS Code (downloaded by @vscode/test-electron)
+  # under a virtual display: the editor suite always runs; the deployment
+  # suite runs only where E2E_BASE_URL and the e2e account are configured,
+  # and says it was skipped otherwise.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: xvfb-run -a pnpm test:e2e
