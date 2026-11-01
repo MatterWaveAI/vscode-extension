@@ -91,7 +91,9 @@ export function chatHtml({ cspSource, scriptUri, nonce }: { cspSource: string; s
 <style nonce="${nonce}">${STYLES}</style>
 </head>
 <body>
-<div id="app" role="application" aria-label="MatterWave chat"></div>
+<header class="sr-only"><h1>MatterWave chat</h1></header>
+<main id="app" aria-label="MatterWave chat"></main>
+<div id="announcer" class="sr-only" role="status" aria-live="polite"></div>
 <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
@@ -99,6 +101,7 @@ export function chatHtml({ cspSource, scriptUri, nonce }: { cspSource: string; s
 
 const STYLES = `
 :root { color-scheme: light dark; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 body { margin: 0; padding: 0; font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); color: var(--vscode-foreground); background: var(--vscode-sideBar-background); }
 #app { display: flex; flex-direction: column; height: 100vh; }
 button { font: inherit; color: var(--vscode-button-foreground); background: var(--vscode-button-background); border: none; padding: 3px 8px; border-radius: 2px; cursor: pointer; }

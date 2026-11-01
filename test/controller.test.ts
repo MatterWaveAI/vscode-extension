@@ -1572,4 +1572,11 @@ describe("the page itself", () => {
     // No network at all: the page could not reach the API even with something to reach it with.
     expect(html).not.toContain("connect-src");
   });
+
+  it("is a labelled main landmark with one polite status region, not an application", () => {
+    const html = chatHtml({ cspSource: "vscode-resource:", scriptUri: "vscode-resource:/webview.js", nonce: "abc123" });
+    expect(html).not.toContain('role="application"');
+    expect(html).toContain('<main id="app" aria-label="MatterWave chat"></main>');
+    expect(html).toContain('<div id="announcer" class="sr-only" role="status" aria-live="polite"></div>');
+  });
 });

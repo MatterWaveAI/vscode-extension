@@ -5,6 +5,7 @@ import { trustedImageDataUri } from "../chat/images";
 import { parseCodeBlocks } from "../chat/codeBlocks";
 import { renderMarkdown } from "./markdown";
 import { answerUsageLabel } from "../chat/usage";
+import { announcement } from "./announce";
 
 /**
  * The chat view's script. It only renders and reports intents: there is no
@@ -56,6 +57,12 @@ const expandedSummaries = new Set<string>();
 const imagePreviews = new Map<string, string>();
 
 const app = document.getElementById("app") as HTMLElement;
+/** The page's one live region (outside #app, so a re-render never re-announces it). */
+const announcer =
+  document.getElementById("announcer") ??
+  document.body.appendChild(Object.assign(document.createElement("div"), { id: "announcer", className: "sr-only" }));
+announcer.setAttribute("role", "status");
+announcer.setAttribute("aria-live", "polite");
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -117,7 +124,6 @@ convos.append(convoSearch, convoList, archivedBlock);
 const meta = el("div", { className: "meta" });
 const banners = el("div");
 const transcript = el("div", { className: "transcript" });
-transcript.setAttribute("aria-live", "polite");
 const input = el("textarea");
 const PLACEHOLDER = "Ask MatterWave…  (@file, @folder, @terminal, @git, @docs add context — Enter to send)";
 const OFFLINE_PLACEHOLDER = "MatterWave cannot be reached. Your draft is kept.";
@@ -780,6 +786,8 @@ function prettyJson(raw: string): string {
 window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
   const message = event.data;
   if (message.type === "state") {
+    const said = announcement(state, message.state);
+    if (said) announcer.textContent = said;
     state = message.state;
     // The page that was asked for has landed (or failed): the end of a list may ask again.
     loadMoreAsked.list = false;

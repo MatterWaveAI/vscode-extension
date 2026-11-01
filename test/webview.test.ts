@@ -2,6 +2,7 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { Message } from "../src/api/types";
 import type { HostMessage, ViewState, WebviewMessage } from "../src/chat/protocol";
+import { chatHtml } from "../src/chat/viewProvider";
 
 const sent: WebviewMessage[] = [];
 
@@ -61,7 +62,11 @@ function post(msg: HostMessage): void {
 }
 
 beforeAll(async () => {
-  document.body.innerHTML = '<div id="app"></div>';
+  // The page the view provider serves, less its script: the same landmarks and live region.
+  const page = chatHtml({ cspSource: "vscode-resource:", scriptUri: "vscode-resource:/webview.js", nonce: "n" });
+  document.documentElement.lang = /<html lang="([^"]+)"/.exec(page)?.[1] ?? "";
+  document.title = /<title>([^<]*)<\/title>/.exec(page)?.[1] ?? "";
+  document.body.innerHTML = /<body>([\s\S]*?)<script/.exec(page)?.[1] ?? "";
   (globalThis as unknown as { acquireVsCodeApi: unknown }).acquireVsCodeApi = () => ({
     postMessage: (m: WebviewMessage) => sent.push(m),
   });
@@ -281,6 +286,36 @@ describe("the chat webview", () => {
     sent.length = 0;
     Array.from(archive?.querySelectorAll("button") ?? []).find((b) => b.textContent === "Load more")?.click();
     expect(sent).toEqual([{ type: "loadMoreConversations", archived: true }]);
+  });
+
+  it("announces a finished answer once through the status region, and never makes the transcript live", () => {
+    post({ type: "state", state: state({ streaming: true, transcript: [] }) });
+    expect(document.querySelector(".transcript")?.getAttribute("aria-live")).toBeNull();
+    post({ type: "state", state: state({ streaming: false, transcript: [assistantEntry("a9")] }) });
+    const announcer = document.getElementById("announcer");
+    expect(announcer?.getAttribute("role")).toBe("status");
+    expect(announcer?.textContent).toBe("MatterWave answered: Answer");
+  });
+
+  it("passes axe's checks for a signed-in view with a conversation, a code block and an error", async () => {
+    const axe = (await import("axe-core")).default;
+    post({
+      type: "state",
+      state: state({
+        transcript: [
+          { message: message({ id: "u1", role: "user", parts: [{ type: "text", text: "Fix it" }], content: "Fix it" }), siblingIndex: 1, siblingCount: 1 },
+          {
+            message: message({ id: "a1", role: "assistant", parent_id: "u1", parts: [{ type: "text", text: "Here:\n\n```ts src/a.ts\nconst a = 1;\n```" }] }),
+            siblingIndex: 1,
+            siblingCount: 2,
+          },
+        ],
+        error: { title: "Something failed", guidance: "Try again.", retryable: true, requestId: "req-1" },
+      }),
+    });
+    // Colours come from the editor's theme variables, which a test page does not have.
+    const results = await axe.run(document, { rules: { "color-contrast": { enabled: false } } });
+    expect(results.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.html).join(" | ")}`)).toEqual([]);
   });
 
   it("shows an answer's tokens and cost under it, and nothing for one without a count", () => {
