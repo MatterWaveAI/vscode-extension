@@ -185,6 +185,27 @@ describe("agent mode in a real editor, against a scripted /v1", function () {
     assert.deepEqual(readFileSync(target), Buffer.from(ORIGINAL), "undo brings the original bytes back");
   });
 
+  it("creates a new file, folders and all, from an accepted write_file", async function () {
+    const created = path.join(WORKSPACE, "src", "lib", "deep", "util.ts");
+    const content = "export const answer = 42;\n";
+    fake.script.push([
+      {
+        choices: [
+          {
+            index: 0,
+            delta: { tool_calls: [{ index: 0, id: "call_write", type: "function", function: { name: "write_file", arguments: JSON.stringify({ path: "src/lib/deep/util.ts", content }) } }] },
+          },
+        ],
+      },
+    ]);
+    const run = api.chat.send("Add a util module.");
+    await waitFor("the approval", () => api.agent.pendingId() !== null);
+    assert.equal(api.chat.snapshot().agent?.pending?.title, "Create src/lib/deep/util.ts");
+    await vscode.commands.executeCommand("matterwave.agent.accept");
+    await run;
+    assert.equal(readFileSync(created, "utf8"), content);
+  });
+
   it("writes the person's version when they edit the proposal before accepting", async function () {
     fake.script.push(editCall('"Hello, "', '"Hi, "'));
     const run = api.chat.send("Make the greeting shorter.");
