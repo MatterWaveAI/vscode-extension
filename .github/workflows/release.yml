@@ -1,8 +1,9 @@
 name: Release
 
 # A tag cut from a green main: the same gates CI runs, then a packaged
-# .vsix attached to a GitHub release. Nothing is published to the
-# Marketplace from here; that stays a manual step with the release asset.
+# .vsix attached to a GitHub release, and a publish to the Visual Studio
+# Code Marketplace and Open VSX (each skipped with a warning when its
+# token is not configured).
 on:
   push:
     tags: ["v*"]
@@ -42,3 +43,48 @@ jobs:
         with:
           files: matterwave-*.vsix
           generate_release_notes: true
+
+  # Publishes to both registries after the release lands. Two tokens, as
+  # repo (or org) secrets:
+  #
+  #   VSCE_TOKEN -- a Personal Access Token on Azure DevOps (which runs the
+  #     Visual Studio Code Marketplace): create it under User Settings >
+  #     Personal Access Tokens, scoped to Marketplace > Manage > Publish
+  #     for the matterwave publisher.
+  #
+  #   OVSX_TOKEN -- a Personal Access Token on open-vsx.org: create it
+  #     under Settings > Access Tokens for the matterwave namespace.
+  #
+  # Each publish step checks only its own token and skips with a ::warning
+  # when it is absent, so either registry can be wired up on its own.
+  marketplace:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The packageManager field pins the version; no `version:` needed here.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Publish to the Visual Studio Code Marketplace
+        env:
+          VSCE_TOKEN: ${{ secrets.VSCE_TOKEN }}
+        run: |
+          if [ -z "$VSCE_TOKEN" ]; then
+            echo "::warning::VSCE_TOKEN is not set; skipping the Marketplace publish"
+            exit 0
+          fi
+          pnpm exec vsce publish --no-dependencies --skip-license -p "$VSCE_TOKEN"
+      - name: Publish to Open VSX
+        env:
+          OVSX_TOKEN: ${{ secrets.OVSX_TOKEN }}
+        run: |
+          if [ -z "$OVSX_TOKEN" ]; then
+            echo "::warning::OVSX_TOKEN is not set; skipping the Open VSX publish"
+            exit 0
+          fi
+          npx --yes ovsx publish --no-dependencies -p "$OVSX_TOKEN"
