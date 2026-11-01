@@ -136,9 +136,10 @@ case, plus anything in a `.matterwaveignore` at the root (gitignore syntax). `gl
 read. The project's notes, commands and subagents and `@path` mentions are
 read through the same rules, so a `MATTERWAVE.md` that links to a key outside the root is refused,
 not sent. A pipe, socket or device is never opened: every tool answers that it is not a file,
-and searches leave it out. `glob` and `grep` let the editor keep working while they walk, Stop
-answers them at once, and `grep` runs the model's pattern off the editor's thread and gives up on
-a search that takes more than 60 s. This is confinement, not a sandbox: an approved command runs as you and can reach
+and searches leave it out. `glob` and `grep` let the editor keep working while they walk, and Stop
+ends them at once. `grep` reads and matches on worker threads, never the editor's, and gives up
+with the contract's `timeout` when the pattern has spent 30 s matching (a pattern that backtracks
+without end) or the whole search has taken 120 s. This is confinement, not a sandbox: an approved command runs as you and can reach
 anything you can. Everything the agent reads goes to MatterWave and to the model; the deny list is
 a floor, not a guarantee.
 

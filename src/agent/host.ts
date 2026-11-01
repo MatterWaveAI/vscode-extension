@@ -34,12 +34,12 @@ import { failure, intArg, isOutcome, ok, rejectedOutcome, stringArg, toolSpec, t
  *
  * What they return is the SDK's: `runReadFile` and `runListDir`, and
  * `runGlobAsync` and `runGrepAsync` for the searches, which walk with the
- * .gitignore and .matterwaveignore rules and let the editor breathe as they
- * go; grep runs the model's pattern on a worker thread the SDK ends at
- * GREP_TIMEOUT_S. Every path goes through the SDK's `confine` before anything
- * is read or written. Two things are the extension's own: Stop answers a
- * search at once, and a write never touches the disk here -- the change goes
- * to `approvals.change`, which shows the diff, waits for the person when it
+ * .gitignore and .matterwaveignore rules, let the editor breathe as they go
+ * and stop on the run's Stop signal; grep reads and matches on the SDK's
+ * worker threads, ended at GREP_TIMEOUT_S of matching or GREP_MAX_DURATION_S
+ * in all. Every path goes through the SDK's `confine` before anything is
+ * read or written. A write never touches the disk here: the change goes to
+ * `approvals.change`, which shows the diff, waits for the person when it
  * asks, and applies it through the editor after `stale()` confirms that the
  * path still leads where it did and the file still holds what the diff was
  * made from. A command runs as a child process in the root (shell.ts), its
@@ -57,19 +57,30 @@ export interface HostOptions {
   runShell?: (command: string, options: ShellOptions) => Promise<ShellResult>;
   /** Overrides for the contract's limits, by name (the conformance cases set some). */
   limits?: Limits;
-  /** grep's deadline in seconds; GREP_TIMEOUT_S by default. */
+  /** grep's regex deadline in seconds; GREP_TIMEOUT_S by default. */
   grepTimeoutS?: number;
+  /** The most a whole grep may take, in seconds; GREP_MAX_DURATION_S by default. */
+  grepMaxDurationS?: number;
 }
 
 /**
- * The most a whole grep may take, in seconds: the SDK runs the model's
- * pattern on a worker thread and ends the search here with the contract's
- * `timeout`, which tells the model to narrow it. A pattern can take
+ * grep's regex deadline, in seconds: the most the model's pattern may spend
+ * matching on each of the SDK's worker threads (the walk and the reads do
+ * not count). Past it the workers are ended and grep returns the contract's
+ * `timeout`, which tells the model to narrow the pattern. A pattern can take
  * exponential time on one line (`(a+)+$` on a line of `a`s, perhaps copied
- * from a file that asked for it). The deadline counts the walk and the reads
- * as well, so it leaves a large workspace on a slow disk room to finish.
+ * from a file that asked for it); an ordinary one spends about a second on
+ * the 4.6 million lines of a 100,000-file workspace.
  */
-export const GREP_TIMEOUT_S = 60;
+export const GREP_TIMEOUT_S = 30;
+
+/**
+ * The most a whole grep may take, walk and reads included, in seconds: also
+ * the contract's `timeout`. A full search of a 100,000-file workspace takes
+ * 15-20 s on Windows (where every open is scanned) and 3-6 s on Linux; this
+ * leaves a slow disk or a cold cache room to finish.
+ */
+export const GREP_MAX_DURATION_S = 120;
 
 /** A leading byte-order mark is dropped, as the editor drops it: an edit must not write it back as text. */
 const decoder = new TextDecoder("utf-8");
@@ -89,12 +100,6 @@ export const EDITOR_CONFIG = new DenyList([".vscode/", "*.code-workspace"]);
 function failed(error: unknown): ToolOutcome {
   if (error instanceof PathRefusedError || error instanceof ToolError || error instanceof EditError) return failure(error.message);
   throw error;
-}
-
-function aborted(): Error {
-  const error = new Error("aborted");
-  error.name = "AbortError";
-  return error;
 }
 
 /** For comparing what the diff was made from with the file now: the editor and the disk differ in a BOM and line endings, not content. */
@@ -193,21 +198,6 @@ function staleCheck(root: string, target: WriteTarget, before: string | null, op
   };
 }
 
-/**
- * A search's answer, or an AbortError as soon as Stop comes. The SDK's
- * searches cannot be called off: one that Stop overtook runs out in the
- * background, still yielding to the editor (a grep no longer than its
- * deadline), and what it finds is dropped.
- */
-function unlessStopped<T>(search: Promise<T>, signal: AbortSignal): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(aborted());
-    if (signal.aborted) onAbort();
-    else signal.addEventListener("abort", onAbort, { once: true });
-    void search.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
-  });
-}
-
 // --- the tools ------------------------------------------------------------------
 
 async function readFileTool(args: Record<string, unknown>, ctx: ToolContext, options: HostOptions): Promise<ToolOutcome> {
@@ -247,7 +237,8 @@ async function globTool(args: Record<string, unknown>, ctx: ToolContext, options
   const path = stringArg(args, "path", false);
   if (isOutcome(path)) return path;
   try {
-    return ok(await unlessStopped(runGlobAsync(ctx.root, pattern!, { path: path || undefined, limits: options.limits }), ctx.signal));
+    // Stop ends the walk at once and rejects with an AbortError, which the loop answers as stopped.
+    return ok(await runGlobAsync(ctx.root, pattern!, { path: path || undefined, limits: options.limits, signal: ctx.signal }));
   } catch (error) {
     return failed(error);
   }
@@ -261,14 +252,17 @@ async function grepTool(args: Record<string, unknown>, ctx: ToolContext, options
   const glob = stringArg(args, "glob", false);
   if (isOutcome(glob)) return glob;
   try {
+    // Stop ends the walk and the workers at once and rejects with an AbortError, which the loop answers as stopped.
     const search = runGrepAsync(ctx.root, pattern!, {
       path: path || undefined,
       glob: glob || undefined,
       ignoreCase: args.ignore_case === true,
       limits: options.limits,
       timeoutS: options.grepTimeoutS ?? GREP_TIMEOUT_S,
+      maxDurationS: options.grepMaxDurationS ?? GREP_MAX_DURATION_S,
+      signal: ctx.signal,
     });
-    return ok(await unlessStopped(search, ctx.signal));
+    return ok(await search);
   } catch (error) {
     return failed(error);
   }

@@ -20,17 +20,20 @@ export type Limits = Partial<Record<LimitName, number>>;
 /**
  * The tool cannot answer, and nothing was read or run. `reason` is the
  * contract's code; `message` is its sentence for the model with `values`
- * filled in.
+ * filled in. `cause`, when set, is what failed underneath (a search's worker
+ * thread that died, say), for the client's own logs.
  */
 export class ToolError extends Error {
   readonly reason: ToolFailure;
   readonly values: Readonly<Record<string, string | number>>;
+  declare readonly cause?: unknown;
 
-  constructor(reason: ToolFailure, values: Record<string, string | number> = {}) {
+  constructor(reason: ToolFailure, values: Record<string, string | number> = {}, options: { cause?: unknown } = {}) {
     super(fill(TOOL_ERRORS[reason], Object.fromEntries(Object.entries(values).map(([k, v]) => [k, String(v)]))));
     this.name = "ToolError";
     this.reason = reason;
     this.values = values;
+    if ("cause" in options) Object.defineProperty(this, "cause", { value: options.cause, writable: true, configurable: true });
   }
 }
 

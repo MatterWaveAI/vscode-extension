@@ -6,8 +6,9 @@
  * `confine`, `loadDenyList`, `resolveLinks` and the search: `walk`,
  * `loadSearchIgnore`, `runReadFile`, `runListDir`, `runGlob` and `runGrep`,
  * and their async forms `walkAsync`, `runGlobAsync` and `runGrepAsync`, which
- * yield to the event loop (`runGrepAsync` with `timeoutS` runs the regex on a
- * worker thread it ends at the deadline).
+ * yield to the event loop and stop on a `signal` (`runGrepAsync` reads and
+ * matches on worker threads, ended at its `timeoutS` of matching or its
+ * `maxDurationS` in all).
  *
  *     import { confine, applyEdit, unifiedDiff, PathRefusedError } from "@matterwave/sdk/agent";
  *

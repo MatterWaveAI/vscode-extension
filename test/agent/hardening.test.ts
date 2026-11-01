@@ -2,7 +2,8 @@ import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { Worker } from "node:worker_threads";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { restoreTarget } from "../../src/checkpoints";
 import { childEnv } from "../../src/agent/env";
 import { OffsiteRedirect, WEB_FETCH_MAX_BYTES, fetchApproved, webFetchTool } from "../../src/agent/extraTools";
@@ -151,9 +152,9 @@ describe("/restore", () => {
 });
 
 describe("grep with a pattern that backtracks without end", () => {
-  function grep(grepTimeoutS: number, signal = new AbortController().signal) {
+  function grep(grepTimeoutS: number, signal = new AbortController().signal, grepMaxDurationS?: number) {
     writeFileSync(join(ws.root, "src", "trap.txt"), `${"a".repeat(40)}!\n`);
-    const spec = contractTools({ grepTimeoutS }).find((t) => t.name === "grep")!;
+    const spec = contractTools({ grepTimeoutS, grepMaxDurationS }).find((t) => t.name === "grep")!;
     return spec.run({ pattern: "(a+)+$", path: "src" }, "allow", {
       root: ws.root,
       mode: "ask",
@@ -178,17 +179,46 @@ describe("grep with a pattern that backtracks without end", () => {
     }
   }, 30_000);
 
-  it("answers Stop at once, without waiting for the deadline", async () => {
-    const stop = new AbortController();
-    const running = grep(3, stop.signal);
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    const stoppedAt = Date.now();
-    stop.abort();
-    await expect(running).rejects.toMatchObject({ name: "AbortError" });
-    expect(Date.now() - stoppedAt).toBeLessThan(1_000);
-    // The search Stop overtook ends at its own deadline; let it, so no worker outlives the test.
-    await new Promise((resolve) => setTimeout(resolve, 3_500));
+  it("gives up when the whole search passes its budget, with the contract's timeout", async () => {
+    const out = await grep(60, undefined, 1);
+    expect(out).toEqual({
+      content: "The search for (a+)+$ stopped after 1 s without finishing. Try a simpler pattern, a narrower path or a glob.",
+      isError: true,
+    });
   }, 30_000);
+
+  it("answers Stop at once and ends the search's worker, without waiting for the deadline", async () => {
+    const posted = vi.spyOn(Worker.prototype, "postMessage");
+    try {
+      const stop = new AbortController();
+      const running = grep(60, stop.signal);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const stoppedAt = Date.now();
+      stop.abort();
+      await expect(running).rejects.toMatchObject({ name: "AbortError" });
+      expect(Date.now() - stoppedAt).toBeLessThan(200);
+      const workers = new Set(posted.mock.contexts as Worker[]);
+      expect(workers.size).toBe(1);
+      for (const worker of workers) expect(worker.threadId).toBe(-1);
+    } finally {
+      posted.mockRestore();
+    }
+  }, 30_000);
+
+  it("stops a glob on Stop", async () => {
+    const spec = contractTools().find((t) => t.name === "glob")!;
+    const stop = new AbortController();
+    stop.abort();
+    await expect(
+      spec.run({ pattern: "**/*" }, "allow", {
+        root: ws.root,
+        mode: "ask",
+        signal: stop.signal,
+        approvals: new ScriptedApprovals(),
+        call: { id: "g", type: "function", function: { name: "glob", arguments: "{}" } },
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+  });
 });
 
 describe("auto-edit, yolo and the agent's own configuration", () => {
