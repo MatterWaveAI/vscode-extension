@@ -22,7 +22,7 @@ function state(over: Partial<ViewState>): ViewState {
     signedIn: true,
     offline: false,
     identity: "Ada",
-    conversations: [{ id: "c_1", title: "Clock", pinned: false, archived: false, badge: null }],
+    conversations: [{ id: "c_1", title: "Clock", pinned: false, archived: false, badge: null, source: null }],
     archivedConversations: [],
     searchResults: null,
     activeId: "c_1",
@@ -34,6 +34,7 @@ function state(over: Partial<ViewState>): ViewState {
     error: null,
     notice: null,
     temporary: false,
+    source: null,
     instructions: null,
     feedback: {},
     notifications: [],
@@ -52,6 +53,13 @@ function assistantEntry(id = "a1"): { message: Message; siblingIndex: number; si
     siblingCount: 1,
   };
 }
+
+const SLACK = {
+  connector: "slack",
+  connection_id: "conn-1",
+  channel_label: "#support",
+  url: "https://acme.slack.com/archives/C01/p1700000000000100",
+};
 
 function post(msg: HostMessage): void {
   window.dispatchEvent(new MessageEvent("message", { data: msg }));
@@ -205,10 +213,10 @@ describe("the chat webview", () => {
       type: "state",
       state: state({
         conversations: [
-          { id: "c_1", title: "Clock", pinned: true, archived: false, badge: null },
-          { id: "c_2", title: "Weather", pinned: false, archived: false, badge: null },
+          { id: "c_1", title: "Clock", pinned: true, archived: false, badge: null, source: null },
+          { id: "c_2", title: "Weather", pinned: false, archived: false, badge: null, source: null },
         ],
-        archivedConversations: [{ id: "c_3", title: "Old", pinned: false, archived: true, badge: null }],
+        archivedConversations: [{ id: "c_3", title: "Old", pinned: false, archived: true, badge: null, source: null }],
       }),
     });
     const titles = Array.from(document.querySelectorAll<HTMLButtonElement>(".convos > .convos-list .row .title"));
@@ -251,8 +259,8 @@ describe("the chat webview", () => {
       type: "state",
       state: state({
         conversations: [
-          { id: "c_1", title: "Clock", pinned: false, archived: false, badge: "Work · bug" },
-          { id: "c_2", title: "Weather", pinned: false, archived: false, badge: null },
+          { id: "c_1", title: "Clock", pinned: false, archived: false, badge: "Work · bug", source: null },
+          { id: "c_2", title: "Weather", pinned: false, archived: false, badge: null, source: null },
         ],
       }),
     });
@@ -270,7 +278,7 @@ describe("the chat webview", () => {
       post({
         type: "state",
         state: state({
-          searchResults: [{ id: "c_9", title: "Clock tower", pinned: false, archived: false, badge: null, snippet: "…the clock…" }],
+          searchResults: [{ id: "c_9", title: "Clock tower", pinned: false, archived: false, badge: null, source: null, snippet: "…the clock…" }],
         }),
       });
       expect(document.querySelector(".convos-list")?.textContent).toContain("Clock tower");
@@ -423,6 +431,54 @@ describe("the chat webview", () => {
     post({ type: "state", state: state({ temporary: false }) });
     expect(headerButtons()).toContain("Share");
     expect(document.querySelector(".notice")?.textContent ?? "").not.toContain("Temporary chat");
+  });
+
+  it("badges a connector's conversation on its row with where it is answered", () => {
+    post({
+      type: "state",
+      state: state({
+        conversations: [
+          { id: "c_1", title: "Deploy question", pinned: false, archived: false, badge: null, source: SLACK },
+          { id: "c_2", title: "Own chat", pinned: false, archived: false, badge: "Work", source: null },
+        ],
+      }),
+    });
+    const badges = Array.from(document.querySelectorAll<HTMLElement>(".convos-list .source-badge"));
+    expect(badges.map((b) => b.textContent)).toEqual(["Slack #support"]);
+    expect(badges[0]?.closest("button")?.textContent).toContain("Deploy question");
+    // The library badge is untouched beside it.
+    expect(Array.from(document.querySelectorAll<HTMLElement>(".convos-list .lib-badge")).map((b) => b.textContent)).toEqual(["Slack #support", "Work"]);
+  });
+
+  it("puts the connector's notice in the composer's place, with the thread's link and the fork, and keeps the draft", () => {
+    post({ type: "state", state: state({}) });
+    const input = document.querySelector(".composer textarea") as HTMLTextAreaElement;
+    input.value = "half-typed reply";
+    post({ type: "state", state: state({ source: SLACK }) });
+    const panel = document.querySelector<HTMLElement>(".connector")!;
+    expect(panel.hidden).toBe(false);
+    expect((document.querySelector(".composer") as HTMLElement).hidden).toBe(true);
+    expect(panel.textContent).toContain("Answered in Slack #support — reply in the thread");
+    const buttons = Array.from(panel.querySelectorAll("button"));
+    expect(buttons.map((b) => b.textContent)).toEqual(["Open in Slack", "Fork to continue here"]);
+    buttons[0]?.click();
+    expect(sent.at(-1)).toEqual({ type: "openLink", url: SLACK.url });
+    buttons[1]?.click();
+    expect(sent.at(-1)).toEqual({ type: "forkConversation" });
+    // Enter in the hidden composer sends nothing: the thread is answered elsewhere.
+    const before = sent.length;
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(sent.length).toBe(before);
+
+    // Without a link from the connector, only the fork is offered.
+    post({ type: "state", state: state({ source: { ...SLACK, url: null } }) });
+    expect(Array.from(panel.querySelectorAll("button")).map((b) => b.textContent)).toEqual(["Fork to continue here"]);
+
+    // A person's own conversation gets the composer back, draft and all.
+    post({ type: "state", state: state({ source: null }) });
+    expect(panel.hidden).toBe(true);
+    expect((document.querySelector(".composer") as HTMLElement).hidden).toBe(false);
+    expect(input.value).toBe("half-typed reply");
   });
 
   it("shows the instructions badge while instructions are in force, and opens the editor from it", () => {

@@ -95,6 +95,23 @@ export class PermissionDeniedError extends APIError {}
 export class NotFoundError extends APIError {}
 /** 409: valid, but the state does not allow it. */
 export class ConflictError extends APIError {}
+/** The `code` the app puts beside `detail` on the 409 for a turn in a conversation a connector opened. */
+export const CONNECTOR_CONVERSATION_CODE = "connector_conversation";
+/**
+ * 409 with `code` `connector_conversation`: a send, edit or regenerate in a
+ * conversation a connector opened (one started from Slack, say), which is
+ * answered in its own thread alone. `source` says which connector and
+ * channel, with a link to the thread when the connector has one. A fork of
+ * the conversation is ordinary and takes messages.
+ */
+export class ConnectorConversationError extends ConflictError {
+  readonly source: ConversationSource;
+
+  constructor(message: string, init: APIErrorInit & { source: ConversationSource }) {
+    super(message, { ...init, code: CONNECTOR_CONVERSATION_CODE });
+    this.source = init.source;
+  }
+}
 /** 429: the per-key window, or the organisation's monthly budget. */
 export class RateLimitError extends APIError {}
 /** 5xx: the API or the model gateway behind it failed. */
@@ -167,6 +184,31 @@ export interface ConversationMessage {
   finish_reason: string | null;
 }
 
+/**
+ * The org preset a conversation answers with, as the conversation carries
+ * it beside `preset_id`: the id again, and the name a composer can label
+ * the choice with.
+ */
+export interface ConversationPreset {
+  id: string;
+  name: string;
+}
+
+/**
+ * Where a connector opened a conversation: which connector (`slack`), the
+ * connection it came through, the channel as a person would name it
+ * (`#support`), and a link to the thread when the connector has one. Such a
+ * conversation is answered in that thread alone -- `send`, `edit` and
+ * `regenerate` in it throw `ConnectorConversationError` -- and a fork of it
+ * is an ordinary conversation with no source.
+ */
+export interface ConversationSource {
+  connector: string;
+  connection_id: string | null;
+  channel_label: string | null;
+  url: string | null;
+}
+
 export interface Conversation {
   id: string;
   title: string;
@@ -183,6 +225,18 @@ export interface Conversation {
   folder_id: string | null;
   /** Fixed at creation; a temporary chat is in no list and is deleted 24h after its last message. */
   temporary?: boolean | null;
+  /**
+   * The org preset the conversation answers with, when it is on one: the
+   * id, and the same with its name as `preset`. Null for a conversation
+   * answering with its own picks; absent from an API that predates presets.
+   */
+  preset_id?: string | null;
+  preset?: ConversationPreset | null;
+  /**
+   * Where a connector opened the conversation; null for one a person
+   * started, absent from an API that predates connectors.
+   */
+  source?: ConversationSource | null;
 }
 
 /** `GET /api/me/instructions`: the person's own custom instructions. */
@@ -753,12 +807,37 @@ export function errorFromResponse(response: Response, raw: string): APIError {
   const detail = detailText(object?.detail);
   if (detail) {
     // The app's own routes answer `{"detail": ..., "request_id": ...}`,
-    // FastAPI's shape with the ids beside it, rather than OpenAI's.
-    return new Cls(detail, { status: response.status, requestId, retryAfter, rateLimit, body: payload });
+    // FastAPI's shape with the ids beside it, rather than OpenAI's. A few
+    // put a `code` beside the detail, and one of those names the thread
+    // the conversation is answered in.
+    const code = typeof object?.code === "string" ? object.code : null;
+    if (response.status === 409 && code === CONNECTOR_CONVERSATION_CODE) {
+      return new ConnectorConversationError(detail, {
+        status: response.status,
+        requestId,
+        retryAfter,
+        rateLimit,
+        body: payload,
+        source: sourceOf(object?.source),
+      });
+    }
+    return new Cls(detail, { status: response.status, code, requestId, retryAfter, rateLimit, body: payload });
   }
   const text = raw.trim();
   const messageText = text ? `HTTP ${response.status}: ${text.slice(0, 200)}` : `HTTP ${response.status}`;
   return new Cls(messageText, { status: response.status, requestId, retryAfter, rateLimit, body: payload });
+}
+
+/** The thread a `connector_conversation` refusal names, in the shape a conversation carries it. */
+function sourceOf(value: unknown): ConversationSource {
+  const object = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+  const text = (field: unknown): string | null => (typeof field === "string" ? field : null);
+  return {
+    connector: text(object.connector) ?? "",
+    connection_id: text(object.connection_id),
+    channel_label: text(object.channel_label),
+    url: text(object.url),
+  };
 }
 
 /** 429 and 5xx, except the 429 that means the budget is spent. */
@@ -1213,6 +1292,19 @@ export class Conversations {
   /** Every message, branches included, in creation order, as `messages`. */
   tree(conversationId: string, options: RequestOptions = {}): Promise<WithRequestId<ConversationWithMessages>> {
     return this.call("GET", conversationPath(conversationId, "/tree"), undefined, options);
+  }
+
+  /** Copy the path down to `messageId` into a new conversation. `ConflictError` for a temporary conversation: a temporary one is not kept, so it cannot be forked. */
+  fork(
+    conversationId: string,
+    messageId: string,
+    params: { title?: string | null } = {},
+    options: RequestOptions = {},
+  ): Promise<WithRequestId<ConversationWithMessages>> {
+    segment("messageId", messageId);
+    const body: Record<string, unknown> = { message_id: messageId };
+    if (params.title !== undefined && params.title !== null) body.title = params.title;
+    return this.call("POST", conversationPath(conversationId, "/fork"), body, options);
   }
 
   /** Show the branch ending at `messageId`; returns the new path. */

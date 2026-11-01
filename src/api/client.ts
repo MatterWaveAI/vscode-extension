@@ -228,6 +228,11 @@ export class MatterWaveClient {
     return narrow(await this.call(({ reads }) => reads.conversations.setActiveLeaf(id, messageId)));
   }
 
+  /** Copy the path down to `messageId` into a new conversation named `title`. A write: never retried. */
+  async forkConversation(id: string, messageId: string, title?: string): Promise<ConversationDetail> {
+    return narrow(await this.call(({ writes }) => writes.conversations.fork(id, messageId, { title })));
+  }
+
   // --- sidebar management (PUT sets a state, DELETE clears it) -------------
 
   pinConversation(id: string, pinned: boolean): Promise<Conversation> {

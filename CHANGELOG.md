@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Connector conversations**: a conversation a connector opened (one started from a Slack routing rule) carries its source. Its sidebar row is badged with where it is answered (`Slack #support`), and while it is open the composer gives way to a notice -- "Answered in Slack #support -- reply in the thread" -- with an "Open in Slack" button for the thread's link and "Fork to continue here", which copies the conversation down to its leaf into one of the person's own and opens it. A send, edit or regenerate never leaves the client for such a conversation; the API's 409 `connector_conversation` on a stale row's send locks it the same way, without a failed turn. The vendored SDK client gains `Conversation.preset_id`, `preset` and `source`, `ConnectorConversationError`, and `conversations.fork`.
+
 ## [0.3.0] - 2026-10-31
 
 ### Added

@@ -1,8 +1,9 @@
-import type { ConversationFrame } from "../lib/matterwaveClient";
+import { CONNECTOR_CONVERSATION_CODE, type ConversationFrame } from "../lib/matterwaveClient";
 import type { MatterWaveClient } from "../api/client";
 import { ApiError } from "../api/errors";
 import { isUntrustedCertificate } from "../api/transport";
-import type { Conversation, ConversationInstructions, FeedbackReason, Library, Message, ModelInfo, NotificationRow, Part, UsageReport } from "../api/types";
+import type { Conversation, ConversationInstructions, ConversationSource, FeedbackReason, Library, Message, ModelInfo, NotificationRow, Part, UsageReport } from "../api/types";
+import { connectorNoticeText } from "./connectorSource";
 import { fileAttachment } from "../context";
 import { classifyNotificationLink } from "../links";
 import { parseMentions, type Mention } from "./mentions";
@@ -126,6 +127,8 @@ export class ChatController {
   private notice: string | null = null;
   /** True while the open conversation is temporary: fixed at its creation. */
   private temporary = false;
+  /** Where a connector opened the open conversation; null for a person's own. Answered there alone: no turn is sent from here. */
+  private source: ConversationSource | null = null;
   private instructions: InstructionsView | null = null;
   private feedback = new Map<string, FeedbackSummary>();
   /** Attachment ids a preview was posted for, by conversation: sent once, until a webview reload asks again. */
@@ -178,6 +181,10 @@ export class ChatController {
       case "shareConversation":
         this.deps.runCommand(message.type);
         return;
+      case "forkConversation":
+        return this.forkConversation();
+      case "openLink":
+        return this.openNotificationLink(message.url);
       case "send":
         return this.send(message.content, [], message.temporary === true);
       case "stop":
@@ -294,6 +301,7 @@ export class ChatController {
     this.error = null;
     this.notice = null;
     this.temporary = false;
+    this.source = null;
     this.instructions = null;
     this.feedback = new Map();
     this.searchResults = null;
@@ -314,6 +322,7 @@ export class ChatController {
     // A deployment that does not echo the flag leaves what creation said; one
     // that does is authoritative.
     if (detail.temporary !== undefined && detail.temporary !== null) this.temporary = detail.temporary === true;
+    this.source = detail.source ?? null;
     this.instructions = instructionsViewOf(detail.instructions);
     await Promise.all([this.loadMeter(id), this.loadFeedback(id)]);
     this.prefetchImages(id);
@@ -694,6 +703,7 @@ export class ChatController {
       const slash = parseSlashCommand(content);
       if (slash) return this.handleSlash(slash);
     }
+    if (this.refuseConnectorTurn()) return;
     const id = await this.ensureConversation(temporary);
     if (!id) {
       // The composer has already let the text go; when the conversation
@@ -743,7 +753,7 @@ export class ChatController {
   }
 
   private async sendCore(content: string, attachmentIds: string[], temporary: boolean, knownId?: string): Promise<void> {
-    if (this.abort) return;
+    if (this.abort || this.refuseConnectorTurn()) return;
     const id = knownId ?? (await this.ensureConversation(temporary));
     if (!id) {
       // The composer has already let the text go; when the conversation
@@ -805,14 +815,14 @@ export class ChatController {
   }
 
   async edit(messageId: string, content: string): Promise<void> {
-    if (this.abort || !this.activeId) return;
+    if (this.abort || !this.activeId || this.refuseConnectorTurn()) return;
     const id = this.activeId;
     const body = { content, ...(this.model ? { model: this.model.id } : {}) };
     await this.runTurn(id, (signal) => this.deps.client.editMessage(id, messageId, body, signal), { content, attachmentIds: [], userMessageId: messageId, temporary: this.temporary });
   }
 
   async regenerate(messageId: string): Promise<void> {
-    if (this.abort || !this.activeId) return;
+    if (this.abort || !this.activeId || this.refuseConnectorTurn()) return;
     const id = this.activeId;
     const body = this.model ? { model: this.model.id } : {};
     const at = this.path.findIndex((m) => m.id === messageId);
@@ -973,6 +983,12 @@ export class ChatController {
         // Detached: the conversation now open has nothing to do with this turn.
       } else if (abort.signal.aborted) {
         this.notice = "Stopped. Whatever arrived is kept; the server saves it as a cut answer.";
+      } else if (error instanceof ApiError && error.code === CONNECTOR_CONVERSATION_CODE) {
+        // The list was stale: the conversation is a connector's, answered in
+        // its own thread. Not a failed turn, so no Retry; the reload below
+        // reads its source, and the webview swaps the composer for the
+        // notice that points at the thread.
+        this.reloadAfterTurn = true;
       } else {
         this.fail(error);
         if (retryable) this.failed = { ...retryable, userMessageId };
@@ -1111,6 +1127,43 @@ export class ChatController {
     this.emit();
   }
 
+  /**
+   * A turn in a connector's conversation never leaves this client: the
+   * notice says where the thread is answered, and the fork is the way on.
+   */
+  private refuseConnectorTurn(): boolean {
+    if (!this.source) return false;
+    this.notice = connectorNoticeText(this.source);
+    this.emit();
+    return true;
+  }
+
+  /**
+   * The notice's fork: the path as it stands, down to its leaf, becomes a
+   * conversation of the person's own, which then opens with the composer
+   * back. A temporary conversation's 409 is its own sentence, as for pin.
+   */
+  async forkConversation(): Promise<void> {
+    if (!this.activeId || this.abort) return;
+    const id = this.activeId;
+    const leaf = this.path[this.path.length - 1];
+    if (!leaf) {
+      this.notice = "Nothing to fork yet.";
+      this.emit();
+      return;
+    }
+    const title = this.conversations.find((c) => c.id === id)?.title;
+    try {
+      const forked = await this.deps.client.forkConversation(id, leaf.id, title ? `Branch of ${title}` : undefined);
+      this.conversations = [forked, ...this.conversations];
+      await this.openConversation(forked.id);
+      this.notice = `Forked as "${forked.title}".`;
+    } catch (error) {
+      if (!this.surfaceConflictNotice(error)) this.fail(error);
+    }
+    this.emit();
+  }
+
   async compact(): Promise<void> {
     if (!this.activeId || this.abort) return;
     const id = this.activeId;
@@ -1219,6 +1272,7 @@ export class ChatController {
       error: this.error,
       notice: this.notice,
       temporary: this.temporary,
+      source: this.source,
       instructions: this.instructions,
       feedback: Object.fromEntries(this.feedback),
       notifications: this.notifications?.map(notificationView) ?? null,
@@ -1257,6 +1311,7 @@ function conversationSummary(c: Conversation, library: Library | null): Conversa
     pinned: Boolean(c.pinned_at),
     archived: Boolean(c.archived_at),
     badge: libraryBadge(c, library),
+    source: c.source ?? null,
   };
 }
 

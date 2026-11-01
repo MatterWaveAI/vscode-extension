@@ -1,4 +1,4 @@
-import { FEEDBACK_REASONS, type FeedbackReason, type Message, type Part } from "../api/types";
+import { FEEDBACK_REASONS, type ConversationSource, type FeedbackReason, type Message, type Part } from "../api/types";
 
 /**
  * The message channel between the extension host and the chat webview.
@@ -30,6 +30,8 @@ export interface ConversationSummary {
   archived: boolean;
   /** The row's library badge -- folder and tag names -- or null when it carries neither. */
   badge: string | null;
+  /** Where a connector opened the conversation, for the row's source badge; null for a person's own. */
+  source: ConversationSource | null;
 }
 
 /** A conversation a search matched, with the headline around the match. */
@@ -107,6 +109,12 @@ export interface ViewState {
   notice: string | null;
   /** True while the open conversation is temporary: in no list, unshareable, deleted a day after its last message. */
   temporary: boolean;
+  /**
+   * Where a connector opened the open conversation, or null. Such a
+   * conversation is answered in its thread alone: the composer gives way to
+   * a notice pointing there, and the fork is how to continue here.
+   */
+  source: ConversationSource | null;
   /** The custom instructions in force, or null when the conversation carries none of the sort. */
   instructions: InstructionsView | null;
   /** The caller's own feedback, by message id, as the API rehydrated it on open. */
@@ -146,6 +154,10 @@ export type WebviewMessage =
   /** The web app's same conversation, as a Markdown file. */
   | { type: "exportConversation" }
   | { type: "shareConversation" }
+  /** A connector's conversation, copied down to its leaf into one of the person's own, which then opens. */
+  | { type: "forkConversation" }
+  /** Open the thread a connector's conversation is answered in, in the browser. */
+  | { type: "openLink"; url: string }
   /** `temporary` rides only on a first send, before any conversation exists. */
   | { type: "send"; content: string; temporary?: boolean }
   | { type: "stop" }
@@ -180,6 +192,7 @@ const WEBVIEW_TYPES = new Set<WebviewMessage["type"]>([
   "send", "stop", "retry", "edit", "regenerate", "rateMessage", "setInstructions", "switchBranch", "continue",
   "compact", "pickModel", "signIn", "copyRequestId", "refreshNotifications", "readNotification", "readAllNotifications",
   "openNotification", "loadMoreNotifications", "setNotificationsUnreadOnly", "applyCodeBlock",
+  "forkConversation", "openLink",
 ]);
 
 const FEEDBACK_REASON_SET = new Set<string>(FEEDBACK_REASONS);
@@ -257,6 +270,10 @@ export function parseWebviewMessage(raw: unknown): WebviewMessage | null {
     case "openNotification":
       return id() && typeof msg.url === "string" && msg.url.length > 0 && msg.url.length <= MAX_LINK_CHARS
         ? (msg as WebviewMessage)
+        : null;
+    case "openLink":
+      return typeof msg.url === "string" && msg.url.length > 0 && msg.url.length <= MAX_LINK_CHARS
+        ? { type: "openLink", url: msg.url }
         : null;
     case "applyCodeBlock":
       return (

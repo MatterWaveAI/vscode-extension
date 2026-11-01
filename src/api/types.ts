@@ -15,6 +15,7 @@ import type { ConversationMessage, ConversationWithMessages, DeviceToken } from 
 export type {
   Conversation,
   ConversationInstructions,
+  ConversationSource,
   DeviceCode as DeviceAuthorization,
   DeviceToken,
   Me,
