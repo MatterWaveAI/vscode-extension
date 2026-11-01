@@ -11,17 +11,14 @@ export { CONTRACT, CONTRACT_SHA256 } from "./contract.js";
 /** The contract's own version, semver: `CONTRACT.contract_version`. */
 export const CONTRACT_VERSION: string = CONTRACT.contract_version;
 
-type ContractTool = (typeof CONTRACT.tools)[number];
-type ContractMode = (typeof CONTRACT.approval_modes)[number];
-
-export type ToolName = ContractTool["name"];
+export type ToolName = (typeof CONTRACT.tools)[number]["name"];
 /** The kinds of the contract's own seven tools. */
-export type ToolKind = ContractTool["kind"];
+export type ToolKind = (typeof CONTRACT.tools)[number]["kind"];
 /** Every kind a tool may have: the contract's three, then `network`, `mcp` and `meta`. */
 export type AnyToolKind = keyof typeof CONTRACT.tool_kinds;
 /** The kinds a client's own tools may have beyond the contract's: web_fetch (`network`), an MCP server's tool (`mcp`), todo_write, leaving plan mode or dispatching a subagent (`meta`). */
 export type ExtraToolKind = Exclude<AnyToolKind, ToolKind>;
-export type ModeName = ContractMode["name"];
+export type ModeName = (typeof CONTRACT.approval_modes)[number]["name"];
 export type Decision = "allow" | "ask" | "deny";
 export type Refusal = keyof typeof CONTRACT.confinement.refusals;
 export type ApprovalRefusal = keyof typeof CONTRACT.approval.refusals;

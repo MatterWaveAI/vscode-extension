@@ -16,6 +16,8 @@
  *     const next = applyEdit(text, oldString, newString); // or EditError
  *     const diff = unifiedDiff(text, next, target.relative);
  *     const hits = runGrep(root, "TODO", { glob: "*.ts" });  // grep's text, as every client prints it
+ *
+ * @module @matterwave/sdk/agent
  */
 
 export * from "./index.js";
@@ -32,3 +34,4 @@ export {
   walk,
   walkAsync,
 } from "./search.js";
+export type { GlobOptions, GrepAsyncOptions, GrepOptions } from "./search.js";

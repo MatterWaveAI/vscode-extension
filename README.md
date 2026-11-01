@@ -346,8 +346,8 @@ sdk:sync` re-copies every `src/agent/*.ts` from a `typescript-sdk` checkout or w
 <dir>` or `MATTERWAVE_SDK_DIR`, by default one beside this repository) at a git ref (`--ref` or
 `MATTERWAVE_SDK_REF`, default `develop`) and records it in `src/lib/sdk/VENDORED.json`; `pnpm
 sdk:check` compares the copy with the ref it was taken from. The copy is agent contract 1.2.0,
-commit `f95f723` of the SDK's `agent-contract-1.1`, pinned by commit so the branch moving on is not
-drift (`pnpm sdk:sync --sdk <checkout> --ref f95f723564f6ec19fb50955ba73a929ef8a63f4e`).
+commit `cce162b` of the SDK's `agent-contract-1.1`, pinned by commit so the branch moving on is not
+drift (`pnpm sdk:sync --sdk <checkout> --ref cce162b`).
 `test/sdkVendor.test.ts` fails on a hand edit of the copy, and `test/agent/conformance.test.ts`
 runs the contract's conformance cases through the extension's own tools. Without a connection the
 composer is disabled and the draft is kept; **Reconnect** in the view tries the API again.

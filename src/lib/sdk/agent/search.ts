@@ -406,7 +406,8 @@ function under(relative: string, base: string): string {
   return base ? relative.slice(base.length + 1) : relative;
 }
 
-type GlobOptions = { path?: string; deny?: DenyList; ignore?: SearchIgnore; limits?: Limits };
+/** `runGlob`'s options: the directory to search under, a deny list and search rules in place of those loaded from the root, and limits in place of the contract's. */
+export type GlobOptions = { path?: string; deny?: DenyList; ignore?: SearchIgnore; limits?: Limits };
 
 function prepareGlob(root: string, pattern: string, options: GlobOptions) {
   if (pattern.trim() === "") throw new ToolError("empty_pattern");
@@ -467,7 +468,8 @@ export async function runGlobAsync(
   }
 }
 
-type GrepOptions = {
+/** `runGrep`'s options: `runGlob`'s, a glob the file names must match, and case ignored. */
+export type GrepOptions = {
   path?: string;
   glob?: string;
   ignoreCase?: boolean;
@@ -727,7 +729,8 @@ function grepThreads(
   };
 }
 
-type GrepAsyncOptions = GrepOptions & {
+/** `runGrepAsync`'s options: `runGrep`'s, its deadlines and a signal to stop it. */
+export type GrepAsyncOptions = GrepOptions & {
   /** The regex's deadline: the most seconds it may spend matching on each of the search's threads, the reads not counted. */
   timeoutS?: number;
   /** The most seconds the whole search may take, walk and reads included. */
