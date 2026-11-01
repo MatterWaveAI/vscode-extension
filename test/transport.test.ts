@@ -1,8 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { createServer, request as httpRequest, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createFetch,
   describeTransportError,
   expandHome,
+  requestFetch,
   tlsCodeOf,
   TransportError,
   UNTRUSTED_CERTIFICATE_MESSAGE,
@@ -10,16 +13,21 @@ import {
 
 const PEM = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
 
-/** What undici throws for a refused chain: "fetch failed" over the TLS error. */
+/** What Node's fetch throws for a refused chain: "fetch failed" over the TLS error. */
 function tlsFailure(code: string): Error {
   const inner = Object.assign(new Error("self-signed certificate in certificate chain"), { code });
   return new TypeError("fetch failed", { cause: inner });
 }
 
 function harness(options: { caFile?: string; files?: Record<string, string>; fail?: unknown } = {}) {
-  const calls: { input: string; dispatcher: unknown }[] = [];
-  const dispatchers: string[][] = [];
+  /** Which way each request went: the host's fetch, or the one trusting a CA list. */
+  const calls: { input: string; via: "host" | string[] }[] = [];
+  const trusting: string[][] = [];
   const reads: string[] = [];
+  const answer = async () => {
+    if (options.fail) throw options.fail;
+    return new Response("{}", { status: 200 });
+  };
   const fetchImpl = createFetch(() => options.caFile ?? "", {
     readFile: (path) => {
       reads.push(path);
@@ -28,51 +36,60 @@ function harness(options: { caFile?: string; files?: Record<string, string>; fai
       return pem;
     },
     rootCertificates: ["ROOT-A", "ROOT-B"],
-    makeDispatcher: (ca) => {
-      dispatchers.push(ca);
-      return { ca };
+    fetch: async (input) => {
+      calls.push({ input, via: "host" });
+      return answer();
     },
-    fetch: async (input, init) => {
-      calls.push({ input, dispatcher: init.dispatcher });
-      if (options.fail) throw options.fail;
-      return new Response("{}", { status: 200 });
+    fetchTrusting: (ca) => {
+      trusting.push(ca);
+      return async (input) => {
+        calls.push({ input, via: ca });
+        return answer();
+      };
     },
   });
-  return { fetchImpl, calls, dispatchers, reads };
+  return { fetchImpl, calls, trusting, reads };
 }
 
 describe("matterwave.caFile", () => {
-  it("sends without a dispatcher when no CA file is set", async () => {
-    const { fetchImpl, calls, dispatchers } = harness();
+  it("sends through the host's own fetch -- the editor's proxy and certificate store -- when no CA file is set", async () => {
+    const { fetchImpl, calls, trusting } = harness();
     await fetchImpl("https://mw.test/api/me", { method: "GET" });
-    expect(calls[0]?.dispatcher).toBeUndefined();
-    expect(dispatchers).toEqual([]);
+    expect(calls).toEqual([{ input: "https://mw.test/api/me", via: "host" }]);
+    expect(trusting).toEqual([]);
   });
 
-  it("adds the file's PEM beside the system authorities and sends through that dispatcher", async () => {
-    const { fetchImpl, calls, dispatchers, reads } = harness({ caFile: "/etc/mw/root.crt", files: { "/etc/mw/root.crt": PEM } });
+  it("adds the file's PEM to the bundled roots and sends through the fetch that trusts them", async () => {
+    const { fetchImpl, calls, trusting, reads } = harness({ caFile: "/etc/mw/root.crt", files: { "/etc/mw/root.crt": PEM } });
     await fetchImpl("https://mw.test/api/me", { method: "GET" });
     await fetchImpl("https://mw.test/api/models", { method: "GET" });
-    expect(dispatchers).toEqual([["ROOT-A", "ROOT-B", PEM]]);
-    expect(calls.map((c) => c.dispatcher)).toEqual([{ ca: ["ROOT-A", "ROOT-B", PEM] }, { ca: ["ROOT-A", "ROOT-B", PEM] }]);
+    expect(trusting).toEqual([["ROOT-A", "ROOT-B", PEM]]);
+    expect(calls.map((c) => c.via)).toEqual([
+      ["ROOT-A", "ROOT-B", PEM],
+      ["ROOT-A", "ROOT-B", PEM],
+    ]);
     // Read once per path, not per request.
     expect(reads).toEqual(["/etc/mw/root.crt"]);
   });
 
-  it("re-reads when the setting changes", async () => {
+  it("re-reads when the setting changes, and goes back to the host's fetch when it is cleared", async () => {
     let caFile = "/a.crt";
     const files = { "/a.crt": PEM, "/b.crt": PEM.replace("MIIB", "MIIC") };
-    const dispatchers: string[][] = [];
+    const trusting: string[][] = [];
+    const via: string[] = [];
     const fetchImpl = createFetch(() => caFile, {
       readFile: (path) => files[path as keyof typeof files],
       rootCertificates: [],
-      makeDispatcher: (ca) => (dispatchers.push(ca), {}),
-      fetch: async () => new Response("{}"),
+      fetch: async () => (via.push("host"), new Response("{}")),
+      fetchTrusting: (ca) => (trusting.push(ca), async () => (via.push("trusting"), new Response("{}"))),
     });
     await fetchImpl("https://mw.test/", {});
     caFile = "/b.crt";
     await fetchImpl("https://mw.test/", {});
-    expect(dispatchers).toEqual([[PEM], [files["/b.crt"]]]);
+    caFile = "";
+    await fetchImpl("https://mw.test/", {});
+    expect(trusting).toEqual([[PEM], [files["/b.crt"]]]);
+    expect(via).toEqual(["trusting", "trusting", "host"]);
   });
 
   it("fails the request, naming the setting, when the file cannot be read", async () => {
@@ -108,7 +125,7 @@ describe("a failed request's message", () => {
     expect(describeTransportError(tlsFailure(code))).toBe(`${UNTRUSTED_CERTIFICATE_MESSAGE} (${code})`);
   });
 
-  it("finds the code however deep undici nested it", () => {
+  it("finds the code however deep the runtime nested it", () => {
     const deep = new Error("outer", { cause: new Error("middle", { cause: Object.assign(new Error("inner"), { code: "CERT_UNTRUSTED" }) }) });
     expect(tlsCodeOf(deep)).toBe("CERT_UNTRUSTED");
   });
@@ -136,5 +153,104 @@ describe("a failed request's message", () => {
     const abort = new DOMException("The operation was aborted.", "AbortError");
     const { fetchImpl } = harness({ fail: abort });
     await expect(fetchImpl("https://mw.test/api/me", { signal: controller.signal })).rejects.toBe(abort);
+  });
+});
+
+describe("requestFetch: fetch over Node's request, the way a CA file sends", () => {
+  let server: Server;
+  let base = "";
+  const seen: { method: string; url: string; type: string; body: string }[] = [];
+
+  beforeAll(async () => {
+    server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        seen.push({ method: req.method ?? "", url: req.url ?? "", type: req.headers["content-type"] ?? "", body: Buffer.concat(chunks).toString() });
+        if (req.url === "/json") {
+          res.writeHead(201, { "content-type": "application/json", "x-request-id": "req-1" });
+          res.end(JSON.stringify({ ok: true }));
+        } else if (req.url === "/empty") {
+          res.writeHead(204).end();
+        } else if (req.url === "/moved") {
+          res.writeHead(303, { location: "/json" }).end();
+        } else if (req.url === "/stream") {
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          res.write("data: one\n\n");
+          setTimeout(() => res.end("data: two\n\n"), 20);
+        } else if (req.url === "/forever") {
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          res.write("data: first\n\n");
+        } else {
+          res.writeHead(404).end();
+        }
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const send = requestFetch({ ca: [] });
+
+  it("sends a JSON body and reads the status, headers and body back", async () => {
+    const response = await send(`${base}/json`, { method: "POST", headers: { "Content-Type": "application/json" }, body: '{"a":1}' });
+    expect(response.status).toBe(201);
+    expect(response.headers.get("x-request-id")).toBe("req-1");
+    expect(await response.json()).toEqual({ ok: true });
+    expect(seen.at(-1)).toMatchObject({ method: "POST", type: "application/json", body: '{"a":1}' });
+  });
+
+  it("encodes FormData as multipart with its boundary, as fetch does", async () => {
+    const form = new FormData();
+    form.append("file", new Blob(["hello"], { type: "text/plain" }), "a.txt");
+    await send(`${base}/json`, { method: "POST", body: form });
+    const last = seen.at(-1);
+    expect(last?.type).toMatch(/^multipart\/form-data; boundary=/);
+    expect(last?.body).toContain('filename="a.txt"');
+    expect(last?.body).toContain("hello");
+  });
+
+  it("has no body for a 204", async () => {
+    const response = await send(`${base}/empty`, { method: "DELETE" });
+    expect(response.status).toBe(204);
+    expect(response.body).toBeNull();
+  });
+
+  it("follows a 303 as a GET without the body", async () => {
+    const response = await send(`${base}/moved`, { method: "POST", body: "x" });
+    expect(response.status).toBe(201);
+    expect(seen.at(-1)).toMatchObject({ method: "GET", url: "/json", body: "" });
+  });
+
+  it("streams the answer as it arrives", async () => {
+    const response = await send(`${base}/stream`, {});
+    expect(await response.text()).toBe("data: one\n\ndata: two\n\n");
+  });
+
+  it("stops a stream when the signal aborts", async () => {
+    const controller = new AbortController();
+    const response = await send(`${base}/forever`, { signal: controller.signal });
+    const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe("data: first\n\n");
+    controller.abort();
+    await expect(reader.read()).rejects.toThrow();
+  });
+
+  it("hands the CA list to an https request, and nothing to a plain one", async () => {
+    const options: Record<string, unknown>[] = [];
+    const spy = ((_url: URL, opts: Record<string, unknown>, callback: (res: unknown) => void) => {
+      options.push(opts);
+      return httpRequest(new URL(`${base}/json`), { method: opts.method as string }, callback);
+    }) as unknown as typeof httpRequest;
+    const trusting = requestFetch({ ca: ["ROOT", PEM], request: { http: spy, https: spy } });
+    await trusting("https://mw.test/json", {});
+    await trusting("http://mw.test/json", {});
+    expect(options[0]?.ca).toEqual(["ROOT", PEM]);
+    expect(options[1]?.ca).toBeUndefined();
   });
 });

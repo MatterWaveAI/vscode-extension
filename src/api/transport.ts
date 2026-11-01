@@ -1,20 +1,27 @@
 import { readFileSync } from "node:fs";
+import * as http from "node:http";
+import * as https from "node:https";
 import { homedir } from "node:os";
+import { Readable } from "node:stream";
 import * as tls from "node:tls";
-import { Agent, fetch as undiciFetch } from "undici";
 import type { FetchLike } from "./client";
 
 /**
  * The `fetch` every request goes through, and the trust it carries.
  *
- * The extension host's `fetch` is undici's, with no per-call trust store:
- * a deployment behind a private CA (a lab's Caddy root, a corporate
- * intermediate) is refused with a TLS error that names an OpenSSL code
- * and nothing a person can act on. `matterwave.caFile` names the PEM of
- * that authority; it is read once per path, added beside the system's
- * authorities, and carried by an undici `Agent` whose `connect.ca` is the
- * TLS option (`https.Agent`'s `ca`, by another route), so the SDK's
- * requests and this extension's own are both covered.
+ * Without `matterwave.caFile` it is the extension host's own `fetch`,
+ * which VS Code extends with the editor's network settings: `http.proxy`
+ * (and the system proxy, with its authentication), `http.proxyStrictSSL`,
+ * and the operating system's certificate store. Nothing is bundled for it.
+ *
+ * A deployment behind a private CA the operating system does not trust (a
+ * lab's Caddy root, a corporate intermediate) needs `matterwave.caFile`,
+ * the PEM of that authority. Node's `fetch` takes no per-call trust store,
+ * so those requests go through Node's `https.request` with the PEM added
+ * to the bundled roots; VS Code patches that module the same way --
+ * the proxy, and the operating system's certificates added to every TLS
+ * context -- so the CA file is trusted on top of everything else, not
+ * instead of it.
  *
  * A TLS refusal, with or without a CA file, comes out as one sentence
  * that names the setting; every other failure keeps its own message.
@@ -73,7 +80,7 @@ export function describeTransportError(error: unknown): string {
   const code = tlsCodeOf(error);
   if (code) return `${UNTRUSTED_CERTIFICATE_MESSAGE} (${code})`;
   if (error instanceof Error) {
-    // undici says "fetch failed" and keeps the reason underneath.
+    // Node's fetch says "fetch failed" and keeps the reason underneath.
     const cause = error.cause;
     if (error.message === "fetch failed" && cause instanceof Error && cause.message) return cause.message;
     return error.message;
@@ -81,23 +88,21 @@ export function describeTransportError(error: unknown): string {
   return String(error);
 }
 
-/** The seams a test replaces: the file system, the trust store and the two fetches. */
+/** The seams a test replaces: the file system, the bundled roots and the two ways of sending. */
 export interface TransportDeps {
   readFile: (path: string) => string;
   rootCertificates: readonly string[];
-  /** The request, with `dispatcher` on `init` when a CA file is in force. */
-  fetch: (input: string, init: RequestInit & { dispatcher?: unknown }) => Promise<Response>;
-  makeDispatcher: (ca: string[]) => unknown;
+  /** The extension host's fetch, for every request while no CA file is set. */
+  fetch: FetchLike;
+  /** A fetch that trusts `ca` (bundled roots and the file's PEM), for requests while one is. */
+  fetchTrusting: (ca: string[]) => FetchLike;
 }
 
 const defaultDeps: TransportDeps = {
   readFile: (path) => readFileSync(path, "utf8"),
   rootCertificates: tls.rootCertificates,
-  fetch: (input, init) =>
-    init.dispatcher
-      ? (undiciFetch(input, init as Parameters<typeof undiciFetch>[1]) as unknown as Promise<Response>)
-      : fetch(input, init),
-  makeDispatcher: (ca) => new Agent({ connect: { ca } }),
+  fetch: (input, init) => fetch(input, init),
+  fetchTrusting: (ca) => requestFetch({ ca }),
 };
 
 export function expandHome(path: string): string {
@@ -107,16 +112,16 @@ export function expandHome(path: string): string {
 /**
  * A `fetch` that reads `caFile` on every call, so a change to the setting
  * applies to the next request, and that turns a refused certificate into
- * `UNTRUSTED_CERTIFICATE_MESSAGE`. The PEM is read and the dispatcher
+ * `UNTRUSTED_CERTIFICATE_MESSAGE`. The PEM is read and the trusting fetch
  * built once per distinct path; an unreadable file fails the request with
  * the path and the reason, since a request sent without the CA the person
  * configured would fail less clearly.
  */
 export function createFetch(caFile: () => string, overrides: Partial<TransportDeps> = {}): FetchLike {
   const deps = { ...defaultDeps, ...overrides };
-  let cached: { path: string; dispatcher: unknown } | null = null;
-  const dispatcherFor = (path: string): unknown => {
-    if (cached?.path === path) return cached.dispatcher;
+  let cached: { path: string; fetch: FetchLike } | null = null;
+  const trustingFetch = (path: string): FetchLike => {
+    if (cached?.path === path) return cached.fetch;
     let pem: string;
     try {
       pem = deps.readFile(expandHome(path));
@@ -129,17 +134,91 @@ export function createFetch(caFile: () => string, overrides: Partial<TransportDe
     if (!pem.includes("-----BEGIN CERTIFICATE-----")) {
       throw new TransportError(`matterwave.caFile (${path}) is not a PEM certificate file.`, null);
     }
-    cached = { path, dispatcher: deps.makeDispatcher([...deps.rootCertificates, pem]) };
-    return cached.dispatcher;
+    cached = { path, fetch: deps.fetchTrusting([...deps.rootCertificates, pem]) };
+    return cached.fetch;
   };
   return async (input, init = {}) => {
     const path = caFile().trim();
-    const request = path ? { ...init, dispatcher: dispatcherFor(path) } : init;
+    const send = path ? trustingFetch(path) : deps.fetch;
     try {
-      return await deps.fetch(input, request);
+      return await send(input, init);
     } catch (error) {
       if (init.signal?.aborted) throw error;
       throw new TransportError(describeTransportError(error), error);
     }
   };
+}
+
+/** Redirects a request follows before it gives up, as `fetch` does. */
+const MAX_REDIRECTS = 5;
+
+/** What `requestFetch` sends through: Node's `request` for each scheme, replaceable in tests. */
+export interface RequestFns {
+  http: typeof http.request;
+  https: typeof https.request;
+}
+
+/**
+ * The `fetch` contract over Node's `http.request` / `https.request`, with
+ * `ca` as the TLS trust: the request body as `fetch` takes it (text, a
+ * Blob, FormData), the answer as a streamed `Response`, an abort through
+ * the signal, and redirects followed the way `fetch` follows them. Sent
+ * through the modules the editor patches, so its proxy and certificate
+ * settings apply.
+ */
+export function requestFetch(options: { ca: string[]; request?: RequestFns }): FetchLike {
+  const request = options.request ?? { http: http.request, https: https.request };
+  const send = async (input: string, init: RequestInit, hops: number): Promise<Response> => {
+    const url = new URL(input);
+    const method = (init.method ?? "GET").toUpperCase();
+    const headers = new Headers(init.headers);
+    let body: Buffer | undefined;
+    if (init.body !== undefined && init.body !== null) {
+      // The Request does what fetch would: the bytes, and a multipart
+      // boundary or text type in Content-Type when the body sets one.
+      const encoded = new Request(input, { method, headers, body: init.body });
+      body = Buffer.from(await encoded.arrayBuffer());
+      const type = encoded.headers.get("content-type");
+      if (type && !headers.has("content-type")) headers.set("content-type", type);
+    }
+    if (body) headers.set("content-length", String(body.byteLength));
+    const response = await new Promise<http.IncomingMessage>((resolve, reject) => {
+      const open = url.protocol === "http:" ? request.http : request.https;
+      const outgoing = open(
+        url,
+        {
+          method,
+          headers: Object.fromEntries(headers),
+          ...(url.protocol === "https:" ? { ca: options.ca } : {}),
+          ...(init.signal ? { signal: init.signal } : {}),
+        },
+        resolve,
+      );
+      outgoing.on("error", reject);
+      outgoing.end(body);
+    });
+    const status = response.statusCode ?? 0;
+    const location = response.headers.location;
+    if (location && [301, 302, 303, 307, 308].includes(status) && init.redirect !== "manual") {
+      response.resume();
+      if (hops >= MAX_REDIRECTS) throw new Error(`more than ${MAX_REDIRECTS} redirects from ${input}`);
+      // 303, and a 301/302 after a POST, turn into a GET without the body, as fetch does.
+      const asGet = status === 303 || ((status === 301 || status === 302) && method === "POST");
+      const next: RequestInit = asGet ? { ...init, method: "GET", body: undefined } : init;
+      return send(new URL(location, url).toString(), next, hops + 1);
+    }
+    const answer = new Headers();
+    for (const [name, value] of Object.entries(response.headers)) {
+      if (Array.isArray(value)) for (const one of value) answer.append(name, one);
+      else if (value !== undefined) answer.set(name, value);
+    }
+    const empty = method === "HEAD" || status === 204 || status === 304;
+    if (empty) response.resume();
+    return new Response(empty ? null : (Readable.toWeb(response) as ReadableStream<Uint8Array>), {
+      status,
+      statusText: response.statusMessage ?? "",
+      headers: answer,
+    });
+  };
+  return (input, init = {}) => send(input, init, 0);
 }

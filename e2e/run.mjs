@@ -31,7 +31,10 @@
 // person signs it in, it works on every plan, and the session is the
 // browser's.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import * as http from "node:http";
+import * as https from "node:https";
+import * as net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -210,17 +213,124 @@ function editorWorkspace(dir) {
   return file;
 }
 
+/** openssl from PATH, $OPENSSL, or Git for Windows' copy; null when there is none. */
+function findOpenssl() {
+  const candidates = [process.env.OPENSSL, "openssl", "C:\\Program Files\\Git\\usr\\bin\\openssl.exe"].filter(Boolean);
+  return candidates.find((bin) => spawnSync(bin, ["version"], { stdio: "ignore" }).status === 0) ?? null;
+}
+
+/**
+ * The deployment's name: one no resolver knows, so only the proxy can reach
+ * it (the editor sends loopback addresses direct, never through a proxy).
+ */
+const TARGET_HOST = "mw-e2e.test";
+
+/**
+ * A throwaway certificate authority and a server certificate it signed for
+ * TARGET_HOST: the private CA a deployment behind a corporate root
+ * presents, which no system store trusts.
+ */
+function privateCa(dir) {
+  const openssl = findOpenssl();
+  if (!openssl) return null;
+  const at = (name) => path.join(dir, name);
+  const run = (args) => {
+    const result = spawnSync(openssl, args, { encoding: "utf8" });
+    if (result.status !== 0) throw new Error(`openssl ${args[0]} failed: ${result.stderr}`);
+  };
+  writeFileSync(at("server.ext"), `subjectAltName=DNS:${TARGET_HOST}\nbasicConstraints=CA:FALSE\n`);
+  run(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", at("ca.key"), "-out", at("ca.crt"), "-days", "2", "-subj", "/CN=MatterWave e2e test CA"]);
+  run(["req", "-newkey", "rsa:2048", "-nodes", "-keyout", at("server.key"), "-out", at("server.csr"), "-subj", `/CN=${TARGET_HOST}`]);
+  run(["x509", "-req", "-in", at("server.csr"), "-CA", at("ca.crt"), "-CAkey", at("ca.key"), "-CAcreateserial", "-out", at("server.crt"), "-days", "2", "-extfile", at("server.ext")]);
+  return { ca: at("ca.crt"), key: readFileSync(at("server.key")), cert: readFileSync(at("server.crt")) };
+}
+
+const PROXY_USER = "e2e";
+const PROXY_PASSWORD = "e2e-test-pass";
+
+/**
+ * An HTTPS server behind the private CA, and an HTTP proxy in front of it
+ * that refuses a tunnel without Basic credentials and tunnels to that one
+ * server alone (the editor's own traffic stays off the network): the
+ * network a person behind a corporate proxy has. The proxy counts what it
+ * saw, and answers GET /__stats with the counts.
+ */
+async function proxiedDeployment(tls) {
+  const stats = { tunnels: 0, refused: 0 };
+  const target = https.createServer({ key: tls.key, cert: tls.cert }, (req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ through: "target", path: req.url }));
+  });
+  const expected = `Basic ${Buffer.from(`${PROXY_USER}:${PROXY_PASSWORD}`).toString("base64")}`;
+  const proxy = http.createServer((req, res) => {
+    if (req.url?.endsWith("/__stats")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(stats));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  proxy.on("connect", (req, socket, head) => {
+    if (req.headers["proxy-authorization"] !== expected) {
+      stats.refused++;
+      socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="e2e"\r\n\r\n');
+      return;
+    }
+    const [host, port] = (req.url ?? "").split(":");
+    if (host !== TARGET_HOST || Number(port) !== target.address().port) {
+      socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+      return;
+    }
+    stats.tunnels++;
+    const upstream = net.connect(Number(port), "127.0.0.1", () => {
+      socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      upstream.write(head);
+      upstream.pipe(socket);
+      socket.pipe(upstream);
+    });
+    upstream.on("error", () => socket.destroy());
+    socket.on("error", () => upstream.destroy());
+  });
+  await Promise.all([target, proxy].map((server) => new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))));
+  return {
+    targetUrl: `https://${TARGET_HOST}:${target.address().port}`,
+    proxyUrl: `http://${PROXY_USER}:${PROXY_PASSWORD}@127.0.0.1:${proxy.address().port}`,
+    statsUrl: `http://127.0.0.1:${proxy.address().port}/__stats`,
+    close: () => {
+      for (const server of [target, proxy]) {
+        server.closeAllConnections?.();
+        server.close();
+      }
+    },
+  };
+}
+
 async function runEditorSuite() {
   const dir = mkdtempSync(path.join(tmpdir(), "mw-vscode-e2e-"));
+  const tls = privateCa(dir);
+  if (!tls) console.log("vscode e2e: no openssl, so the proxy and private-CA test is skipped.");
+  const network = tls ? await proxiedDeployment(tls) : null;
+  // The editor's own network settings, as a person behind the proxy has
+  // them: user settings, since a workspace cannot set http.proxy.
+  const userData = path.join(dir, "user-data");
+  mkdirSync(path.join(userData, "User"), { recursive: true });
+  writeFileSync(path.join(userData, "User", "settings.json"), JSON.stringify(network ? { "http.proxy": network.proxyUrl } : {}, null, 2));
   try {
     await runTests({
       extensionDevelopmentPath: root,
       extensionTestsPath: path.join(root, "dist", "e2e", "index.js"),
       cachePath: path.join(root, ".vscode-test"),
-      launchArgs: [editorWorkspace(dir), ...LAUNCH_ARGS],
-      extensionTestsEnv: { ELECTRON_RUN_AS_NODE: undefined, E2E_SUITE: "editor" },
+      launchArgs: [editorWorkspace(dir), `--user-data-dir=${userData}`, ...LAUNCH_ARGS],
+      extensionTestsEnv: {
+        ELECTRON_RUN_AS_NODE: undefined,
+        E2E_SUITE: "editor",
+        E2E_TLS_TARGET: network?.targetUrl,
+        E2E_TLS_CA: tls?.ca,
+        E2E_PROXY_STATS: network?.statsUrl,
+      },
     });
   } finally {
+    network?.close();
     rmSync(dir, { recursive: true, force: true });
   }
 }

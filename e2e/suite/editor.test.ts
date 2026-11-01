@@ -2,6 +2,7 @@
 import * as assert from "node:assert/strict";
 import * as vscode from "vscode";
 import { applyToFile } from "../../src/apply";
+import { createFetch } from "../../src/api/transport";
 import { CheckpointStore } from "../../src/checkpoints";
 import { searchWorkspaceFiles } from "../../src/fileSearch";
 import { snapshotFolder } from "../../src/snapshotFiles";
@@ -123,6 +124,40 @@ describe("reading a terminal in a real editor", function () {
       terminal.dispose();
       write.dispose();
     }
+  });
+});
+
+describe("a private CA behind an authenticating proxy", function () {
+  // From e2e/run.mjs: an HTTPS server signed by a throwaway CA, and the
+  // proxy in front of it that this editor's http.proxy names.
+  const target = process.env.E2E_TLS_TARGET ?? "";
+  const caFile = process.env.E2E_TLS_CA ?? "";
+  const statsUrl = process.env.E2E_PROXY_STATS ?? "";
+
+  async function proxyStats(): Promise<{ tunnels: number; refused: number }> {
+    return (await fetch(statsUrl)).json() as Promise<{ tunnels: number; refused: number }>;
+  }
+
+  before(function () {
+    if (!target) this.skip();
+  });
+
+  it("reaches the server through the editor's proxy, trusting matterwave.caFile on top of the system's roots", async function () {
+    const before = await proxyStats();
+    const send = createFetch(() => caFile);
+    const response = await send(`${target}/api/me`, { headers: { accept: "application/json" } });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { through: "target", path: "/api/me" });
+    const after = await proxyStats();
+    assert.equal(after.tunnels, before.tunnels + 1, "the request went through the proxy's tunnel, credentials and all");
+  });
+
+  it("goes through the same proxy without a CA file, and refuses the private CA in words that name the setting", async function () {
+    const before = await proxyStats();
+    const send = createFetch(() => "");
+    await assert.rejects(send(`${target}/api/me`, {}), (error: Error) => error.message.includes("matterwave.caFile"));
+    const after = await proxyStats();
+    assert.equal(after.tunnels, before.tunnels + 1, "the host's own fetch followed http.proxy");
   });
 });
 
