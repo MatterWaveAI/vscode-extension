@@ -39,10 +39,30 @@ jobs:
           path: matterwave.vsix
           retention-days: 7
 
+  # The agent's tool host on each platform its shell, process-tree kill and
+  # path rules differ on: confinement, Stop ending `sleep 60` within 2 s,
+  # the caps, the approvals.
+  agent-tools:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec vitest run test/agent
+
   # The extension inside a real VS Code (downloaded by @vscode/test-electron)
-  # under a virtual display: the editor suite always runs; the deployment
-  # suite runs only where E2E_BASE_URL and the e2e account are configured,
-  # and says it was skipped otherwise.
+  # under a virtual display: the editor suite and the agent suite (against the
+  # scripted /v1 it serves itself) always run; the deployment suite runs only
+  # where E2E_BASE_URL and the e2e account are configured, and says it was
+  # skipped otherwise.
   e2e:
     runs-on: ubuntu-latest
     steps:

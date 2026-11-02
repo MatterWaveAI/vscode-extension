@@ -3,7 +3,11 @@ import { BUILT_IN_COMMANDS, parseSlashCommand } from "../src/chat/slash";
 
 describe("parseSlashCommand", () => {
   it("recognises every built-in, with and without arguments", () => {
-    expect(BUILT_IN_COMMANDS).toEqual(["model", "clear", "compact", "share", "export"]);
+    expect(BUILT_IN_COMMANDS).toEqual([
+      "model", "clear", "compact", "share", "export",
+      "help", "approval-mode", "context", "restore", "init", "resume",
+    ]);
+    expect(parseSlashCommand("/approval-mode auto-edit")).toEqual({ kind: "built-in", command: "approval-mode", args: "auto-edit" });
     expect(parseSlashCommand("/clear")).toEqual({ kind: "built-in", command: "clear", args: "" });
     expect(parseSlashCommand("/model grt-large")).toEqual({ kind: "built-in", command: "model", args: "grt-large" });
   });

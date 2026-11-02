@@ -36,6 +36,12 @@ const COMMAND_DETAIL: Record<string, string> = {
   compact: "summarise earlier turns",
   share: "copy a share link",
   export: "save as Markdown",
+  help: "list the commands",
+  "approval-mode": "set the agent's approval mode",
+  context: "what the next request carries",
+  restore: "put files back before a change",
+  init: "draft MATTERWAVE.md with the agent",
+  resume: "pick up an earlier agent run",
 };
 
 /** The offers for the token ending at `caret`, or null when it is not one that completes. */

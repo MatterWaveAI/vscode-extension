@@ -1,6 +1,18 @@
 import type { FeedbackReason, Message, Part } from "../api/types";
 import { appendDelta, setPart } from "../chat/assemble";
-import type { AnnouncementView, FeedbackSummary, HostMessage, NotificationView, TranscriptEntry, UsageView, ViewState, WebviewMessage } from "../chat/protocol";
+import type {
+  AgentPendingView,
+  AgentView,
+  AnnouncementView,
+  BudgetView,
+  FeedbackSummary,
+  HostMessage,
+  NotificationView,
+  TranscriptEntry,
+  UsageView,
+  ViewState,
+  WebviewMessage,
+} from "../chat/protocol";
 import { trustedImageDataUri } from "../chat/images";
 import { parseCodeBlocks } from "../chat/codeBlocks";
 import { renderMarkdown } from "./markdown";
@@ -44,6 +56,8 @@ let feedbackPickerId: string | null = null;
 let instructionsOpen = false;
 /** Whether the bell's panel is open under the banners. */
 let notificationsOpen = false;
+/** Whether the usage panel (this session's agent runs, the period, the budget) is open. */
+let usageOpen = false;
 /**
  * This session's feedback, over the server's copy so a click shows at once.
  * A null marks a withdrawal. Cleared whenever a full state arrives, which is
@@ -129,6 +143,7 @@ const banners = el("div");
 const transcript = el("div", { className: "transcript" });
 const input = el("textarea");
 const PLACEHOLDER = "Ask MatterWave…  (@file, @folder, @terminal, @git, @docs add context — Enter to send)";
+const AGENT_PLACEHOLDER = "Tell the agent what to do…  (@path adds a file, /help lists commands, Shift+Tab changes the mode)";
 const OFFLINE_PLACEHOLDER = "MatterWave cannot be reached. Your draft is kept.";
 input.placeholder = PLACEHOLDER;
 const temporaryBox = document.createElement("input");
@@ -140,7 +155,31 @@ const temporaryRow = el("div", { className: "temporary" }, [temporaryBox, tempor
 temporaryRow.hidden = true;
 const sendButton = button("Send", submit);
 const stopButton = button("Stop", () => send({ type: "stop" }));
-const composer = el("div", { className: "composer" }, [temporaryRow, input, el("div", { className: "row" }, [stopButton, sendButton])]);
+// The agent's controls: the toggle, the mode (always visible while it is on), the root.
+const agentBox = document.createElement("input");
+agentBox.type = "checkbox";
+agentBox.id = "agent-mode";
+agentBox.addEventListener("change", () => send({ type: "agentToggle", on: agentBox.checked }));
+const agentLabel = el("label", { text: "Agent" });
+agentLabel.htmlFor = agentBox.id;
+const agentModeChip = button("ask", () => send({ type: "agentCycleMode" }), { className: "mode-chip", title: "Approval mode — click or Shift+Tab to change" });
+const agentRoot = button("", () => send({ type: "agentPickRoot" }), { className: "link root" });
+// Named even before a root is known, so a screen reader never meets an empty button.
+agentRoot.setAttribute("aria-label", "Agent root folder");
+const agentReason = el("span", { className: "agent-reason" });
+const agentBar = el("div", { className: "agent-bar" }, [agentBox, agentLabel, agentModeChip, agentRoot, agentReason]);
+const agentStatus = el("div", { className: "agent-status" });
+const approvalCard = el("div", { className: "approval" });
+const todoPanel = el("div", { className: "todos" });
+const composer = el("div", { className: "composer" }, [
+  agentBar,
+  agentStatus,
+  approvalCard,
+  todoPanel,
+  temporaryRow,
+  input,
+  el("div", { className: "row" }, [stopButton, sendButton]),
+]);
 // In the composer's place while a connector's conversation is open: where
 // it is answered, the thread's link, and the fork. The composer itself is
 // only hidden, so a draft is there when a person's own conversation is.
@@ -267,6 +306,12 @@ input.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     submit();
+    return;
+  }
+  // Shift+Tab cycles the approval mode while the agent is on; otherwise it moves focus as ever.
+  if (event.key === "Tab" && event.shiftKey && state?.agent?.enabled && state.agent.available) {
+    event.preventDefault();
+    send({ type: "agentCycleMode" });
   }
 });
 
@@ -298,6 +343,10 @@ notificationsPanel.append(
   ]),
 );
 
+// The usage panel: this session's agent runs, the period's allowance, the budget.
+const usagePanel = el("div", { className: "usage-panel" });
+usagePanel.hidden = true;
+
 function submit(): void {
   const content = input.value.trim();
   if (!content || state?.streaming || state?.offline || state?.source) return;
@@ -316,20 +365,22 @@ function render(): void {
     app.replaceChildren(signIn);
     return;
   }
-  if (!app.contains(composer)) app.replaceChildren(header, convos, meta, banners, instructionsPanel, notificationsPanel, transcript, connector, composer);
+  if (!app.contains(composer)) app.replaceChildren(header, convos, meta, banners, instructionsPanel, notificationsPanel, usagePanel, transcript, connector, composer);
   renderHeader(state);
   renderConversations(state);
   renderMeta(state);
   renderBanners(state);
   renderInstructions(state);
   renderNotifications(state);
+  renderUsage(state);
   renderTranscript(state);
+  renderAgent(state);
   sendButton.disabled = state.streaming || state.offline;
   stopButton.hidden = !state.streaming;
   // Offline, the composer closes but the textarea is never replaced, so the
   // draft is there when the connection is.
   input.disabled = state.offline;
-  input.placeholder = state.offline ? OFFLINE_PLACEHOLDER : PLACEHOLDER;
+  input.placeholder = state.offline ? OFFLINE_PLACEHOLDER : state.agent?.enabled && state.agent.available ? AGENT_PLACEHOLDER : PLACEHOLDER;
   // The temporary toggle belongs to the not-yet-created chat: it is gone
   // once the first send has made a conversation, whatever kind it is.
   temporaryRow.hidden = Boolean(state.activeId) || state.temporary;
@@ -504,6 +555,13 @@ function renderMeta(s: ViewState): void {
     parts.push(button("Compact", () => send({ type: "compact" }), { className: "link", disabled: s.streaming, title: "Summarise earlier turns to free context" }));
   }
   if (s.usage) parts.push(usageLine(s.usage));
+  parts.push(
+    button("Usage", () => {
+      usageOpen = !usageOpen;
+      if (usageOpen) send({ type: "refreshUsage" });
+      render();
+    }, { className: "link", title: "This session's agent runs, and the period's allowance and spend" }),
+  );
   if (s.activeId) {
     // The badge: lit (bold) while custom instructions are in force, plain
     // when there are none yet, and the editor's door either way.
@@ -653,6 +711,143 @@ function notificationRow(n: NotificationView): HTMLElement {
     actions.appendChild(button("Open", () => send({ type: "openNotification", id: n.id, url: link }), { className: "link", title: "Open where this leads" }));
   }
   return el("div", { className: "notif" }, [main, actions]);
+}
+
+// --- the agent ----------------------------------------------------------------------
+
+function renderAgent(s: ViewState): void {
+  const agent = s.agent;
+  agentBar.hidden = agent === null;
+  agentStatus.hidden = true;
+  approvalCard.hidden = true;
+  todoPanel.hidden = true;
+  if (!agent) return;
+  const on = agent.enabled && agent.available;
+  agentBox.checked = on;
+  // Unavailable: greyed, with the reason beside it; the composer chats meanwhile.
+  agentBox.disabled = !agent.available;
+  agentLabel.title = agent.reason ?? "Let the model read, search and change files and run commands in the workspace";
+  agentReason.textContent = agent.available ? "" : (agent.reason ?? "");
+  agentReason.hidden = agent.available;
+  agentModeChip.hidden = !on;
+  agentModeChip.textContent = agent.mode;
+  agentModeChip.className = `mode-chip mode-${agent.mode}`;
+  agentModeChip.title = `${agent.mode}: ${agent.modeSummary} — click or Shift+Tab to change`;
+  agentModeChip.setAttribute("aria-label", `Approval mode ${agent.mode}`);
+  agentRoot.hidden = !on || !agent.root;
+  agentRoot.textContent = agent.root ? `in ${agent.root.name}` : "";
+  agentRoot.setAttribute("aria-label", agent.root ? `Agent root folder: ${agent.root.name}` : "Agent root folder");
+  agentRoot.title = agent.root ? `${agent.root.path}${agent.multiRoot ? " — click to pick another folder" : ""}` : "";
+  agentRoot.disabled = !agent.multiRoot || agent.running;
+  if (!on) return;
+  renderAgentStatus(agent);
+  renderApproval(agent.pending);
+  renderTodos(agent);
+}
+
+function renderAgentStatus(agent: AgentView): void {
+  const nodes: Node[] = [];
+  if (agent.running) {
+    const caps = `step ${agent.steps}/${agent.maxSteps} · ${compactTokens(agent.tokens)}/${compactTokens(agent.maxTokens)} tokens`;
+    nodes.push(el("div", { className: "line", text: `${agent.status ?? "Working…"} — ${caps}` }));
+    if (agent.output) nodes.push(el("pre", { className: "output", text: agent.output }));
+  }
+  const notes: string[] = [];
+  if (agent.contextFiles.length > 0) notes.push(`Notes: ${agent.contextFiles.join(", ")}`);
+  const mcp = agent.mcp.map((m) => (m.state === "failed" ? `${m.name} (failed)` : `${m.name} (${m.tools})`));
+  if (mcp.length > 0) notes.push(`MCP: ${mcp.join(", ")}`);
+  if (notes.length > 0) nodes.push(el("div", { className: "line dim", text: notes.join(" · "), title: agent.mcp.map((m) => m.error ?? "").filter(Boolean).join("\n") }));
+  if (agent.contextNotice) nodes.push(el("div", { className: "line dim", text: agent.contextNotice }));
+  agentStatus.replaceChildren(...nodes);
+  agentStatus.hidden = nodes.length === 0;
+}
+
+/** The approval the agent waits on: the change (its diff is open in the editor) or the command, shown whole. */
+function renderApproval(pending: AgentPendingView | null): void {
+  if (!pending) return;
+  const isEdit = pending.kind === "edit";
+  const actions = el("div", { className: "row" }, [
+    ...(isEdit ? [button("Show diff", () => send({ type: "agentShowDiff", id: pending.id }), { className: "link" })] : []),
+    button("Reject", () => send({ type: "agentDecide", id: pending.id, accept: false }), { className: "secondary" }),
+    button(isEdit ? "Accept" : pending.kind === "shell" ? "Run" : "Allow", () => send({ type: "agentDecide", id: pending.id, accept: true })),
+  ]);
+  const body: Node[] = [el("div", { className: "who", text: pending.title })];
+  if (isEdit) {
+    body.push(el("div", { className: "hint", text: "The diff is open in the editor. Edit the right side to change the proposal, then Accept; what it holds then is written." }));
+    if (pending.diff) body.push(diffBlock(pending.diff));
+  } else {
+    body.push(el("pre", { className: "command", text: pending.detail }));
+  }
+  body.push(actions);
+  approvalCard.replaceChildren(...body);
+  approvalCard.hidden = false;
+}
+
+function diffBlock(diff: string): HTMLElement {
+  const pre = el("pre", { className: "diff" });
+  for (const line of diff.split("\n").slice(0, 400)) {
+    const kind = line.startsWith("+") && !line.startsWith("+++") ? "add" : line.startsWith("-") && !line.startsWith("---") ? "del" : line.startsWith("@@") ? "hunk" : "";
+    pre.appendChild(el("span", { className: kind, text: `${line}\n` }));
+  }
+  return pre;
+}
+
+function renderTodos(agent: AgentView): void {
+  if (agent.todos.length === 0) return;
+  const done = agent.todos.filter((t) => t.status === "completed").length;
+  const mark = { completed: "☑", in_progress: "◐", pending: "☐" } as const;
+  todoPanel.replaceChildren(
+    el("div", { className: "who", text: `Plan · ${done}/${agent.todos.length} done` }),
+    ...agent.todos.map((t) => el("div", { className: `todo ${t.status}`, text: `${mark[t.status]} ${t.content}` })),
+  );
+  todoPanel.hidden = false;
+}
+
+/** The usage panel: this session's agent runs, then the period's allowance and the budget's spend. */
+function renderUsage(s: ViewState): void {
+  usagePanel.hidden = !usageOpen;
+  if (!usageOpen) return;
+  const nodes: Node[] = [el("div", { className: "who", text: "Usage" })];
+  const runs = s.agent?.runs ?? [];
+  if (runs.length === 0) {
+    nodes.push(el("p", { className: "empty", text: "No agent runs in this session yet." }));
+  } else {
+    const total = runs.reduce((sum, r) => sum + r.tokens, 0);
+    nodes.push(el("div", { className: "line", text: `Agent runs this session: ${runs.length}, ${total.toLocaleString()} tokens` }));
+    const table = el("div", { className: "runs" });
+    for (const run of runs.slice(0, 20)) {
+      table.appendChild(
+        el("div", {
+          className: "run",
+          text: `${new Date(run.startedAt).toLocaleTimeString()} · ${run.status} · ${run.steps} steps · ${run.toolCalls} tools · ${run.tokens.toLocaleString()} tokens (${run.promptTokens.toLocaleString()} in / ${run.completionTokens.toLocaleString()} out) · ${(run.durationMs / 1000).toFixed(1)}s — ${run.prompt}`,
+        }),
+      );
+    }
+    nodes.push(table);
+  }
+  if (s.usage) nodes.push(el("div", { className: "line", text: `This period: ${usageLine(s.usage).textContent ?? ""}` }));
+  if (s.budget) nodes.push(budgetLine(s.budget));
+  nodes.push(
+    el("div", { className: "row" }, [
+      button("Refresh", () => send({ type: "refreshUsage" }), { className: "link" }),
+      button("Close", () => {
+        usageOpen = false;
+        render();
+      }, { className: "link" }),
+    ]),
+  );
+  usagePanel.replaceChildren(...nodes);
+}
+
+function dollars(n: number): string {
+  return `$${n.toFixed(2)}`;
+}
+
+function budgetLine(b: BudgetView): HTMLElement {
+  const parts = [`${compactTokens(b.tokensUsed)} of ${compactTokens(b.includedTokens)} included tokens used`];
+  if (b.overageDollars > 0 || b.overageCapDollars > 0) parts.push(`overage ${dollars(b.overageDollars)} of a ${dollars(b.overageCapDollars)} cap`);
+  parts.push(`your spend ${dollars(b.memberSpentDollars)}${b.memberCapDollars !== null ? ` of ${dollars(b.memberCapDollars)}` : ""}`);
+  return el("div", { className: "line", text: `Budget: ${parts.join(" · ")}` });
 }
 
 function renderTranscript(s: ViewState): void {  const nearBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 40;
@@ -986,6 +1181,11 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
     // The host's feedback map is the record; this session's optimistic copy
     // has done its job the moment a full state arrives.
     feedbackSession.clear();
+    render();
+    return;
+  }
+  if (message.type === "showPanel") {
+    usageOpen = true;
     render();
     return;
   }

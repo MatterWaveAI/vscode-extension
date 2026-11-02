@@ -1,0 +1,23 @@
+{
+  "about": "A byte-for-byte copy of @matterwave/sdk src/agent; scripts/sdk-agent.mjs --sync rewrites it, test/sdkVendor.test.ts holds it.",
+  "source": "MatterWaveAI/typescript-sdk",
+  "ref": "cce162b",
+  "commit": "cce162b360e5a48e9c466c90af5af669640029d0",
+  "contract_version": "1.2.0",
+  "contract_sha256": "86240640559d7c90e3a88f4ea18e39b09a070a542f7999ca4c6d7ffac138dc76",
+  "files": {
+    "confine.ts": "962b7f002dec35d0ca0851241dc8840738adb8c91b771d089444b5a897ea6548",
+    "contract.ts": "1d70bc66c666f26a6b177e387d5b942735fc634468541583aa1dde2360ddb445",
+    "deny.ts": "32a2ab51d1ce92436b705b9327d1c1db0faf56e0e7a702966d51be721db4d26b",
+    "diff.ts": "cd813d25c31a0e5c3cefc5909645ae9b4d579be756c63607b23b5b884827797f",
+    "edit.ts": "f391aaa1128ebff393f5cee7d655ad7bd351ae4cfb49c978d6fa6fc19e1f3045",
+    "fill.ts": "6526c9dde5d9777394bb056418ae3a3028205f0a97bdf6a13377f57bd8f84ee8",
+    "ignore.ts": "16fc7a01fa91f39b613ce3d2892ce97af8e97f28c63a433b9e40bb5ed1dd1c39",
+    "index.ts": "871c9942d58e7ad034aac9bb65eabd010a26279022bde11c1e00df7d6901cf35",
+    "modes.ts": "20cb7b1af1fd9c3fbaeffefbe32497b9f994218dc5d043aa681f3826ebfc6610",
+    "node.ts": "b5e45e506e3298815a0783058d7f9d434c5c7c21f01010f0501d7d005ae34107",
+    "output.ts": "a2de99394f8125b4026ac1c8aa3e75fd9500ed0012928d1acf298aa03d044852",
+    "search.ts": "096fe33ac72849ad7c4673e0fd7857456cecca667b5ae3270518e6619245be83",
+    "types.ts": "08a11f57f59e1f87b2ae9cbffa086fe9f5d519da098495af30665d5d18da459f"
+  }
+}

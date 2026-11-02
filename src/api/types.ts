@@ -106,6 +106,11 @@ export interface ModelInfo {
   partner: boolean;
   research_preview: boolean;
   supports_vision?: boolean | null;
+  /**
+   * Whether the model can call tools, which the coding agent needs. Absent
+   * on a deployment that predates the flag, which reads as able.
+   */
+  supports_tools?: boolean | null;
   context_window: number | null;
   /** List price in US dollars per million tokens, as the pricing page shows it; absent on an older deployment. */
   input_usd_per_m?: number;

@@ -14,11 +14,14 @@ export function statusText(status: StatusInfo): { text: string; tooltip: string;
   if (status.meterPercent !== null) pieces.push(`${status.meterPercent}%`);
   // The bell: unread notifications ride on the item's face, the way the web app's does.
   if (status.unreadNotifications > 0) pieces.push(`$(bell) ${status.unreadNotifications}`);
+  // The agent's approval mode, visible from anywhere while agent mode is on.
+  if (status.agentMode) pieces.push(`$(hubot) ${status.agentMode}`);
   const tooltip = [
     status.identity ? `Signed in as ${status.identity}` : "Signed in",
     status.model ? `Model: ${status.model}` : null,
     status.meterPercent !== null ? `Context used: ${status.meterPercent}%` : null,
     status.unreadNotifications > 0 ? `Notifications: ${status.unreadNotifications} unread` : null,
+    status.agentMode ? `Agent mode: ${status.agentMode}` : null,
     status.usage ? allowanceLine(status.usage) : null,
     "Click to pick a model",
   ]

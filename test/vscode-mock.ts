@@ -110,7 +110,7 @@ export const window = {
     const channel = { name, lines: [] as string[] };
     window.channels.push(channel);
     const write = (level: string) => (line: string) => void channel.lines.push(`${level} ${line}`);
-    return { info: write("info"), warn: write("warn"), error: write("error"), show() {}, dispose() {} };
+    return { info: write("info"), warn: write("warn"), error: write("error"), appendLine: write(""), show() {}, dispose() {} };
   },
   showQuickPick: () => Promise.resolve(undefined),
   showOpenDialog: () => Promise.resolve(undefined),
@@ -138,6 +138,9 @@ export const window = {
     for (const listener of [...window.terminalListeners[kind]]) listener(event);
   },
   activeTextEditor: undefined as { document: { uri: Uri } } | undefined,
+  onDidChangeActiveTextEditor(): { dispose(): void } {
+    return { dispose() {} };
+  },
   /** What the folder pick answers: a folder's name, or undefined for Escape. */
   folderPickAnswer: undefined as string | undefined,
   folderPicks: [] as string[],
@@ -221,6 +224,10 @@ export const workspace = {
       get<T>(key: string): T | undefined {
         return workspace.settings.get(`${section}.${key}`) as T | undefined;
       },
+      /** Every setting here reads as the person's own (user settings); no workspace layer. */
+      inspect<T>(key: string): { key: string; globalValue?: T } {
+        return { key: `${section}.${key}`, globalValue: workspace.settings.get(`${section}.${key}`) as T | undefined };
+      },
       update(key: string, value: unknown): Promise<void> {
         workspace.settings.set(`${section}.${key}`, value);
         return Promise.resolve();
@@ -232,6 +239,15 @@ export const workspace = {
   },
   registerTextDocumentContentProvider(scheme: string, provider: unknown): { dispose(): void } {
     workspace.contentProviders[scheme] = provider;
+    return { dispose() {} };
+  },
+  registerFileSystemProvider(): { dispose(): void } {
+    return { dispose() {} };
+  },
+  onDidGrantWorkspaceTrust(): { dispose(): void } {
+    return { dispose() {} };
+  },
+  onDidChangeWorkspaceFolders(): { dispose(): void } {
     return { dispose() {} };
   },
   /** As the editor's: with several folders open, `includeWorkspaceFolder` leads with the folder's name. */

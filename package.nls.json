@@ -1,6 +1,6 @@
 {
   "displayName": "MatterWave",
-  "description": "Chat with your organisation's MatterWave models from the editor.",
+  "description": "Chat with your organisation's MatterWave models from the editor, or let the coding agent read, change and test the workspace with your approval.",
   "configuration.title": "MatterWave",
   "config.baseUrl.description": "The MatterWave deployment this editor talks to.",
   "config.caFile.description": "Path to a PEM file holding the certificate authority that signed the deployment's TLS certificate, for a deployment behind a private CA. Trusted in addition to the system's authorities. Empty uses the system's authorities alone.",
@@ -53,5 +53,24 @@
   "walkthrough.gettingStarted.apply.description": "Every code block in an answer has Apply. A diff opens first, and the change lands in the editor, where Undo takes it back.\n[Open Chat](command:matterwave.openChat)",
   "walkthrough.gettingStarted.inlineEdit.title": "Edit in place",
   "walkthrough.gettingStarted.inlineEdit.description": "Select lines, say what should change, and review the diff before it lands.\n[Edit Selection](command:matterwave.inlineEdit)",
-  "capabilities.untrustedWorkspaces.description": "In Restricted Mode MatterWave chats and reads context, but does not change files (Apply, inline edit, Restore Checkpoint) or run git for @git until the workspace is trusted."
+  "capabilities.untrustedWorkspaces.description": "In Restricted Mode MatterWave chats and reads context, but does not change files (Apply, inline edit, Restore Checkpoint) or run git for @git, and the coding agent (its file and shell tools, MATTERWAVE.md, project commands, subagents and MCP servers) stays off, until the workspace is trusted.",
+  "config.agent.defaultMode.description": "The agent's approval mode in a new workspace. Yolo (nothing asks) is not a default: it is allowed per session, from the mode chip, /approval-mode or Shift+Tab, after a confirm. A workspace's settings can make this stricter (plan), never looser.",
+  "config.agent.defaultMode.plan": "Read and search only: no file changes, no commands.",
+  "config.agent.defaultMode.ask": "Every file change and every command needs your approval (the default).",
+  "config.agent.defaultMode.autoEdit": "File changes are applied without asking (a change to the agent's or the editor's own settings still asks); commands still ask.",
+  "config.agent.maxSteps.description": "The most model calls one agent run makes before it stops and says so. A workspace's settings can lower it, not raise it past yours.",
+  "config.agent.maxTokens.description": "The most tokens one agent run spends (prompt and completion, every step) before it stops and says so. A workspace's settings can lower it, not raise it past yours.",
+  "config.agent.editorContext.description": "Send the active file's name, the selection (up to 8,000 characters) and the recently opened files' names with each agent prompt. Files the deny list covers are never sent.",
+  "config.agent.webFetch.description": "Offer the agent web_fetch. Every fetch asks first in the ask and auto-edit modes; plan does not offer it.",
+  "config.agent.matterwaveMcp.description": "Offer the agent MatterWave's own MCP server (/mcp on matterwave.baseUrl, signed in as this editor): your conversations and models as tools.",
+  "config.agent.mcpServers.markdownDescription": "MCP servers the agent may use, by name. Each is `{ \"command\": \"...\", \"args\": [...], \"env\": {...} }` (stdio) or `{ \"url\": \"https://...\", \"headers\": {...} }` (HTTP), with an optional `\"tools\": [...]` allow-list (only those tools reach the model), `\"trust\": true` (your standing approval: its tools run without asking where they would ask) and `\"disabled\": true`. Every other MCP tool asks before each call outside yolo. Workspace settings apply only in a trusted folder, and each server they add asks before it first starts (again whenever its definition changes); `trust` counts only in your user settings. A server's read-only marks, which let plan mode offer a tool (still asking), are believed only for a trusted server and MatterWave's own.",
+  "command.agent.toggle.title": "Toggle Agent Mode",
+  "command.agent.setMode.title": "Set Agent Approval Mode",
+  "command.agent.cycleMode.title": "Cycle Agent Approval Mode",
+  "command.agent.accept.title": "Accept the Agent's Change",
+  "command.agent.reject.title": "Reject the Agent's Change",
+  "command.agent.pickRoot.title": "Pick the Agent's Root Folder",
+  "command.agent.init.title": "Draft MATTERWAVE.md (/init)",
+  "command.agent.resume.title": "Resume an Agent Run",
+  "command.showUsage.title": "Show Usage"
 }

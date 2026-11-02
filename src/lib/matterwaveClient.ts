@@ -412,6 +412,52 @@ export interface Me {
   org_name: string | null;
   org_role: string | null;
   state?: string | null;
+  /**
+   * The org switch for local agent tools (the coding agent's file and shell
+   * tools, run on the person's machine). Absent on a deployment that
+   * predates it, which reads as allowed.
+   */
+  local_agent_tools?: boolean | null;
+}
+
+// --- agent mode verdicts (upstream conversation-types.ts) --------------------
+//
+// The two flags a client reads before offering its agent mode, whose tools run
+// on the user's machine: whether the model can call tools, and whether the org
+// lets clients run local agent tools. Each is tri-state, like `supports_vision`.
+
+export type ToolsVerdict = "yes" | "no" | "unknown";
+
+/**
+ * What the model list says about `modelId`'s tool calling: `visionOf`'s rules
+ * for `supports_tools`. `"no"` is the only refusing verdict, the one that
+ * greys out agent mode: no model chosen, a model the list does not have, and
+ * `supports_tools` missing or null are all `"unknown"`, since a bare llama.cpp
+ * or vLLM build says nothing and its model may well call tools.
+ */
+export function toolsOf(
+  models: readonly { id: string; supports_tools?: boolean | null }[] | null,
+  modelId: string | null,
+): ToolsVerdict {
+  if (modelId === null || models === null) return "unknown";
+  const entry = models.find((model) => model.id === modelId);
+  if (entry === undefined) return "unknown";
+  if (entry.supports_tools === true) return "yes";
+  if (entry.supports_tools === false) return "no";
+  return "unknown";
+}
+
+/**
+ * Whether the org lets clients run local agent tools, from `client.me()`:
+ * `"no"` only when the server says `local_agent_tools: false`, `"yes"` when it
+ * says true, and `"unknown"` when it says nothing (an older server), which a
+ * client treats as allowed.
+ */
+export function localAgentToolsOf(me: Pick<Me, "local_agent_tools"> | null | undefined): ToolsVerdict {
+  if (me === null || me === undefined) return "unknown";
+  if (me.local_agent_tools === true) return "yes";
+  if (me.local_agent_tools === false) return "no";
+  return "unknown";
 }
 
 /**
@@ -574,6 +620,17 @@ export interface ModerationBlockFrame extends FrameBase {
   request_id: string | null;
 }
 
+/**
+ * The server is folding earlier turns before the model is asked, which can
+ * take a while: the turn opens with this so the client has something to show
+ * for the first token's wait. `detail` is the sentence to show; `compaction`
+ * or `notice` follows.
+ */
+export interface CompactingFrame extends FrameBase {
+  event: "compacting";
+  detail: string;
+}
+
 /** Earlier messages were folded into `message`, a `system` message with one `summary` part. */
 export interface CompactionFrame extends FrameBase {
   event: "compaction";
@@ -621,6 +678,7 @@ export type ConversationFrame =
   | DoneFrame
   | ErrorFrame
   | ModerationBlockFrame
+  | CompactingFrame
   | CompactionFrame
   | ContextFrame
   | NoticeFrame
@@ -689,6 +747,8 @@ export function frameFromEvent(event: string, data: unknown, id: string | null =
         code: optStr(d.code),
         request_id: optStr(d.request_id),
       };
+    case "compacting":
+      return { event, id, detail: String(d.detail ?? "") };
     case "compaction":
       return {
         event,

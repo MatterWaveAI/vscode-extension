@@ -1,6 +1,6 @@
 {
   "displayName": "MatterWave",
-  "description": "Chatea con los modelos MatterWave de tu organización desde el editor.",
+  "description": "Chatea con los modelos MatterWave de tu organización desde el editor, o deja que el agente de código lea, cambie y pruebe el espacio de trabajo con tu aprobación.",
   "configuration.title": "MatterWave",
   "config.baseUrl.description": "La implementación de MatterWave con la que habla este editor.",
   "config.caFile.description": "Ruta a un archivo PEM con la autoridad de certificación que firmó el certificado TLS de la implementación, para una implementación detrás de una CA privada. Se confía en ella además de en las autoridades del sistema. Vacío usa solo las autoridades del sistema.",
@@ -53,5 +53,24 @@
   "walkthrough.gettingStarted.apply.description": "Cada bloque de código de una respuesta tiene Aplicar. Primero se abre un diff, y el cambio llega al editor, donde Deshacer lo revierte.\n[Abrir chat](command:matterwave.openChat)",
   "walkthrough.gettingStarted.inlineEdit.title": "Editar en el sitio",
   "walkthrough.gettingStarted.inlineEdit.description": "Selecciona líneas, di qué debe cambiar y revisa el diff antes de que se aplique.\n[Editar la selección](command:matterwave.inlineEdit)",
-  "capabilities.untrustedWorkspaces.description": "En el modo restringido, MatterWave chatea y lee contexto, pero no cambia archivos (Aplicar, edición en línea, Restaurar punto de control) ni ejecuta git para @git hasta que se confíe en el espacio de trabajo."
+  "capabilities.untrustedWorkspaces.description": "En el modo restringido, MatterWave chatea y lee contexto, pero no cambia archivos (Aplicar, edición en línea, Restaurar punto de control) ni ejecuta git para @git, y el agente de código (sus herramientas de archivos y de shell, MATTERWAVE.md, los comandos del proyecto, los subagentes y los servidores MCP) sigue apagado, hasta que se confíe en el espacio de trabajo.",
+  "config.agent.defaultMode.description": "El modo de aprobación del agente en un espacio de trabajo nuevo. Yolo (nada pregunta) no es un valor predeterminado: se permite por sesión, desde el selector de modo, /approval-mode o Mayús+Tab, tras una confirmación. La configuración de un espacio de trabajo puede hacerlo más estricto (plan), nunca más permisivo.",
+  "config.agent.defaultMode.plan": "Solo leer y buscar: sin cambios en archivos ni comandos.",
+  "config.agent.defaultMode.ask": "Cada cambio en un archivo y cada comando necesitan tu aprobación (el valor predeterminado).",
+  "config.agent.defaultMode.autoEdit": "Los cambios en archivos se aplican sin preguntar (un cambio en la configuración del agente o del propio editor sigue preguntando); los comandos siguen preguntando.",
+  "config.agent.maxSteps.description": "El máximo de llamadas al modelo que hace una ejecución del agente antes de detenerse y decirlo. La configuración de un espacio de trabajo puede bajarlo, no subirlo por encima del tuyo.",
+  "config.agent.maxTokens.description": "El máximo de tokens que gasta una ejecución del agente (prompt y respuesta, en cada paso) antes de detenerse y decirlo. La configuración de un espacio de trabajo puede bajarlo, no subirlo por encima del tuyo.",
+  "config.agent.editorContext.description": "Enviar con cada prompt del agente el nombre del archivo activo, la selección (hasta 8.000 caracteres) y los nombres de los archivos abiertos recientemente. Los archivos que cubre la lista de denegación nunca se envían.",
+  "config.agent.webFetch.description": "Ofrecer al agente web_fetch. Cada descarga pregunta antes en los modos ask y auto-edit; plan no la ofrece.",
+  "config.agent.matterwaveMcp.description": "Ofrecer al agente el servidor MCP propio de MatterWave (/mcp en matterwave.baseUrl, con la sesión de este editor): tus conversaciones y modelos como herramientas.",
+  "config.agent.mcpServers.markdownDescription": "Servidores MCP que el agente puede usar, por nombre. Cada uno es `{ \"command\": \"...\", \"args\": [...], \"env\": {...} }` (stdio) o `{ \"url\": \"https://...\", \"headers\": {...} }` (HTTP), con una lista opcional `\"tools\": [...]` de herramientas permitidas (solo esas llegan al modelo), `\"trust\": true` (tu aprobación permanente: sus herramientas se ejecutan sin preguntar donde preguntarían) y `\"disabled\": true`. Cualquier otra herramienta MCP pregunta antes de cada llamada fuera de yolo. La configuración del espacio de trabajo solo se aplica en una carpeta de confianza, y cada servidor que añade pregunta antes de iniciarse por primera vez (y de nuevo cada vez que cambia su definición); `trust` solo cuenta en tu configuración de usuario. Las marcas de solo lectura de un servidor, que permiten que el modo plan ofrezca una herramienta (que sigue preguntando), solo se creen para un servidor de confianza y para el propio de MatterWave.",
+  "command.agent.toggle.title": "Activar o desactivar el modo agente",
+  "command.agent.setMode.title": "Fijar el modo de aprobación del agente",
+  "command.agent.cycleMode.title": "Pasar al siguiente modo de aprobación del agente",
+  "command.agent.accept.title": "Aceptar el cambio del agente",
+  "command.agent.reject.title": "Rechazar el cambio del agente",
+  "command.agent.pickRoot.title": "Elegir la carpeta raíz del agente",
+  "command.agent.init.title": "Redactar MATTERWAVE.md (/init)",
+  "command.agent.resume.title": "Reanudar una ejecución del agente",
+  "command.showUsage.title": "Mostrar uso"
 }

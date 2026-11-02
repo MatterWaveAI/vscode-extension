@@ -93,6 +93,19 @@ describe("parseWebviewMessage", () => {
     expect(parseWebviewMessage("ready")).toBeNull();
     expect(parseWebviewMessage(null)).toBeNull();
   });
+
+  it("checks the agent's intents: a known mode, a decision with its id, a boolean toggle", () => {
+    expect(parseWebviewMessage({ type: "agentToggle", on: true })).toEqual({ type: "agentToggle", on: true });
+    expect(parseWebviewMessage({ type: "agentToggle", on: "yes" })).toBeNull();
+    expect(parseWebviewMessage({ type: "agentSetMode", mode: "plan" })).toEqual({ type: "agentSetMode", mode: "plan" });
+    expect(parseWebviewMessage({ type: "agentSetMode", mode: "god" })).toBeNull();
+    expect(parseWebviewMessage({ type: "agentDecide", id: "a1", accept: false })).toEqual({ type: "agentDecide", id: "a1", accept: false });
+    expect(parseWebviewMessage({ type: "agentDecide", id: "a1" })).toBeNull();
+    expect(parseWebviewMessage({ type: "agentDecide", id: "x".repeat(101), accept: true })).toBeNull();
+    expect(parseWebviewMessage({ type: "agentShowDiff", id: "a1", extra: 1 })).toEqual({ type: "agentShowDiff", id: "a1" });
+    expect(parseWebviewMessage({ type: "agentCycleMode" })).toEqual({ type: "agentCycleMode" });
+    expect(parseWebviewMessage({ type: "refreshUsage" })).toEqual({ type: "refreshUsage" });
+  });
 });
 
 describe("the fork, report and announcement intents", () => {

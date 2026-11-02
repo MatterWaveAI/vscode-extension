@@ -66,7 +66,7 @@ describe("activation", () => {
     expect(commands.registered.has("matterwave.openChat")).toBe(true);
     expect(commands.registered.has("matterwave.choosePreset")).toBe(true);
     expect(commands.registered.has("matterwave.showLog")).toBe(true);
-    expect(window.channels.at(-1)?.name).toBe("MatterWave");
+    expect(window.channels.map((channel) => channel.name)).toContain("MatterWave");
   });
 });
 

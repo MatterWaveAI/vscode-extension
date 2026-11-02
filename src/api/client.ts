@@ -4,12 +4,14 @@ import {
   DeviceAuthError,
   MatterWave,
   MatterWaveConfigError,
+  sseEvents,
   type ConversationFrame,
   type ConversationStream,
   type Fetch,
   type RequestOptions,
 } from "../lib/matterwaveClient";
 import { ApiError, detailOf, parseRetryAfter } from "./errors";
+import type { ChatCompletionChunk, ChatCompletionRequest } from "../agent/wire";
 import type {
   Announcement,
   ApiKeyCreated,
@@ -647,6 +649,57 @@ export class MatterWaveClient {
     }
   }
 
+  // --- /v1 (the coding agent's model calls) ---------------------------------
+
+  /**
+   * `POST /v1/chat/completions` with `stream: true`, one agent step: the
+   * request's `messages` are the whole prompt (the caller owns the context),
+   * `tools` go to the model, and `tool_calls` come back unexecuted. Never
+   * retried -- a step the API may have metered must not be bought twice --
+   * and a refusal before the stream (402, a 429 budget or rate limit, a 400)
+   * throws as `ApiError` with OpenAI's `error.code`. An error object inside
+   * the stream throws the same way; a body that ends without `[DONE]` throws
+   * a `truncated` error, so a cut step is never taken for a finished one.
+   */
+  async *chatCompletionsStream(request: ChatCompletionRequest, signal?: AbortSignal): AsyncGenerator<ChatCompletionChunk> {
+    const headers: Record<string, string> = { "Content-Type": "application/json", Accept: "text/event-stream" };
+    const token = await this.options.getToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    let response: Response;
+    try {
+      response = await this.observed(this.baseUrl + "/v1/chat/completions", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ ...request, stream: true }),
+        signal,
+      });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      throw new ApiError(0, error instanceof Error ? error.message : "network error", null);
+    }
+    const requestId = response.headers.get("x-request-id");
+    if (!response.ok) {
+      const parsed: unknown = await response.json().catch(() => null);
+      throw openAiError(response.status, parsed, requestId, parseRetryAfter(response.headers.get("retry-after")));
+    }
+    if (!response.body) throw new ApiError(0, "The stream ended before the answer finished.", requestId, null, "truncated");
+    for await (const event of sseEvents(response.body)) {
+      if (event.data === "[DONE]") return;
+      let data: unknown;
+      try {
+        data = JSON.parse(event.data);
+      } catch {
+        continue;
+      }
+      if (data && typeof data === "object" && "error" in data) {
+        const envelope = data as { error: unknown };
+        throw openAiError(statusOfCode(envelope), envelope, requestId, null);
+      }
+      yield data as ChatCompletionChunk;
+    }
+    throw new ApiError(0, "The stream ended before the answer finished.", requestId, null, "truncated");
+  }
+
   // --- plumbing ------------------------------------------------------------
 
   /** The SDK clients for the credential in the store right now. */
@@ -763,6 +816,29 @@ export class MatterWaveClient {
       codeOf(body),
     );
   }
+}
+
+/**
+ * An OpenAI-shaped refusal (`{"error": {"message", "type", "code"}}`) as this
+ * extension's error type; a FastAPI `detail` body is read too, for a route
+ * the envelope does not wrap.
+ */
+function openAiError(status: number, body: unknown, requestId: string | null, retryAfterS: number | null): ApiError {
+  const error = body && typeof body === "object" && "error" in body ? (body as { error: unknown }).error : null;
+  if (error && typeof error === "object") {
+    const e = error as { message?: unknown; code?: unknown; type?: unknown };
+    const code = typeof e.code === "string" ? e.code : typeof e.type === "string" ? e.type : null;
+    return new ApiError(status, typeof e.message === "string" ? e.message : `HTTP ${status}`, requestId, retryAfterS, code);
+  }
+  return new ApiError(status, detailOf(body, `HTTP ${status}`), requestId, retryAfterS, codeOf(body));
+}
+
+/** The status an in-stream error stands for, from its code: the headers already said 200. */
+function statusOfCode(envelope: { error: unknown }): number {
+  const code = envelope.error && typeof envelope.error === "object" ? (envelope.error as { code?: unknown }).code : null;
+  if (code === "insufficient_quota" || code === "rate_limit_exceeded") return 429;
+  if (code === "context_length_exceeded" || code === "tool_calls_unsupported") return 400;
+  return 502;
 }
 
 /** The body's machine-readable `code` or `error`, where it has one. */

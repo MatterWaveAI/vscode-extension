@@ -67,6 +67,7 @@ describe("suggestionsAt", () => {
     expect(suggestionsAt("/c", 2, ["code-review", "clear"])?.items).toEqual([
       { insert: "/clear", detail: "start a new chat" },
       { insert: "/compact", detail: "summarise earlier turns" },
+      { insert: "/context", detail: "what the next request carries" },
       { insert: "/code-review", detail: "saved prompt" },
     ]);
     expect(suggestionsAt("text /c", 7, ["code-review"])).toBeNull();

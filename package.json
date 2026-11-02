@@ -38,7 +38,10 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": "limited",
-      "description": "%capabilities.untrustedWorkspaces.description%"
+      "description": "%capabilities.untrustedWorkspaces.description%",
+      "restrictedConfigurations": [
+        "matterwave.agent.mcpServers"
+      ]
     }
   },
   "main": "./dist/extension.js",
@@ -70,6 +73,105 @@
           "type": "boolean",
           "default": true,
           "description": "%config.showAnswerUsage.description%"
+        },
+        "matterwave.agent.defaultMode": {
+          "type": "string",
+          "enum": [
+            "plan",
+            "ask",
+            "auto-edit"
+          ],
+          "enumDescriptions": [
+            "%config.agent.defaultMode.plan%",
+            "%config.agent.defaultMode.ask%",
+            "%config.agent.defaultMode.autoEdit%"
+          ],
+          "default": "ask",
+          "description": "%config.agent.defaultMode.description%",
+          "scope": "window"
+        },
+        "matterwave.agent.maxSteps": {
+          "type": "integer",
+          "default": 40,
+          "minimum": 1,
+          "maximum": 500,
+          "description": "%config.agent.maxSteps.description%",
+          "scope": "window"
+        },
+        "matterwave.agent.maxTokens": {
+          "type": "integer",
+          "default": 500000,
+          "minimum": 1000,
+          "description": "%config.agent.maxTokens.description%",
+          "scope": "window"
+        },
+        "matterwave.agent.editorContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "%config.agent.editorContext.description%",
+          "scope": "window"
+        },
+        "matterwave.agent.webFetch": {
+          "type": "boolean",
+          "default": true,
+          "description": "%config.agent.webFetch.description%",
+          "scope": "window"
+        },
+        "matterwave.agent.matterwaveMcp": {
+          "type": "boolean",
+          "default": true,
+          "description": "%config.agent.matterwaveMcp.description%",
+          "scope": "window"
+        },
+        "matterwave.agent.mcpServers": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "%config.agent.mcpServers.markdownDescription%",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string"
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "cwd": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              },
+              "headers": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "tools": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "trust": {
+                "type": "boolean"
+              },
+              "disabled": {
+                "type": "boolean"
+              }
+            }
+          },
+          "scope": "window"
         }
       }
     },
@@ -263,6 +365,53 @@
         "command": "matterwave.showLog",
         "title": "%command.showLog.title%",
         "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.agent.toggle",
+        "title": "%command.agent.toggle.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.agent.setMode",
+        "title": "%command.agent.setMode.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.agent.cycleMode",
+        "title": "%command.agent.cycleMode.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.agent.accept",
+        "title": "%command.agent.accept.title%",
+        "category": "%command.category%",
+        "icon": "$(check)"
+      },
+      {
+        "command": "matterwave.agent.reject",
+        "title": "%command.agent.reject.title%",
+        "category": "%command.category%",
+        "icon": "$(close)"
+      },
+      {
+        "command": "matterwave.agent.pickRoot",
+        "title": "%command.agent.pickRoot.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.agent.init",
+        "title": "%command.agent.init.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.agent.resume",
+        "title": "%command.agent.resume.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.showUsage",
+        "title": "%command.showUsage.title%",
+        "category": "%command.category%"
       }
     ],
     "menus": {
@@ -305,6 +454,28 @@
           "command": "matterwave.generateCommitMessage",
           "when": "scmProvider == git",
           "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "matterwave.agent.reject",
+          "when": "matterwave.agentReviewing && isInDiffEditor",
+          "group": "navigation@1"
+        },
+        {
+          "command": "matterwave.agent.accept",
+          "when": "matterwave.agentReviewing && isInDiffEditor",
+          "group": "navigation@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "matterwave.agent.accept",
+          "when": "matterwave.agentReviewing"
+        },
+        {
+          "command": "matterwave.agent.reject",
+          "when": "matterwave.agentReviewing"
         }
       ]
     },
@@ -407,7 +578,9 @@
     "test": "vitest run",
     "test:e2e": "pnpm run build && node e2e/run.mjs",
     "package": "pnpm run build && vsce package --no-dependencies",
-    "icon": "node scripts/icon.mjs"
+    "icon": "node scripts/icon.mjs",
+    "sdk:check": "node scripts/sdk-agent.mjs --check",
+    "sdk:sync": "node scripts/sdk-agent.mjs --sync"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

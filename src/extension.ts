@@ -11,7 +11,7 @@ import type { FolderRow, Library, TagRow } from "./api/types";
 import { ChatViewProvider } from "./chat/viewProvider";
 import { fitsContentCap, MAX_CONTENT_CHARS, imageAttachment, imageContentType, selectionContent } from "./context";
 import { applyToFile, registerApplyContentProvider } from "./apply";
-import { CheckpointStore, type Checkpoint } from "./checkpoints";
+import { CheckpointStore, restorePlan, restoreTarget, type Checkpoint } from "./checkpoints";
 import { snapshotFolder } from "./snapshotFiles";
 import { requireTrust } from "./trust";
 import { registerMcpServer } from "./mcp";
@@ -24,6 +24,13 @@ import {
   MatterWaveCodeActions,
   TESTS_QUESTION,
 } from "./codeActions";
+import { AgentSession, type AgentSettings } from "./agent/session";
+import { EditorReviewSurface, EditorTracker, PROPOSAL_SCHEME, ProposalFileSystem, openDocumentText } from "./agent/editor";
+import { McpManager, type McpServerConfig } from "./agent/mcp";
+import { describeServer, isMatterWaveMcp, resolveMcpServers, type PendingServer } from "./agent/mcpConfig";
+import { killAllShells } from "./agent/shell";
+import { stricterMode } from "./agent/loop";
+import { MODES_BY_NAME, MODE_NAMES, type ModeName } from "./lib/sdk/agent/types";
 import type { CodeBlock } from "./chat/codeBlocks";
 import { fitReplacement, inlineEditPrompt, replacementFromAnswer, selectedLines } from "./inlineEdit";
 import {
@@ -48,6 +55,7 @@ import { normalizePromptName, PromptLibrary, MAX_PROMPTS, MAX_PROMPT_TEXT, PROMP
 import { currentFolder, editorFolders, resolveNamedFile, whereItLands } from "./targets";
 import { pickWorkspaceFile as pickFile } from "./fileSearch";
 import { execFile } from "node:child_process";
+import * as nodePath from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -103,6 +111,8 @@ async function promptForServer(context: vscode.ExtensionContext): Promise<void> 
  */
 export interface MatterWaveApi {
   chat: ChatController;
+  /** The coding agent's session: its mode, the approval it waits on, Accept and Reject. */
+  agent: AgentSession;
   /** Every message posted to the chat view, including the streamed deltas. */
   onHostMessage(listener: (message: HostMessage) => void): vscode.Disposable;
 }
@@ -134,6 +144,31 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
   const terminals = new TerminalHistory();
   context.subscriptions.push(terminals);
   const taps = new Set<(message: HostMessage) => void>();
+  const proposals = new ProposalFileSystem();
+  const editorTracker = new EditorTracker();
+  const agentLog = vscode.window.createOutputChannel("MatterWave Agent");
+  // One transport for every request -- the client, MCP and web_fetch -- reading
+  // matterwave.caFile per request.
+  const transport = createFetch(caFile);
+  const mcp = new McpManager({
+    version: String((context.extension?.packageJSON as { version?: string } | undefined)?.version ?? "0.0.0"),
+    fetch: (input, init) => transport(input, init),
+    // MatterWave's own /mcp signs in as the editor does -- only a server at
+    // exactly that URL, whatever it is named; any other server carries only
+    // the headers its configuration names.
+    headersFor: async (_name, config) => {
+      if (!isMatterWaveMcp(config.url, baseUrl())) return {};
+      const token = await tokens.get();
+      const headers: Record<string, string> = {};
+      if (token) headers.Authorization = `Bearer ${token}`;
+      return headers;
+    },
+    // A read-only mark is the server's own claim: believed from a server the
+    // person trusts, and from MatterWave's own.
+    hintsTrusted: (_name, config) => config.trust === true || isMatterWaveMcp(config.url, baseUrl()),
+  });
+  // Project MCP servers the person declined this session: not asked about again until the window reloads.
+  const declinedServers = new Set<string>();
 
   // The client reports request ids and reachability to the controller,
   // which is built from the client; the callbacks only run on a request,
@@ -142,7 +177,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
     baseUrl,
     getToken: () => tokens.get(),
     // Reads matterwave.caFile per request, so a change applies at once.
-    fetch: createFetch(caFile),
+    fetch: transport,
     onRequestId: (id) => {
       chat.lastRequestId = id;
     },
@@ -153,8 +188,46 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
       else log.info(line);
     },
   });
+  const agent: AgentSession = new AgentSession({
+    client,
+    review: new EditorReviewSurface(proposals),
+    checkpoint: async (conversationId, _relative, before, absolute) => {
+      // Named as an Apply's checkpoint is, so a restore takes back both kinds of change to one file together.
+      const target = vscode.Uri.file(absolute);
+      const row = await checkpoints.record(conversationId, { uri: target.toString(), path: relativePath(target) }, before, "Agent edit");
+      if (row === null) {
+        void vscode.window.showWarningMessage(
+          `${relativePath(target)} is too large to snapshot, so this change has no checkpoint. VS Code's own undo still applies.`,
+        );
+      }
+    },
+    confirmYolo,
+    pickRoot: async (roots) => {
+      const picked = await vscode.window.showQuickPick(
+        roots.map((root) => ({ label: root.name, description: root.path, path: root.path })),
+        { title: "MatterWave agent: root folder", placeHolder: "The folder the agent reads, writes and runs commands in" },
+      );
+      return picked?.path ?? null;
+    },
+    settings: agentSettings,
+    workspace: () => ({
+      roots: (vscode.workspace.workspaceFolders ?? [])
+        .filter((folder) => folder.uri.scheme === "file")
+        .map((folder) => ({ name: folder.name, path: folder.uri.fsPath })),
+      trusted: vscode.workspace.isTrusted,
+    }),
+    editorContext: () => editorTracker.snapshot(),
+    readText: openDocumentText,
+    state: context.workspaceState,
+    mcp,
+    mcpConfigs: () => mcpConfigs(context.workspaceState, declinedServers, agent.root()?.path ?? null),
+    fetch: (input, init) => transport(input, init ?? {}),
+    onChange: () => chat.emit(),
+    log: (line) => agentLog.appendLine(line),
+  });
   const chat: ChatController = new ChatController({
     client,
+    agent,
     post: (message) => {
       view.post(message);
       for (const tap of taps) tap(message);
@@ -165,8 +238,12 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
       set: (id) => void context.globalState.update(MODEL_KEY, id),
     },
     runCommand: (command) => {
-      const id = command === "signIn" ? "matterwave.signInWithDeviceCode" : `matterwave.${command}`;
-      void vscode.commands.executeCommand(id);
+      const ids: Record<string, string> = {
+        signIn: "matterwave.signInWithDeviceCode",
+        agentResume: "matterwave.agent.resume",
+        agentPickMode: "matterwave.agent.setMode",
+      };
+      void vscode.commands.executeCommand(ids[command] ?? `matterwave.${command}`);
     },
     // Where a notification's link leads when it is not a conversation of
     // this deployment; only http(s) URLs the classifier accepted get here.
@@ -201,11 +278,25 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
   context.subscriptions.push(
     log,
     statusBar,
+    editorTracker,
+    agentLog,
+    { dispose: () => mcp.dispose() },
+    // A command still running when the extension goes ends, with what it started.
+    { dispose: () => killAllShells() },
+    vscode.workspace.registerFileSystemProvider(PROPOSAL_SCHEME, proposals, { isCaseSensitive: true }),
+    // Trust decides whether the agent may run at all; the view follows it.
+    vscode.workspace.onDidGrantWorkspaceTrust(() => chat.emit()),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => chat.emit()),
     registerApplyContentProvider(),
     vscode.window.registerWebviewViewProvider(ChatViewProvider.viewId, view, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
-    tokens.onDidChange(() => void chat.refresh()),
+    tokens.onDidChange(() => {
+      // Another account: its instructions, and MatterWave's /mcp tools its key may use, are read afresh.
+      agent.resetAccount();
+      mcp.dispose();
+      void chat.refresh();
+    }),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("matterwave.baseUrl")) {
         chat.newChat();
@@ -213,7 +304,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
       } else if (event.affectsConfiguration("matterwave.caFile")) {
         // The next request reads the new file; refreshing makes it now.
         void chat.refresh();
-      } else if (event.affectsConfiguration("matterwave.showAnswerUsage")) {
+      } else if (event.affectsConfiguration("matterwave.agent") || event.affectsConfiguration("matterwave.showAnswerUsage")) {
         chat.emit();
       }
     }),
@@ -256,13 +347,13 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
       if (event.affectsConfiguration("matterwave.baseUrl")) mcpChanged.fire();
     }),
   );
-  const mcp = registerMcpServer({
+  const mcpDefinition = registerMcpServer({
     baseUrl,
     getToken: () => tokens.get(),
     version: String(context.extension?.packageJSON?.version ?? ""),
     onDidChange: mcpChanged.event,
   });
-  if (mcp) context.subscriptions.push(mcp);
+  if (mcpDefinition) context.subscriptions.push(mcpDefinition);
   command("matterwave.explainTerminalCommand", () => terminalCommand("explain", terminals, chat, view));
   command("matterwave.fixTerminalCommand", () => terminalCommand("fix", terminals, chat, view));
   command("matterwave.showLog", () => log.show(true));
@@ -362,6 +453,50 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
     await chat.reloadPrompts();
   });
   command("matterwave.restoreCheckpoint", () => restoreCheckpoint(chat, checkpoints));
+  command("matterwave.agent.toggle", async () => {
+    await view.reveal();
+    await chat.toggleAgent(!agent.enabled);
+  });
+  command("matterwave.agent.setMode", () => pickApprovalMode(agent));
+  command("matterwave.agent.cycleMode", () => agent.cycleMode());
+  // The diff editor's buttons answer a change under review, never a command or a call waiting in the view.
+  command("matterwave.agent.accept", () => {
+    const id = agent.pendingId("edit");
+    if (id) agent.decide(id, true);
+  });
+  command("matterwave.agent.reject", () => {
+    const id = agent.pendingId("edit");
+    if (id) agent.decide(id, false);
+  });
+  command("matterwave.agent.pickRoot", () => agent.pickRoot());
+  command("matterwave.agent.init", async () => {
+    await view.reveal();
+    await chat.send("/init");
+  });
+  command("matterwave.agent.resume", async () => {
+    const runs = agent.resumable();
+    if (runs.length === 0) {
+      void vscode.window.showInformationMessage("No agent runs to resume in this workspace yet.");
+      return;
+    }
+    const picked = await vscode.window.showQuickPick(
+      runs.map((run) => ({
+        run,
+        label: run.title || "Untitled run",
+        description: new Date(run.updatedAt).toLocaleString(),
+        detail: `${run.messages} messages · ${run.root}`,
+      })),
+      { title: "MatterWave: resume an agent run", placeHolder: "The run continues with its earlier tool rounds in context" },
+    );
+    if (!picked) return;
+    await view.reveal();
+    await chat.openConversation(picked.run.conversationId);
+    await chat.toggleAgent(true);
+  });
+  command("matterwave.showUsage", async () => {
+    await view.reveal();
+    await chat.openUsage();
+  });
   command("matterwave.importHistory", async () => {
     await view.reveal();
     await importHistory(client, chat);
@@ -371,6 +506,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
 
   return exportsFor(context.extensionMode, {
     chat,
+    agent,
     onHostMessage: (listener) => {
       taps.add(listener);
       return { dispose: () => void taps.delete(listener) };
@@ -948,18 +1084,32 @@ async function recordCheckpoint(
 /**
  * The file a checkpoint was taken of: the URI it recorded -- folder, host
  * and all -- or, for one an older release kept by its relative path alone,
- * that path in the folder it belongs to.
+ * that path in the folder it belongs to. A local file is resolved again
+ * now, links followed, so a restore never writes through a folder on its
+ * path that has since become a link out of the workspace.
  */
 async function checkpointTarget(row: Checkpoint): Promise<vscode.Uri | null> {
-  if (row.uri) return vscode.Uri.parse(row.uri);
-  const named = await resolveNamedFile(row.path, editorFolders());
-  if (named.kind === "file") return named.uri;
-  if (named.kind === "outside") {
-    void vscode.window.showWarningMessage(`${row.path} is not a path inside the workspace, so it cannot be restored.`);
-  } else if (!vscode.workspace.workspaceFolders?.length) {
-    void vscode.window.showInformationMessage("Open a workspace to restore a file into.");
+  let uri: vscode.Uri;
+  if (row.uri) uri = vscode.Uri.parse(row.uri);
+  else {
+    const named = await resolveNamedFile(row.path, editorFolders());
+    if (named.kind === "outside") {
+      void vscode.window.showWarningMessage(`${row.path} is not a path inside the workspace, so it cannot be restored.`);
+    } else if (named.kind !== "file" && !vscode.workspace.workspaceFolders?.length) {
+      void vscode.window.showInformationMessage("Open a workspace to restore a file into.");
+    }
+    if (named.kind !== "file") return null;
+    uri = named.uri;
   }
-  return null;
+  const folder = vscode.workspace.getWorkspaceFolder(uri);
+  if (uri.scheme === "file" && folder?.uri.scheme === "file") {
+    const relative = nodePath.relative(folder.uri.fsPath, uri.fsPath).split(nodePath.sep).join("/");
+    if (!restoreTarget(folder.uri.fsPath, relative)) {
+      void vscode.window.showWarningMessage(`${row.path} now leads out of the workspace, so it was not restored.`);
+      return null;
+    }
+  }
+  return uri;
 }
 
 /** Whether a file is there at all, before its document is opened. */
@@ -973,36 +1123,48 @@ async function exists(uri: vscode.Uri): Promise<boolean> {
 }
 
 /**
- * The applied edits this chat can take back, newest first, each restored
- * through the same reviewed diff an apply goes through. A checkpoint of a
- * file that was new restores by removing the file, with its own confirm.
+ * The applied changes this chat can take back, newest first: an Apply, an
+ * inline edit, or an agent write. Restoring one puts back every file it or
+ * a later change touched, as they were before it (so restoring the first of
+ * two agent edits brings both files back). One file goes through the same
+ * reviewed diff an apply goes through; several go after one confirm that
+ * names them, as one edit Undo takes back. A file that was new is removed,
+ * with its own confirm. Every change goes through the editor; the project's
+ * own git is not involved.
  */
 async function restoreCheckpoint(chat: ChatController, store: CheckpointStore): Promise<void> {
   if (!(await requireTrust("Restore Checkpoint"))) return;
   const rows = await store.list(chat.activeConversationId());
   if (rows.length === 0) {
     void vscode.window.showInformationMessage(
-      "No checkpoints yet. One is taken each time Apply or an inline edit writes a file.",
+      "No checkpoints yet. One is taken each time Apply, an inline edit or the agent writes a file.",
     );
     return;
   }
   const picked = await vscode.window.showQuickPick(
-    rows.map((row) => ({
+    rows.map((row, index) => ({
       row,
       label: row.path,
-      description: row.label,
+      description: index === 0 ? `${row.label} · latest` : row.label,
       detail: row.isNew
         ? `${new Date(row.createdAt).toLocaleString()} · the file was new`
         : `${new Date(row.createdAt).toLocaleString()} · ${row.size.toLocaleString()} characters`,
     })),
-    { title: "MatterWave checkpoints", placeHolder: "Pick a checkpoint to restore" },
+    { title: "MatterWave checkpoints", placeHolder: "Restore to before this change (later changes are undone with it)" },
   );
   if (!picked) return;
-  const uri = await checkpointTarget(picked.row);
+  const plan = restorePlan(rows, picked.row.id);
+  if (plan.length === 1) await restoreOne(store, plan[0]!);
+  else await restoreMany(store, plan, picked.row.label);
+}
+
+/** One file back to its checkpoint, through the reviewed diff, or removed when it was new. */
+async function restoreOne(store: CheckpointStore, row: Checkpoint): Promise<void> {
+  const uri = await checkpointTarget(row);
   if (!uri) return;
-  if (picked.row.isNew) {
+  if (row.isNew) {
     const answer = await vscode.window.showInformationMessage(
-      `Remove ${picked.row.path}? It did not exist when this checkpoint was taken.`,
+      `Remove ${row.path}? It did not exist when this checkpoint was taken.`,
       { modal: true },
       "Remove",
     );
@@ -1011,30 +1173,194 @@ async function restoreCheckpoint(chat: ChatController, store: CheckpointStore): 
     const edit = new vscode.WorkspaceEdit();
     edit.deleteFile(uri, { ignoreIfNotExists: true });
     if (!(await vscode.workspace.applyEdit(edit))) {
-      void vscode.window.showErrorMessage(`${picked.row.path} could not be removed.`);
+      void vscode.window.showErrorMessage(`${row.path} could not be removed.`);
       return;
     }
-    void vscode.window.showInformationMessage(`${picked.row.path} was removed, back to before the ${picked.row.label}.`);
+    void vscode.window.showInformationMessage(`${row.path} was removed, back to before the ${row.label}.`);
     return;
   }
   const answer = await vscode.window.showInformationMessage(
-    `Restore ${picked.row.path} to what it was before the ${picked.row.label}?`,
+    `Restore ${row.path} to what it was before the ${row.label}?`,
     { modal: true, detail: "A diff opens before anything is written." },
     "Restore",
   );
   if (answer !== "Restore") return;
-  const content = await store.content(picked.row.id);
+  const content = await store.content(row.id);
   if (content === null) {
-    void vscode.window.showWarningMessage(`The snapshot of ${picked.row.path} is gone from the extension's storage; nothing was restored.`);
-    await store.remove(picked.row.id);
+    void vscode.window.showWarningMessage(`The snapshot of ${row.path} is gone from the extension's storage; nothing was restored.`);
+    await store.remove(row.id);
     return;
   }
   await applyToFile(uri, content, {
-    title: `${picked.row.path} — restored checkpoint`,
+    title: `${row.path} — restored checkpoint`,
     detail: "The file becomes exactly what the checkpoint kept.",
   });
 }
 
+/**
+ * Several files back to before a change, after one confirm that names them:
+ * one WorkspaceEdit, so the restore lands in the editor's buffers and one
+ * Undo takes it back.
+ */
+async function restoreMany(store: CheckpointStore, plan: readonly Checkpoint[], label: string): Promise<void> {
+  const listed = plan.map((row) => `${row.path}${row.isNew ? " (removed: it was new)" : ""}`).join("\n");
+  const answer = await vscode.window.showInformationMessage(
+    `Restore ${plan.length} files to before the ${label}?`,
+    { modal: true, detail: listed },
+    "Restore",
+  );
+  if (answer !== "Restore") return;
+  const edit = new vscode.WorkspaceEdit();
+  const restored: string[] = [];
+  const skipped: string[] = [];
+  // What to save afterwards: a document holding the person's unsaved edits stays theirs to save.
+  const toSave: vscode.Uri[] = [];
+  for (const row of plan) {
+    const uri = await checkpointTarget(row);
+    if (!uri) {
+      skipped.push(row.path);
+      continue;
+    }
+    if (row.isNew) {
+      edit.deleteFile(uri, { ignoreIfNotExists: true });
+      restored.push(row.path);
+      continue;
+    }
+    const content = await store.content(row.id);
+    if (content === null) {
+      skipped.push(row.path);
+      await store.remove(row.id);
+      continue;
+    }
+    if (await exists(uri)) {
+      const document = await vscode.workspace.openTextDocument(uri);
+      edit.replace(uri, new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length)), content);
+      if (!document.isDirty) toSave.push(uri);
+    } else {
+      // The editor's file service makes any missing parent directories.
+      edit.createFile(uri, { ignoreIfExists: false });
+      edit.insert(uri, new vscode.Position(0, 0), content);
+      toSave.push(uri);
+    }
+    restored.push(row.path);
+  }
+  if (restored.length > 0 && !(await vscode.workspace.applyEdit(edit))) {
+    void vscode.window.showErrorMessage("The files could not be restored; nothing was changed.");
+    return;
+  }
+  for (const uri of toSave) await (await vscode.workspace.openTextDocument(uri)).save();
+  if (skipped.length > 0) {
+    void vscode.window.showWarningMessage(`Not restored: ${skipped.join(", ")}.`);
+  }
+  if (restored.length === 0) return;
+  void vscode.window.showInformationMessage(
+    restored.length === 1 ? `${restored[0]} was restored.` : `${restored.length} files were restored: ${restored.join(", ")}.`,
+  );
+}
+
+// --- agent mode ----------------------------------------------------------------------
+
+const MCP_APPROVED_KEY = "matterwave.agent.mcpApproved";
+
+/** A persistable mode named by a settings value, or null; yolo is never a default, whatever a settings file says. */
+function settingMode(value: unknown): ModeName | null {
+  return typeof value === "string" && MODE_NAMES.includes(value as ModeName) && MODES_BY_NAME[value as ModeName].persistable ? (value as ModeName) : null;
+}
+
+function agentSettings(): AgentSettings {
+  const config = vscode.workspace.getConfiguration("matterwave.agent");
+  // The person's own default, which a workspace's settings may make stricter
+  // (plan) but never looser: a repository's .vscode/settings.json must not
+  // turn on auto-edit for itself.
+  const modes = config.inspect<string>("defaultMode");
+  let mode: ModeName = settingMode(modes?.globalValue) ?? "ask";
+  for (const value of [modes?.workspaceValue, modes?.workspaceFolderValue]) {
+    const project = settingMode(value);
+    if (project) mode = stricterMode(mode, project);
+  }
+  // The same for the caps: a workspace may lower them, not raise them past the person's.
+  const cap = (key: string, fallback: number): number => {
+    const layers = config.inspect<number>(key);
+    const own = typeof layers?.globalValue === "number" ? layers.globalValue : fallback;
+    const project = [layers?.workspaceValue, layers?.workspaceFolderValue].filter((v): v is number => typeof v === "number");
+    return Math.min(own, ...project);
+  };
+  return {
+    maxSteps: cap("maxSteps", 40),
+    maxTokens: cap("maxTokens", 500_000),
+    defaultMode: mode,
+    webFetch: config.get<boolean>("webFetch") ?? true,
+    editorContext: config.get<boolean>("editorContext") ?? true,
+  };
+}
+
+/**
+ * The MCP servers the agent offers: the person's settings, the workspace's
+ * once approved (the settings are read only in a trusted folder, and each
+ * project server asks before it first starts), and MatterWave's own `/mcp`.
+ */
+async function mcpConfigs(state: vscode.Memento, declined: Set<string>, root: string | null): Promise<Record<string, McpServerConfig>> {
+  const config = vscode.workspace.getConfiguration("matterwave.agent", root ? vscode.Uri.file(root) : undefined);
+  const layers = config.inspect<Record<string, unknown>>("mcpServers");
+  const approvedKeys = () => new Set(state.get<string[]>(MCP_APPROVED_KEY) ?? []);
+  return resolveMcpServers(
+    { user: layers?.globalValue, project: [layers?.workspaceValue, layers?.workspaceFolderValue] },
+    {
+      matterwaveBase: (config.get<boolean>("matterwaveMcp") ?? true) ? baseUrl() : null,
+      approved: (key) => approvedKeys().has(key),
+      approve: async (pending) => {
+        const asking = pending.filter((server) => !declined.has(server.key));
+        if (asking.length === 0) return [];
+        const approved = await approveProjectServers(asking);
+        for (const server of asking) if (!approved.includes(server.key)) declined.add(server.key);
+        if (approved.length > 0) await state.update(MCP_APPROVED_KEY, [...approvedKeys(), ...approved].slice(-200));
+        return approved;
+      },
+    },
+  );
+}
+
+/** Ask before starting MCP servers a workspace's settings define: each runs as the person, with their files. */
+async function approveProjectServers(pending: PendingServer[]): Promise<string[]> {
+  const answer = await vscode.window.showWarningMessage(
+    pending.length === 1
+      ? `This workspace's settings add the MCP server "${pending[0]!.name}" for the agent. Start it?`
+      : `This workspace's settings add ${pending.length} MCP servers for the agent. Start them?`,
+    {
+      modal: true,
+      detail: `${pending.map(describeServer).join("\n")}\n\nA server runs as you, with access to your files and network, and the agent may call its tools (each call asks first). Only start servers you expect from this project. Your answer is kept for this workspace until the definition changes.`,
+    },
+    pending.length === 1 ? "Start It" : "Start Them",
+  );
+  return answer ? pending.map((server) => server.key) : [];
+}
+
+/** Yolo's per-session flag: a modal that says what it means. Never saved. */
+async function confirmYolo(): Promise<boolean> {
+  const answer = await vscode.window.showWarningMessage(
+    "Allow yolo mode for this session?",
+    {
+      modal: true,
+      detail:
+        "File changes and commands will run without asking. Commands run as you, with no sandbox: whatever you can do, they can do, including sending files elsewhere. Yolo is not saved and ends with this window.",
+    },
+    "Allow for this session",
+  );
+  return answer === "Allow for this session";
+}
+
+async function pickApprovalMode(agent: AgentSession): Promise<void> {
+  const picked = await vscode.window.showQuickPick(
+    MODE_NAMES.map((mode) => ({
+      mode,
+      label: `${mode === agent.mode ? "$(check) " : ""}${mode}`,
+      detail: MODES_BY_NAME[mode].summary,
+      description: mode === "yolo" ? "this session only, asks first" : mode === "ask" ? "default" : "",
+    })),
+    { title: "MatterWave agent: approval mode", placeHolder: "What the agent may do without asking (Shift+Tab cycles in the composer)" },
+  );
+  if (picked) await agent.setMode(picked.mode);
+}
 
 // --- @-mention context providers -------------------------------------------------
 

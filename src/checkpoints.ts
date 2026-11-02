@@ -1,3 +1,5 @@
+import { confine } from "./lib/sdk/agent/confine";
+import { DenyList } from "./lib/sdk/agent/deny";
 import type { Memento } from "./promptLibrary";
 
 /**
@@ -212,5 +214,37 @@ export class CheckpointStore {
     }
     for (const row of dropped) if (!row.isNew) await this.files.delete(row.id);
     return kept;
+  }
+}
+
+/**
+ * What restoring to before `pickedId` puts back: for every file that
+ * checkpoint or any later one (in `rows`, newest first) touched, the row
+ * holding its contents before the earliest of those changes. Restoring to
+ * before the first of two applied edits so brings both files back, not
+ * just the one picked. A row that `isNew` is a file that did not exist
+ * then, so restoring removes it.
+ */
+export function restorePlan(rows: readonly Checkpoint[], pickedId: string): Checkpoint[] {
+  const at = rows.findIndex((row) => row.id === pickedId);
+  if (at < 0) return [];
+  const plan = new Map<string, Checkpoint>();
+  // Newest to the picked one; an older row of the same file overwrites, so its snapshot wins.
+  for (const row of rows.slice(0, at + 1)) plan.set(row.uri ?? row.path, row);
+  return [...plan.values()].sort((a, b) => a.path.localeCompare(b.path));
+}
+
+/**
+ * Where restoring `path` under `root` writes: the path with its links
+ * followed, or null when that now leads out of the root (a folder replaced
+ * by a link since the checkpoint was taken), so a restore never writes
+ * through it. The deny list does not apply: a checkpoint holds what the
+ * person's own Apply wrote, and putting it back is theirs to do.
+ */
+export function restoreTarget(root: string, path: string): string | null {
+  try {
+    return confine(root, path, { deny: new DenyList([]) }).absolute;
+  } catch {
+    return null;
   }
 }
