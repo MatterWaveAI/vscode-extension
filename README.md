@@ -106,9 +106,10 @@ changes no file and runs no git until you trust it.
 | Prompt Library | Your saved prompts, for every workspace or this one. |
 | Restore Checkpoint | Put files back as they were before an Apply, an inline edit or an agent write; the changes after it go with it. |
 | Import ChatGPT or Claude History | Bring an export file's conversations in. |
-| Toggle Agent Mode, Set Agent Approval Mode, Cycle Agent Approval Mode, Pick the Agent's Root Folder | Agent mode on or off, its approval mode, and the folder it works in (see [Agent mode](#agent-mode)). |
+| Toggle Agent Mode, Set Agent Approval Mode, Cycle Agent Approval Mode, Pick the Agent's Root Folder, Select Agent Engine | Agent mode on or off, its approval mode, the folder it works in, and the agent execution engine (`auto`, `pi`, or `builtin`; see [Agent mode](#agent-mode)). |
 | Accept the Agent's Change, Reject the Agent's Change | Answer the change under review; also the buttons on its diff editor. |
 | Draft MATTERWAVE.md (/init), Resume an Agent Run | `/init` and `/resume` from the palette. |
+| Dictate Prompt | Transcribe an audio clip via `/api/speech/transcribe` and insert it into the composer. |
 | Show Usage | This session's agent runs, the period's allowance and your spend. |
 
 ## Agent mode

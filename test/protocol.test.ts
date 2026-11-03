@@ -105,6 +105,15 @@ describe("parseWebviewMessage", () => {
     expect(parseWebviewMessage({ type: "agentShowDiff", id: "a1", extra: 1 })).toEqual({ type: "agentShowDiff", id: "a1" });
     expect(parseWebviewMessage({ type: "agentCycleMode" })).toEqual({ type: "agentCycleMode" });
     expect(parseWebviewMessage({ type: "refreshUsage" })).toEqual({ type: "refreshUsage" });
+    expect(parseWebviewMessage({ type: "dictate" })).toEqual({ type: "dictate" });
+    expect(parseWebviewMessage({ type: "dictate", audioBase64: "AQID", mimeType: "audio/webm", filename: "clip.webm" })).toEqual({
+      type: "dictate",
+      audioBase64: "AQID",
+      mimeType: "audio/webm",
+      filename: "clip.webm",
+    });
+    expect(parseWebviewMessage({ type: "dictate", audioBase64: "" })).toBeNull();
+    expect(parseWebviewMessage({ type: "dictate", mimeType: 42 })).toBeNull();
   });
 });
 

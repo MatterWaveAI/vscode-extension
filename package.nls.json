@@ -74,5 +74,7 @@
   "command.agent.pickRoot.title": "Pick the Agent's Root Folder",
   "command.agent.init.title": "Draft MATTERWAVE.md (/init)",
   "command.agent.resume.title": "Resume an Agent Run",
-  "command.showUsage.title": "Show Usage"
+  "command.showUsage.title": "Show Usage",
+  "command.dictatePrompt.title": "Dictate Prompt",
+  "command.selectAgentEngine.title": "Select Agent Engine"
 }

@@ -253,7 +253,9 @@ export type HostMessage =
   /** An image attachment's bytes as a `data:` URI, fetched by the host for one transcript part. */
   | { type: "imageData"; attachmentId: string; dataUri: string }
   /** Open one of the view's panels (MatterWave: Show Usage). */
-  | { type: "showPanel"; panel: "usage" };
+  | { type: "showPanel"; panel: "usage" }
+  /** Insert or append a dictated transcript into the composer draft. */
+  | { type: "insertDictation"; text: string };
 
 export type WebviewMessage =
   | { type: "ready" }
@@ -322,7 +324,9 @@ export type WebviewMessage =
   | { type: "agentShowDiff"; id: string }
   | { type: "agentPickRoot" }
   /** The usage panel opened: read the budget. */
-  | { type: "refreshUsage" };
+  | { type: "refreshUsage" }
+  /** Voice dictation from the composer or command palette. */
+  | { type: "dictate"; audioBase64?: string; mimeType?: string; filename?: string };
 
 const WEBVIEW_TYPES = new Set<WebviewMessage["type"]>([
   "ready", "reconnect", "newChat", "openConversation", "searchConversations", "renameConversation",
@@ -332,6 +336,7 @@ const WEBVIEW_TYPES = new Set<WebviewMessage["type"]>([
   "openNotification", "loadMoreNotifications", "setNotificationsUnreadOnly", "applyCodeBlock", "loadMoreConversations",
   "forkConversation", "reportMessage", "dismissAnnouncement", "copyCodeBlock", "insertCodeBlock", "openLink",
   "agentToggle", "agentSetMode", "agentCycleMode", "agentDecide", "agentShowDiff", "agentPickRoot", "refreshUsage",
+  "dictate",
 ]);
 
 const AGENT_MODES = new Set(["plan", "ask", "auto-edit", "yolo"]);
@@ -445,6 +450,23 @@ export function parseWebviewMessage(raw: unknown): WebviewMessage | null {
         : null;
     case "agentShowDiff":
       return str("id") && (msg.id as string).length <= 100 ? { type: "agentShowDiff", id: msg.id as string } : null;
+    case "dictate": {
+      if (msg.audioBase64 !== undefined && (typeof msg.audioBase64 !== "string" || msg.audioBase64.length === 0 || msg.audioBase64.length > 20 * 1024 * 1024)) {
+        return null;
+      }
+      if (msg.mimeType !== undefined && (typeof msg.mimeType !== "string" || msg.mimeType.length > 100)) {
+        return null;
+      }
+      if (msg.filename !== undefined && (typeof msg.filename !== "string" || msg.filename.length > 256)) {
+        return null;
+      }
+      return {
+        type: "dictate",
+        ...(typeof msg.audioBase64 === "string" ? { audioBase64: msg.audioBase64 } : {}),
+        ...(typeof msg.mimeType === "string" ? { mimeType: msg.mimeType } : {}),
+        ...(typeof msg.filename === "string" ? { filename: msg.filename } : {}),
+      };
+    }
     default:
       return { type: msg.type } as WebviewMessage;
   }

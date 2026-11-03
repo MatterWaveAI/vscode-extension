@@ -21,6 +21,7 @@ import { announcement } from "./announce";
 import { tokenize } from "./highlight";
 import { suggestionsAt, type Suggestions } from "./suggest";
 import { connectorName, connectorNoticeText, sourceLabel } from "../chat/connectorSource";
+import { appendDictatedText } from "../chat/dictation";
 
 /**
  * The chat view's script. It only renders and reports intents: there is no
@@ -155,6 +156,10 @@ const temporaryRow = el("div", { className: "temporary" }, [temporaryBox, tempor
 temporaryRow.hidden = true;
 const sendButton = button("Send", submit);
 const stopButton = button("Stop", () => send({ type: "stop" }));
+const dictateButton = button("Dictate", () => send({ type: "dictate" }), {
+  className: "link",
+  title: "Dictate into the composer",
+});
 // The agent's controls: the toggle, the mode (always visible while it is on), the root.
 const agentBox = document.createElement("input");
 agentBox.type = "checkbox";
@@ -178,7 +183,7 @@ const composer = el("div", { className: "composer" }, [
   todoPanel,
   temporaryRow,
   input,
-  el("div", { className: "row" }, [stopButton, sendButton]),
+  el("div", { className: "row" }, [dictateButton, stopButton, sendButton]),
 ]);
 // In the composer's place while a connector's conversation is open: where
 // it is answered, the thread's link, and the fork. The composer itself is
@@ -376,6 +381,7 @@ function render(): void {
   renderTranscript(state);
   renderAgent(state);
   sendButton.disabled = state.streaming || state.offline;
+  dictateButton.disabled = state.streaming || state.offline;
   stopButton.hidden = !state.streaming;
   // Offline, the composer closes but the textarea is never replaced, so the
   // draft is there when the connection is.
@@ -1187,6 +1193,13 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
   if (message.type === "showPanel") {
     usageOpen = true;
     render();
+    return;
+  }
+  if (message.type === "insertDictation") {
+    input.value = appendDictatedText(input.value, message.text);
+    const caret = input.value.length;
+    input.setSelectionRange(caret, caret);
+    updateSuggestions();
     return;
   }
   if (message.type === "imageData") {

@@ -25,6 +25,8 @@ import {
   TESTS_QUESTION,
 } from "./codeActions";
 import { AGENT_ENGINES, AgentSession, type AgentEngine, type AgentSettings } from "./agent/session";
+import { isPiAvailable } from "./agent/piBackend";
+import { audioMimeTypeForPath } from "./chat/dictation";
 import { EditorReviewSurface, EditorTracker, PROPOSAL_SCHEME, ProposalFileSystem, openDocumentText } from "./agent/editor";
 import { McpManager, type McpServerConfig } from "./agent/mcp";
 import { describeServer, isMatterWaveMcp, resolveMcpServers, type PendingServer } from "./agent/mcpConfig";
@@ -52,7 +54,9 @@ import { conversationToMarkdown, safeFilename } from "./chat/export";
 import type { ApiKeyListing, ImportRecord } from "./api/types";
 import { pickerRows, resolvePick, type PickerRow } from "./models";
 import { DEFAULT_BASE_URL, normalizeServerUrl, serverUrlProblem, shouldPromptForServer } from "./settings";
-import { StatusBar } from "./statusBar";
+import { formatAgentEngineStatus, StatusBar } from "./statusBar";
+
+export { formatAgentEngineStatus };
 import { normalizePromptName, PromptLibrary, MAX_PROMPTS, MAX_PROMPT_TEXT, PROMPTS_KEY, type PromptRow, type PromptScope } from "./promptLibrary";
 import { currentFolder, editorFolders, resolveNamedFile, whereItLands } from "./targets";
 import { pickWorkspaceFile as pickFile } from "./fileSearch";
@@ -515,6 +519,14 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
     await view.reveal();
     await importHistory(client, chat);
   });
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "matterwave.dictatePrompt",
+      (input?: Uint8Array | { audioBytes: Uint8Array; mimeType?: string; filename?: string }) =>
+        dictatePrompt(chat, view, input),
+    ),
+  );
+  command("matterwave.selectAgentEngine", () => selectAgentEngine());
 
   void chat.refresh();
 
@@ -1382,6 +1394,82 @@ async function pickApprovalMode(agent: AgentSession): Promise<void> {
     { title: "MatterWave agent: approval mode", placeHolder: "What the agent may do without asking (Shift+Tab cycles in the composer)" },
   );
   if (picked) await agent.setMode(picked.mode);
+}
+
+export interface SelectAgentEngineOptions {
+  probePi?: (binaryPath: string) => Promise<boolean>;
+  target?: vscode.ConfigurationTarget;
+}
+
+/**
+ * Inspect the current `matterwave.agent.engine` setting and Pi 1.0 binary
+ * availability, then let the user switch between `auto`, `pi`, and `builtin`.
+ */
+export async function selectAgentEngine(options: SelectAgentEngineOptions = {}): Promise<AgentEngine | undefined> {
+  const settings = agentSettings();
+  const current: AgentEngine = settings.engine ?? "auto";
+  const binary = settings.piBinaryPath || "pi";
+  const probe = options.probePi ?? ((bin: string) => isPiAvailable(bin));
+  const piAvailable = await probe(binary);
+  const statusLabel = formatAgentEngineStatus(current, piAvailable);
+  const items: { engine: AgentEngine; label: string; description: string; detail: string }[] = [
+    {
+      engine: "auto",
+      label: `${current === "auto" ? "$(check) " : ""}auto`,
+      description: formatAgentEngineStatus("auto", piAvailable),
+      detail: "Use Pi 1.0 (pi --mode rpc) when installed and fall back to the built-in loop",
+    },
+    {
+      engine: "pi",
+      label: `${current === "pi" ? "$(check) " : ""}pi`,
+      description: formatAgentEngineStatus("pi", piAvailable),
+      detail: `Require the Pi 1.0 coding agent binary (${binary} --mode rpc)`,
+    },
+    {
+      engine: "builtin",
+      label: `${current === "builtin" ? "$(check) " : ""}builtin`,
+      description: formatAgentEngineStatus("builtin", piAvailable),
+      detail: "Always use the built-in MatterWave agent loop",
+    },
+  ];
+  const picked = await vscode.window.showQuickPick(items, {
+    title: `MatterWave agent: engine (${statusLabel})`,
+    placeHolder: "Select the coding agent execution engine (matterwave.agent.engine)",
+  });
+  if (!picked) return undefined;
+  const config = vscode.workspace.getConfiguration("matterwave.agent");
+  await config.update("engine", picked.engine, options.target ?? vscode.ConfigurationTarget.Global);
+  return picked.engine;
+}
+
+/**
+ * Transcribe an audio buffer or a user-selected audio recording and insert
+ * the resulting transcript into the composer draft.
+ */
+export async function dictatePrompt(
+  chat: ChatController,
+  view: { reveal(): Promise<void> | void },
+  input?: Uint8Array | { audioBytes: Uint8Array; mimeType?: string; filename?: string },
+): Promise<string | null> {
+  await view.reveal();
+  if (input instanceof Uint8Array) {
+    return chat.dictateAudio(input);
+  }
+  if (input && typeof input === "object" && input.audioBytes instanceof Uint8Array) {
+    return chat.dictateAudio(input.audioBytes, input.mimeType, input.filename);
+  }
+  const picked = await vscode.window.showOpenDialog({
+    title: "Select an audio recording to transcribe into the composer",
+    canSelectMany: false,
+    openLabel: "Transcribe",
+    filters: { Audio: ["webm", "wav", "mp3", "m4a", "ogg", "flac", "aac", "mp4"] },
+  });
+  const file = picked?.[0];
+  if (!file) return null;
+  const filename = file.path.split("/").pop() ?? "dictation.webm";
+  const mimeType = audioMimeTypeForPath(filename);
+  const bytes = await vscode.workspace.fs.readFile(file);
+  return chat.dictateAudio(bytes, mimeType, filename);
 }
 
 // --- @-mention context providers -------------------------------------------------

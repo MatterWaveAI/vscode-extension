@@ -30,6 +30,8 @@ export type AgentEngine = "auto" | "pi" | "builtin";
 
 export const AGENT_ENGINES: readonly AgentEngine[] = ["auto", "pi", "builtin"] as const;
 
+export { formatAgentEngineStatus } from "../statusBar";
+
 /**
  * The coding agent's session: everything about agent mode that is not the
  * editor. It holds the toggle, the approval mode, the workspace root, the

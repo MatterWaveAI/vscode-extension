@@ -11,6 +11,7 @@ import {
   type RequestOptions,
 } from "../lib/matterwaveClient";
 import { ApiError, detailOf, parseRetryAfter } from "./errors";
+import { buildSpeechFormData } from "../chat/dictation";
 import type { ChatCompletionChunk, ChatCompletionRequest } from "../agent/wire";
 import type {
   Announcement,
@@ -561,6 +562,12 @@ export class MatterWaveClient {
   /** An attachment's bytes, as `GET /api/attachments/{id}/content` streams them. */
   attachmentContent(id: string): Promise<ArrayBuffer> {
     return this.bytes("GET", `/api/attachments/${encodeURIComponent(id)}/content`);
+  }
+
+  /** `POST /api/speech/transcribe`: transcribe an audio clip into text for the composer. */
+  transcribeAudio(audioBytes: Uint8Array, mimeType = "audio/webm", filename?: string): Promise<{ text: string }> {
+    const form = buildSpeechFormData(audioBytes, mimeType, filename);
+    return this.json("POST", "/api/speech/transcribe", form);
   }
 
   // --- entitlements and org instructions -------------------------------------

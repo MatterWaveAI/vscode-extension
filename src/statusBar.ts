@@ -1,6 +1,20 @@
 import * as vscode from "vscode";
+import type { AgentEngine } from "./agent/session";
 import type { StatusInfo } from "./chat/controller";
 import type { UsageView } from "./chat/protocol";
+
+/** Format the configured agent engine and Pi 1.0 binary availability for the status bar / picker. */
+export function formatAgentEngineStatus(engine: AgentEngine, piAvailable: boolean): string {
+  switch (engine) {
+    case "auto":
+      return piAvailable ? "Pi 1.0 (auto)" : "Built-in (auto fallback)";
+    case "pi":
+      return piAvailable ? "Pi 1.0" : "Pi 1.0 (unavailable)";
+    case "builtin":
+    default:
+      return "Built-in";
+  }
+}
 
 /** The status-bar item's text, tooltip and command for a state. Pure for the tests. */
 export function statusText(status: StatusInfo): { text: string; tooltip: string; command: string } {
@@ -22,6 +36,7 @@ export function statusText(status: StatusInfo): { text: string; tooltip: string;
     status.meterPercent !== null ? `Context used: ${status.meterPercent}%` : null,
     status.unreadNotifications > 0 ? `Notifications: ${status.unreadNotifications} unread` : null,
     status.agentMode ? `Agent mode: ${status.agentMode}` : null,
+    status.agentEngine ? `Agent engine: ${formatAgentEngineStatus(status.agentEngine, Boolean(status.piAvailable))}` : null,
     status.usage ? allowanceLine(status.usage) : null,
     "Click to pick a model",
   ]

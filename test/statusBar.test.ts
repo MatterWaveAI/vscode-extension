@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { statusText } from "../src/statusBar";
+import { formatAgentEngineStatus, statusText } from "../src/statusBar";
 import type { UsageView } from "../src/chat/protocol";
 
 describe("statusText", () => {
@@ -55,6 +55,22 @@ describe("statusText", () => {
     expect(statusText({ ...base, usage }).tooltip).toContain("Your cap: $3.20 of $10.00");
     expect(statusText({ ...base, usage: { ...usage, memberCap: { spentUsd: 10, capUsd: 10, exhausted: true } } }).tooltip).toContain(
       "Your cap: $10.00 of $10.00 — reached",
+    );
+  });
+
+  it("formats agent engine status and includes it in the status bar tooltip", () => {
+    expect(formatAgentEngineStatus("auto", true)).toBe("Pi 1.0 (auto)");
+    expect(formatAgentEngineStatus("auto", false)).toBe("Built-in (auto fallback)");
+    expect(formatAgentEngineStatus("pi", true)).toBe("Pi 1.0");
+    expect(formatAgentEngineStatus("pi", false)).toBe("Pi 1.0 (unavailable)");
+    expect(formatAgentEngineStatus("builtin", true)).toBe("Built-in");
+    expect(formatAgentEngineStatus("builtin", false)).toBe("Built-in");
+
+    expect(statusText({ ...base, agentEngine: "auto", piAvailable: true }).tooltip).toContain(
+      "Agent engine: Pi 1.0 (auto)",
+    );
+    expect(statusText({ ...base, agentEngine: "pi", piAvailable: false }).tooltip).toContain(
+      "Agent engine: Pi 1.0 (unavailable)",
     );
   });
 });

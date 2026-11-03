@@ -429,6 +429,16 @@
         "command": "matterwave.showUsage",
         "title": "%command.showUsage.title%",
         "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.dictatePrompt",
+        "title": "%command.dictatePrompt.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.selectAgentEngine",
+        "title": "%command.selectAgentEngine.title%",
+        "category": "%command.category%"
       }
     ],
     "menus": {

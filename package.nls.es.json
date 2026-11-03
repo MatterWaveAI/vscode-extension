@@ -74,5 +74,7 @@
   "command.agent.pickRoot.title": "Elegir la carpeta raíz del agente",
   "command.agent.init.title": "Redactar MATTERWAVE.md (/init)",
   "command.agent.resume.title": "Reanudar una ejecución del agente",
-  "command.showUsage.title": "Mostrar uso"
+  "command.showUsage.title": "Mostrar uso",
+  "command.dictatePrompt.title": "Dictar prompt",
+  "command.selectAgentEngine.title": "Seleccionar el motor del agente"
 }

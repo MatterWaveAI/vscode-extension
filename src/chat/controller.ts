@@ -11,7 +11,8 @@ import { BUILT_IN_COMMANDS, BUILT_IN_HELP, parseSlashCommand, type SlashCommand 
 import { initialModel } from "../models";
 import { classifyStreamError, STREAM_ERROR_COPY, type StreamErrorKind } from "../streamErrors";
 import { appendDelta, deltaText, emptyAssistant, partFromStart, setPart } from "./assemble";
-import type { AgentSession, RunSummary } from "../agent/session";
+import type { AgentEngine, AgentSession, RunSummary } from "../agent/session";
+import { decodeBase64Audio } from "./dictation";
 import type { ChatMessage } from "../agent/wire";
 import { expandCommand } from "../agent/definitions";
 import { switchTarget, transcriptOf } from "./branches";
@@ -56,6 +57,10 @@ export interface StatusInfo {
   usage: UsageView | null;
   /** The agent's approval mode while agent mode is on, so it is visible from anywhere; null otherwise. */
   agentMode?: string | null;
+  /** The configured agent engine when shown in the status bar tooltip. */
+  agentEngine?: AgentEngine | null;
+  /** Whether the Pi 1.0 binary is available when reporting `agentEngine`. */
+  piAvailable?: boolean;
 }
 
 export interface ChatDeps {
@@ -74,7 +79,9 @@ export interface ChatDeps {
       | "shareConversation"
       | "restoreCheckpoint"
       | "agentResume"
-      | "agentPickMode",
+      | "agentPickMode"
+      | "dictatePrompt"
+      | "selectAgentEngine",
   ) => void;
   /** Open a URL in the browser: where a notification's link leads when it is not a conversation. */
   openLink?: (url: string) => void;
@@ -314,6 +321,13 @@ export class ChatController {
         return;
       case "refreshUsage":
         return this.loadBudget();
+      case "dictate":
+        if (message.audioBase64) {
+          await this.dictateAudio(decodeBase64Audio(message.audioBase64), message.mimeType, message.filename);
+        } else {
+          this.deps.runCommand("dictatePrompt");
+        }
+        return;
     }
   }
 
@@ -1972,6 +1986,31 @@ export class ChatController {
 
   hasConversation(): boolean {
     return this.activeId !== null;
+  }
+
+  /**
+   * Transcribe an audio clip via `POST /api/speech/transcribe` and post the
+   * resulting transcript into the webview composer draft.
+   */
+  async dictateAudio(audioBytes: Uint8Array, mimeType?: string, filename?: string): Promise<string | null> {
+    let text: string | null = null;
+    await this.guard(async () => {
+      const response = await this.deps.client.transcribeAudio(audioBytes, mimeType, filename);
+      const cleaned = response.text?.trim() ?? "";
+      if (cleaned) {
+        text = cleaned;
+        this.insertDictation(cleaned);
+      }
+    });
+    if (this.error) this.emit();
+    return text;
+  }
+
+  /** Post a dictated phrase to the webview so the composer inserts/appends it. */
+  insertDictation(text: string): void {
+    const cleaned = text.trim();
+    if (!cleaned) return;
+    this.deps.post({ type: "insertDictation", text: cleaned });
   }
 
   // --- plumbing ------------------------------------------------------------------
