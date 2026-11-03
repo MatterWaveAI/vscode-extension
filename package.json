@@ -75,6 +75,12 @@
           "default": true,
           "description": "%config.showAnswerUsage.description%"
         },
+        "matterwave.inlineCompletions.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "%config.inlineCompletions.enabled.description%",
+          "scope": "window"
+        },
         "matterwave.agent.defaultMode": {
           "type": "string",
           "enum": [

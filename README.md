@@ -277,6 +277,7 @@ Each run's totals also show when it ends.
 | `matterwave.caFile` | empty | Path to a PEM file with the certificate authority that signed the deployment's TLS certificate, trusted on top of the system's. For a deployment behind a private CA; `~/` is expanded. |
 | `matterwave.commitMessageStyle` | empty | How commit messages are written; a workspace can set its own. |
 | `matterwave.showAnswerUsage` | on | Tokens and cost under each answer. |
+| `matterwave.inlineCompletions.enabled` | `false` | Ghost-text inline completions in the editor (`POST /v1/completions` Fill-in-the-Middle, in trusted workspaces). |
 | `matterwave.agent.defaultMode` | `ask` | The agent's approval mode in a new workspace: `plan`, `ask` or `auto-edit`. A workspace's settings can only make it stricter. |
 | `matterwave.agent.engine` | `auto` | Agent execution engine: `auto` uses Pi 1.0 (`pi --mode rpc`) when installed and falls back to the built-in loop, `pi` requires Pi 1.0, and `builtin` always uses the built-in loop. |
 | `matterwave.agent.piBinaryPath` | `pi` | Path or command name for the Pi 1.0 coding agent binary (used with `--mode rpc`). |
@@ -339,7 +340,7 @@ instead, installed into the test editor, so the .vsix is what is tested.
 `pnpm run icon` regenerates `media/icon.png` from the activity-bar glyph. `pre-commit install`
 turns on the gitleaks hook CI also runs.
 
-The MatterWave SDK is vendored at `src/lib/matterwaveClient.ts` (trimmed from version 0.1.0 of
+The MatterWave SDK is vendored at `src/lib/matterwaveClient.ts` (trimmed from version 0.5.0 of
 [MatterWaveAI/typescript-sdk](https://github.com/MatterWaveAI/typescript-sdk), released under MIT):
 the package is not published to npm, so the extension carries the client it needs. The agent's
 tool contract and helpers (generated from the Python SDK's `contract.json`, with confinement, the

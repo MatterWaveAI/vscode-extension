@@ -476,11 +476,18 @@ export class EventEmitter<T> {
 }
 
 export class CancellationTokenSource {
-  readonly token = { isCancellationRequested: false };
+  private readonly listeners: ((e: unknown) => unknown)[] = [];
+  readonly token = {
+    isCancellationRequested: false,
+    onCancellationRequested: (listener: (e: unknown) => unknown) => listen(this.listeners, listener),
+  };
   cancel(): void {
     this.token.isCancellationRequested = true;
+    for (const listener of [...this.listeners]) listener(undefined);
   }
-  dispose(): void {}
+  dispose(): void {
+    this.listeners.length = 0;
+  }
 }
 
 /** A QuickPick a test drives: it types with `type`, accepts with `accept`, escapes with `hide`. */
@@ -544,11 +551,23 @@ export class CodeAction {
   ) {}
 }
 
+export class InlineCompletionItem {
+  constructor(
+    readonly insertText: string,
+    readonly range?: Range,
+  ) {}
+}
+
 /** Language features registered by `activate`, and the problems a test reports. */
 export const languages = {
   codeActionProviders: [] as { selector: unknown; provider: unknown }[],
+  inlineCompletionProviders: [] as { selector: unknown; provider: unknown }[],
   registerCodeActionsProvider(selector: unknown, provider: unknown): { dispose(): void } {
     languages.codeActionProviders.push({ selector, provider });
+    return { dispose() {} };
+  },
+  registerInlineCompletionItemProvider(selector: unknown, provider: unknown): { dispose(): void } {
+    languages.inlineCompletionProviders.push({ selector, provider });
     return { dispose() {} };
   },
   diagnostics: new Map<string, unknown[]>(),

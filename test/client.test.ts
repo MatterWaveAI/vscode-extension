@@ -1,4 +1,20 @@
-import { setSleep } from "../src/lib/matterwaveClient";
+import {
+  APIError,
+  AuthenticationError,
+  errorFromResponse,
+  IDEMPOTENCY_HEADER,
+  MATTERWAVE_PROVIDER_NAME,
+  MatterWave,
+  MatterWaveConfigError,
+  MatterWaveError,
+  ORG_HEADER,
+  PRESET_HEADER,
+  RateLimitError,
+  setSleep,
+  TEMPORARY_HEADER,
+  UnprocessableEntityError,
+  VERSION,
+} from "../src/lib/matterwaveClient";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { MatterWaveClient, requestLogLine, type RequestLogEntry } from "../src/api/client";
 import { ApiError, parseRetryAfter } from "../src/api/errors";
@@ -649,5 +665,75 @@ describe("key options and the account routes", () => {
     expect(JSON.parse(String(calls[2]?.body))).toEqual({ preset_id: "preset_review" });
     expect(JSON.parse(String(calls[3]?.body))).toEqual({ preset_id: "preset_review" });
     expect(JSON.parse(String(calls[4]?.body))).toEqual({ preset_id: null });
+  });
+
+  it("calls POST /v1/completions for FIM completions with Idempotency-Key and maps @matterwave/sdk 0.5.0 errors", async () => {
+    const { api, calls } = client({
+      "GET /api/me": () => json({ subject: "u1" }),
+      "POST /v1/completions": () =>
+        json({
+          id: "cmpl_1",
+          object: "text_completion",
+          model: "grt-small",
+          choices: [{ text: "n * n;", index: 0, finish_reason: "stop" }],
+        }),
+    });
+    await api.me();
+    expect(calls[0]?.headers[IDEMPOTENCY_HEADER]).toBeUndefined();
+
+    const fim = await api.fimComplete({
+      model: "grt-small",
+      prompt: "return ",
+      suffix: "\n}",
+      max_tokens: 128,
+      stop: ["\n\n", "<|fim_pad|>"],
+    });
+    expect(fim.choices[0]?.text).toBe("n * n;");
+    expect(calls[1]?.method).toBe("POST");
+    expect(calls[1]?.url).toBe("/v1/completions");
+    expect(calls[1]?.headers[IDEMPOTENCY_HEADER]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(JSON.parse(String(calls[1]?.body))).toEqual({
+      model: "grt-small",
+      prompt: "return ",
+      suffix: "\n}",
+      max_tokens: 128,
+      stop: ["\n\n", "<|fim_pad|>"],
+    });
+
+    expect(VERSION).toBe("0.5.0");
+    expect(MATTERWAVE_PROVIDER_NAME).toBe("matterwave");
+    expect(PRESET_HEADER).toBe("X-MatterWave-Preset-Id");
+    expect(TEMPORARY_HEADER).toBe("X-MatterWave-Temporary");
+    expect(ORG_HEADER).toBe("X-MatterWave-Org-Id");
+
+    const authErr = errorFromResponse(
+      new Response(JSON.stringify({ detail: "Invalid key" }), { status: 401, headers: { "x-request-id": "req-401" } }),
+      JSON.stringify({ detail: "Invalid key" }),
+    );
+    expect(authErr).toBeInstanceOf(MatterWaveError);
+    expect(authErr).toBeInstanceOf(APIError);
+    expect(authErr).toBeInstanceOf(AuthenticationError);
+    expect(authErr.describe()).toBe("Invalid key (status 401) request_id=req-401");
+
+    const rateErr = errorFromResponse(
+      new Response(JSON.stringify({ error: { message: "Rate limit", code: "rate_limit_exceeded" } }), {
+        status: 429,
+        headers: { "x-request-id": "req-429", "retry-after": "4" },
+      }),
+      JSON.stringify({ error: { message: "Rate limit", code: "rate_limit_exceeded" } }),
+    );
+    expect(rateErr).toBeInstanceOf(RateLimitError);
+    expect(rateErr.retryAfter).toBe(4);
+    expect(rateErr.describe()).toBe("Rate limit (status 429) [rate_limit_exceeded] request_id=req-429");
+
+    const unprocessable = errorFromResponse(
+      new Response(JSON.stringify({ detail: [{ msg: "field required" }] }), { status: 422 }),
+      JSON.stringify({ detail: [{ msg: "field required" }] }),
+    );
+    expect(unprocessable).toBeInstanceOf(UnprocessableEntityError);
+    expect(unprocessable.message).toBe("field required");
+
+    expect(() => new MatterWave({ baseUrl: "" })).toThrow(MatterWaveConfigError);
+    expect(() => new MatterWave({ baseUrl: "" })).toThrow(MatterWaveError);
   });
 });

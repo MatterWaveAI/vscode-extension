@@ -1,22 +1,41 @@
 /**
  * Vendored from the MatterWave TypeScript SDK (MatterWaveAI/typescript-sdk,
- * MIT, version 0.1.0) and trimmed to the surface this extension uses: the
+ * MIT, version 0.5.0) and trimmed to the surface this extension uses: the
  * request/retry core, `me()`, device login, the conversation API with its
- * streaming frames, and the reading half of `presets` (a composer offers the
- * org's presets; it never writes them). The v1 chat-completions surface, the
- * native org/keys/webhooks/library/shares/connections clients, the preset
- * writes and the environment-variable fallbacks are left out.
+ * streaming frames, `/v1/completions` FIM (`fimComplete`), Pi 1.0 RPC types,
+ * and the reading half of `presets` (a composer offers the org's presets; it
+ * never writes them). The native org/keys/webhooks/library/shares/connections
+ * clients, the preset writes and the environment-variable fallbacks are left
+ * out.
  *
  * It is vendored, not depended on, because `@matterwave/sdk` is not
  * published to npm and this repository no longer sits beside the SDK's
  * source in the monorepo. If the package is published, this file and its
  * importers can move back to the dependency. Change both together:
- * upstream `src/{client,conversations,conversation-types,connectors,connector-types,errors,frames,sse}.ts`.
+ * upstream `src/{client,conversations,conversation-types,connectors,connector-types,errors,frames,sse,pi}.ts`.
  *
  * The extension's own client (`src/api/client.ts`) wraps this one; the
  * routes the SDK does not model (pin, archive, delete, share, feedback,
  * context, compaction, attachments) ride the wrapper's own `json()` plumbing.
  */
+
+export const VERSION = "0.5.0";
+export const IDEMPOTENCY_HEADER = "Idempotency-Key";
+const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+/** A fresh key for one write: a random (version 4) UUID, as Stripe and OpenAI send. */
+export function newIdempotencyKey(): string {
+  const crypto = (globalThis as { crypto?: Crypto }).crypto;
+  if (typeof crypto?.randomUUID === "function") return crypto.randomUUID();
+  if (typeof crypto?.getRandomValues !== "function") {
+    throw new MatterWaveError("No Web Crypto in this runtime to make an idempotency key with.");
+  }
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 
 // --- errors (upstream errors.ts, trimmed) ------------------------------------
 
@@ -84,6 +103,15 @@ export class APIError extends MatterWaveError {
     this.rateLimit = init.rateLimit ?? null;
     this.body = init.body;
   }
+
+  /** The message with the status, code and request id, for a log line. */
+  describe(): string {
+    const parts = [this.message];
+    if (this.status !== null) parts.push(`(status ${this.status})`);
+    if (this.code) parts.push(`[${this.code}]`);
+    if (this.requestId) parts.push(`request_id=${this.requestId}`);
+    return parts.join(" ");
+  }
 }
 
 /** 400: a malformed body, an unsupported parameter, a non-text part. */
@@ -113,6 +141,8 @@ export class ConnectorConversationError extends ConflictError {
     this.source = init.source;
   }
 }
+/** 422: the body failed validation, FastAPI's own refusal shape. */
+export class UnprocessableEntityError extends APIError {}
 /** 429: the per-key window, or the organisation's monthly budget. */
 export class RateLimitError extends APIError {}
 /** 5xx: the API or the model gateway behind it failed. */
@@ -129,7 +159,7 @@ export class DeviceAuthError extends APIError {}
  * A client option that cannot be used: no origin, a bad origin, a negative
  * retry count.
  */
-export class MatterWaveConfigError extends Error {
+export class MatterWaveConfigError extends MatterWaveError {
   constructor(message: string) {
     super(message);
     this.name = "MatterWaveConfigError";
@@ -142,6 +172,7 @@ export function errorClassFor(status: number): new (message: string, init: APIEr
   if (status === 403) return PermissionDeniedError;
   if (status === 404) return NotFoundError;
   if (status === 409) return ConflictError;
+  if (status === 422) return UnprocessableEntityError;
   if (status === 429) return RateLimitError;
   if (status >= 500) return ServerError;
   return APIError;
@@ -796,6 +827,35 @@ export interface RequestOptions {
   signal?: AbortSignal;
   /** Headers for this one call. */
   headers?: Record<string, string>;
+  /** Explicit `Idempotency-Key` header for this write; ignored on GET/HEAD/OPTIONS. */
+  idempotencyKey?: string;
+}
+
+export interface FimCompletionRequest {
+  model?: string | null;
+  prompt: string;
+  suffix?: string;
+  max_tokens?: number;
+  temperature?: number;
+  stop?: string | string[];
+}
+
+export interface FimCompletionChoice {
+  text: string;
+  index: number;
+  finish_reason: string | null;
+}
+
+export interface FimCompletionResponse {
+  id?: string;
+  object?: string;
+  model?: string;
+  choices: FimCompletionChoice[];
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
 }
 
 /** @internal One operation, ready for `send`. */
@@ -820,7 +880,7 @@ export const BACKOFF_CAP_MS = 8_000;
 const NON_RETRYABLE_429_CODES = new Set(["insufficient_quota"]);
 const API_PREFIX = "/v1";
 const REQUEST_ID_HEADER = "x-request-id";
-const USER_AGENT = "matterwave-typescript/0.1.0 (vscode-extension vendored)";
+const USER_AGENT = `matterwave-typescript/${VERSION} (vscode-extension vendored)`;
 
 export function resolveBaseUrl(baseUrl: string | null | undefined): string {
   const value = (baseUrl ?? "").trim();
@@ -1079,6 +1139,17 @@ export class MatterWave {
     );
   }
 
+  /** `POST /v1/completions`: Fill-in-the-Middle (FIM) completion for prefix and suffix. */
+  fimComplete(
+    params: FimCompletionRequest,
+    options: RequestOptions = {},
+  ): Promise<WithRequestId<FimCompletionResponse>> {
+    return this.json<FimCompletionResponse>(
+      { method: "POST", path: "/v1/completions", body: defined({ ...params }), keyed: true, stream: false },
+      options,
+    );
+  }
+
   /** @internal One JSON operation, with the retry loop. */
   async json<T extends object>(prepared: Prepared, options: RequestOptions): Promise<WithRequestId<T>> {
     const { response } = await this.send(prepared, options);
@@ -1114,7 +1185,10 @@ export class MatterWave {
     prepared: Prepared,
     options: RequestOptions,
   ): Promise<{ response: Response; controller: AbortController }> {
-    const headers = this.headersFor(prepared, options.headers);
+    const idempotencyKey = READ_METHODS.has(prepared.method)
+      ? null
+      : (options.idempotencyKey ?? newIdempotencyKey());
+    const headers = this.headersFor(prepared, options.headers, idempotencyKey);
     const url = this.baseUrl + prepared.path;
     const body =
       prepared.body === undefined ? undefined : JSON.stringify(prepared.body);
@@ -1161,15 +1235,22 @@ export class MatterWave {
 
   /**
    * The client's own `Accept` and `User-Agent`, then what the operation
-   * needs (`Last-Event-ID` on a resume) and the call's own, then the bearer.
+   * needs (`Last-Event-ID` on a resume) and the call's own, then a write's
+   * idempotency key, then the bearer.
    */
-  private headersFor(prepared: Prepared, extra?: Record<string, string>): Record<string, string> {
+  private headersFor(
+    prepared: Prepared,
+    extra?: Record<string, string>,
+    idempotencyKey: string | null = null,
+  ): Record<string, string> {
     const headers: Record<string, string> = {
       Accept: prepared.stream ? "text/event-stream" : "application/json",
       "User-Agent": USER_AGENT,
       ...(prepared.headers ?? {}),
       ...(extra ?? {}),
     };
+    const named = Object.keys(headers).some((name) => name.toLowerCase() === IDEMPOTENCY_HEADER.toLowerCase());
+    if (idempotencyKey !== null && !named) headers[IDEMPOTENCY_HEADER] = idempotencyKey;
     if (prepared.body !== undefined) headers["Content-Type"] = "application/json";
     if (prepared.keyed) {
       if (this.apiKey === null) {
@@ -1182,6 +1263,8 @@ export class MatterWave {
     return headers;
   }
 }
+
+export { MatterWave as MatterWaveClient };
 
 // --- the conversation API and device login (upstream conversations.ts, trimmed) --
 
@@ -1606,3 +1689,100 @@ export class Presets {
     );
   }
 }
+
+// --- Pi 1.0 provider & RPC protocol types (upstream pi/{provider,types}.ts) -----
+
+export const MATTERWAVE_PROVIDER_NAME = "matterwave";
+export const PRESET_HEADER = "X-MatterWave-Preset-Id";
+export const TEMPORARY_HEADER = "X-MatterWave-Temporary";
+export const ORG_HEADER = "X-MatterWave-Org-Id";
+
+export interface PiModelCost {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+export interface PiModelDefinition {
+  id: string;
+  name: string;
+  api?: "openai-completions" | "openai-responses" | "anthropic-messages" | (string & {});
+  reasoning: boolean;
+  input: ("text" | "image")[];
+  cost: PiModelCost;
+  contextWindow: number;
+  maxTokens: number;
+  headers?: Record<string, string>;
+  compat?: Record<string, unknown>;
+}
+
+export interface PiProviderConfig {
+  name?: string;
+  baseUrl: string;
+  apiKey?: string;
+  api: "openai-completions" | "openai-responses" | "anthropic-messages" | (string & {});
+  headers?: Record<string, string>;
+  authHeader?: boolean;
+  models: PiModelDefinition[];
+}
+
+export type PiRpcCommand =
+  | { id?: string; type: "prompt"; message: string; images?: unknown[]; streamingBehavior?: "steer" | "followUp" }
+  | { id?: string; type: "steer"; message: string; images?: unknown[] }
+  | { id?: string; type: "follow_up"; message: string; images?: unknown[] }
+  | { id?: string; type: "abort" }
+  | { id?: string; type: "new_session"; parentSession?: string }
+  | { id?: string; type: "get_state" }
+  | { id?: string; type: "set_model"; provider: string; modelId: string }
+  | { id?: string; type: "get_messages" }
+  | { id?: string; type: "compact"; customInstructions?: string };
+
+export type PiRpcCommandType = PiRpcCommand["type"];
+
+export interface PiRpcSessionState {
+  model?: { provider: string; id: string; [key: string]: unknown };
+  thinkingLevel?: string;
+  isStreaming: boolean;
+  isCompacting: boolean;
+  steeringMode?: "all" | "one-at-a-time";
+  followUpMode?: "all" | "one-at-a-time";
+  sessionFile?: string;
+  sessionId: string;
+  sessionName?: string;
+  autoCompactionEnabled?: boolean;
+  messageCount: number;
+  pendingMessageCount: number;
+  [key: string]: unknown;
+}
+
+export interface PiRpcResponseEvent<T = Record<string, unknown>> {
+  id?: string;
+  type: "response";
+  command: string;
+  success: boolean;
+  data?: T;
+  error?: string;
+}
+
+export interface PiRpcAssistantMessageDelta {
+  type: string;
+  delta?: string;
+  contentIndex?: number;
+  id?: string;
+  toolName?: string;
+  [key: string]: unknown;
+}
+
+export type PiRpcEvent =
+  | { type: "agent_start"; [key: string]: unknown }
+  | { type: "agent_end"; messages?: unknown[]; [key: string]: unknown }
+  | { type: "turn_start"; turnIndex?: number; timestamp?: number; [key: string]: unknown }
+  | { type: "turn_end"; turnIndex?: number; message?: unknown; toolResults?: unknown[]; [key: string]: unknown }
+  | { type: "message_start"; message: unknown; [key: string]: unknown }
+  | { type: "message_update"; message?: unknown; assistantMessageEvent?: PiRpcAssistantMessageDelta; usage?: unknown; [key: string]: unknown }
+  | { type: "message_end"; message: unknown; [key: string]: unknown }
+  | { type: "tool_execution_start"; toolCallId: string; toolName: string; args: Record<string, unknown>; parentToolCallId?: string; [key: string]: unknown }
+  | { type: "tool_execution_update"; toolCallId: string; toolName: string; args: Record<string, unknown>; partialResult: unknown; parentToolCallId?: string; [key: string]: unknown }
+  | { type: "tool_execution_end"; toolCallId: string; toolName: string; result: unknown; isError: boolean; durationMs?: number; parentToolCallId?: string; [key: string]: unknown }
+  | PiRpcResponseEvent;

@@ -35,6 +35,7 @@ import { stricterMode } from "./agent/loop";
 import { MODES_BY_NAME, MODE_NAMES, type ModeName } from "./lib/sdk/agent/types";
 import type { CodeBlock } from "./chat/codeBlocks";
 import { fitReplacement, inlineEditPrompt, replacementFromAnswer, selectedLines } from "./inlineEdit";
+import { MatterWaveInlineCompletionProvider } from "./inlineCompletions";
 import {
   docsContext,
   fetchDocText,
@@ -378,6 +379,13 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
     vscode.languages.registerCodeActionsProvider("*", new MatterWaveCodeActions(), {
       providedCodeActionKinds: MatterWaveCodeActions.providedCodeActionKinds,
     }),
+    vscode.languages.registerInlineCompletionItemProvider(
+      { pattern: "**" },
+      new MatterWaveInlineCompletionProvider({
+        client,
+        getModel: () => context.globalState.get<string>(MODEL_KEY) ?? null,
+      }),
+    ),
     vscode.commands.registerCommand(CODE_ACTION_COMMANDS.fix, (uri, range, instruction) =>
       fixProblem(chat, checkpoints, uri, range, instruction),
     ),

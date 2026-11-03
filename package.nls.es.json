@@ -6,6 +6,7 @@
   "config.caFile.description": "Ruta a un archivo PEM con la autoridad de certificación que firmó el certificado TLS de la implementación, para una implementación detrás de una CA privada. Se confía en ella además de en las autoridades del sistema. Vacío usa solo las autoridades del sistema.",
   "config.commitMessageStyle.markdownDescription": "Cómo escribe un mensaje **Generar mensaje de commit**: una convención (Conventional Commits, un prefijo de ticket) o palabras normales. Vacío usa una línea de resumen de 72 caracteres como máximo en imperativo, una línea en blanco y un cuerpo breve que dice qué cambió y por qué. Un espacio de trabajo puede fijar el suyo.",
   "config.showAnswerUsage.description": "Mostrar bajo cada respuesta los tokens que usó y su coste al precio de lista del modelo.",
+  "config.inlineCompletions.enabled.description": "Mostrar sugerencias de código en línea (ghost text) en el editor mediante Fill-in-the-Middle (/v1/completions) en espacios de trabajo de confianza.",
   "viewsContainer.matterwave.title": "MatterWave",
   "view.chat.name": "Chat",
   "command.signInWithDeviceCode.title": "Iniciar sesión (código de dispositivo)",

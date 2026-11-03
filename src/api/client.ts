@@ -8,8 +8,13 @@ import {
   type ConversationFrame,
   type ConversationStream,
   type Fetch,
+  type FimCompletionChoice,
+  type FimCompletionRequest,
+  type FimCompletionResponse,
   type RequestOptions,
 } from "../lib/matterwaveClient";
+
+export type { FimCompletionChoice, FimCompletionRequest, FimCompletionResponse };
 import { ApiError, detailOf, parseRetryAfter } from "./errors";
 import { buildSpeechFormData } from "../chat/dictation";
 import type { ChatCompletionChunk, ChatCompletionRequest } from "../agent/wire";
@@ -716,6 +721,14 @@ export class MatterWaveClient {
       yield data as ChatCompletionChunk;
     }
     throw new ApiError(0, "The stream ended before the answer finished.", requestId, null, "truncated");
+  }
+
+  /**
+   * `POST /v1/completions`: Fill-in-the-Middle (FIM) completion for ghost-text
+   * inline suggestions in the editor.
+   */
+  fimComplete(request: FimCompletionRequest, signal?: AbortSignal): Promise<FimCompletionResponse> {
+    return this.call(({ writes }) => writes.fimComplete(request, { signal }));
   }
 
   // --- plumbing ------------------------------------------------------------

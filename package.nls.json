@@ -6,6 +6,7 @@
   "config.caFile.description": "Path to a PEM file holding the certificate authority that signed the deployment's TLS certificate, for a deployment behind a private CA. Trusted in addition to the system's authorities. Empty uses the system's authorities alone.",
   "config.commitMessageStyle.markdownDescription": "How **Generate Commit Message** writes a message: a convention (Conventional Commits, a ticket prefix) or plain words. Empty uses a summary line of at most 72 characters in the imperative mood, a blank line, and a short body saying what changed and why. A workspace can set its own.",
   "config.showAnswerUsage.description": "Show under each answer the tokens it used and their cost at the model's list price.",
+  "config.inlineCompletions.enabled.description": "Show ghost-text inline code completions in the editor using Fill-in-the-Middle (/v1/completions) in trusted workspaces.",
   "viewsContainer.matterwave.title": "MatterWave",
   "view.chat.name": "Chat",
   "command.signInWithDeviceCode.title": "Sign In (Device Code)",
