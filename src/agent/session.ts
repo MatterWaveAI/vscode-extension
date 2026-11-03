@@ -14,8 +14,21 @@ import { contractTools, type HostOptions } from "./host";
 import { estimateTokens, newBudget, runLoop, type LoopStatus, type ModelClient, type RunBudget } from "./loop";
 import type { McpManager, McpServerConfig } from "./mcp";
 import { buildPromptContext, type EditorContext } from "./promptContext";
+import {
+  isPiAvailable,
+  PiAgentBackend,
+  type PiAgentBackendOptions,
+  type PiBackendCallbacks,
+  type PiDoneEvent,
+  type PiFallbackRunner,
+  type PiPromptOptions,
+} from "./piBackend";
 import { failure, ok, promptTools, type Approvals, type ChangeOutcome, type ChangeRequest, type ConfirmRequest, type ToolContext, type ToolOutcome, type ToolSpec } from "./tools";
 import { StepAccumulator, type ChatMessage, type ToolCall } from "./wire";
+
+export type AgentEngine = "auto" | "pi" | "builtin";
+
+export const AGENT_ENGINES: readonly AgentEngine[] = ["auto", "pi", "builtin"] as const;
 
 /**
  * The coding agent's session: everything about agent mode that is not the
@@ -49,10 +62,13 @@ export interface AgentSettings {
   defaultMode: ModeName;
   webFetch: boolean;
   editorContext: boolean;
+  engine?: AgentEngine;
+  piBinaryPath?: string;
 }
 
 export interface AgentSessionDeps {
   client: ModelClient & {
+    baseUrl?: string;
     compact?(conversationId: string, model?: string): Promise<{ parts: { type: string; text?: string | null }[] }>;
     myInstructions?(): Promise<{ about: string | null; style: string | null }>;
   };
@@ -75,6 +91,14 @@ export interface AgentSessionDeps {
   fetch?: (input: string, init?: RequestInit) => Promise<Response>;
   /** The home folder for `~/.matterwave`; tests point it elsewhere. */
   home?: string;
+  /** API key or bearer token injected into Pi 1.0 (`MATTERWAVE_API_KEY`). */
+  apiKey?: () => string | null | Promise<string | null>;
+  /** Base URL injected into Pi 1.0 (`MATTERWAVE_BASE_URL`). */
+  baseUrl?: () => string;
+  /** Optional custom arguments passed to `pi` (defaults to `["--mode", "rpc"]`). */
+  piArgs?: string[];
+  /** Optional override for probing whether the `pi` binary is available. */
+  probePiAvailable?: (binaryPath: string) => Promise<boolean>;
   onChange(): void;
   log?(line: string): void;
 }
@@ -522,6 +546,102 @@ export class AgentSession {
       this.contextNotice = project.notice;
       if (project.notice) events?.onNotice?.(project.notice);
       const instructions = await this.instructions();
+      const shouldRouteEngine =
+        settings.engine !== undefined ||
+        settings.piBinaryPath !== undefined ||
+        this.deps.probePiAvailable !== undefined;
+      const activeEngine: "pi" | "builtin" = shouldRouteEngine
+        ? await resolveAgentEngine({
+            engine: settings.engine ?? "auto",
+            piBinaryPath: settings.piBinaryPath,
+            workspaceRoot: root.path,
+            probeAvailable: this.deps.probePiAvailable,
+          })
+        : "builtin";
+
+      if (activeEngine === "pi") {
+        const prompt = await buildPromptContext(root.path, request.prompt, settings.editorContext ? (this.deps.editorContext?.() ?? null) : null);
+        for (const note of prompt.notes) events?.onNotice?.(note);
+        const key = request.conversationId ?? "local";
+        let history = this.history(key);
+        if (!history) {
+          history = [...(request.seed ?? [])];
+          this.histories.set(key, history);
+        }
+        history.push({ role: "user", content: prompt.content });
+        this.status = "Working…";
+        this.changed();
+        const resolvedKey = (await this.deps.apiKey?.()) ?? "";
+        const resolvedBaseUrl = this.deps.baseUrl?.() ?? this.deps.client.baseUrl ?? "https://app.matterwave.ai";
+        const binaryPath = settings.piBinaryPath?.trim() || "pi";
+        const piBackend = new PiAgentBackend({
+          binaryPath,
+          args: this.deps.piArgs,
+          workspaceRoot: root.path,
+          apiKey: resolvedKey,
+          baseUrl: resolvedBaseUrl,
+          probeAvailable: () => Promise.resolve(true),
+          onDelta: (delta) => {
+            events?.onText?.(delta);
+          },
+          onToolStart: (evt) => {
+            budget.toolCalls += 1;
+            const call: ToolCall = {
+              id: evt.toolCallId,
+              type: "function",
+              function: { name: evt.toolName, arguments: JSON.stringify(evt.args ?? {}) },
+            };
+            const label =
+              typeof evt.args?.path === "string"
+                ? evt.args.path
+                : typeof evt.args?.command === "string"
+                  ? evt.args.command
+                  : "";
+            this.status = `${evt.toolName}${label ? ` ${label.split("\n", 1)[0]!.slice(0, 80)}` : ""}`;
+            this.output = null;
+            this.deps.log?.(`[${evt.toolName}] ${label}`);
+            events?.onToolCall?.(call, label);
+            sync();
+            this.changed();
+          },
+          onToolUpdate: (evt) => {
+            if (evt.delta) {
+              this.output = ((this.output ?? "") + evt.delta).slice(-MAX_OUTPUT_TAIL);
+              this.deps.log?.(evt.delta.replace(/\n$/, ""));
+              this.changedSoon();
+            }
+          },
+          onToolEnd: (evt) => {
+            const call: ToolCall = {
+              id: evt.toolCallId,
+              type: "function",
+              function: { name: evt.toolName, arguments: "{}" },
+            };
+            const content = typeof evt.result === "string" ? evt.result : JSON.stringify(evt.result ?? "");
+            events?.onToolResult?.(call, { content, isError: evt.isError });
+            sync();
+            this.changed();
+          },
+        });
+        try {
+          const done = await piBackend.prompt(prompt.content, { signal: request.signal });
+          budget.steps += 1;
+          budget.promptTokens += Math.ceil(prompt.content.length / 4);
+          budget.completionTokens += Math.ceil(done.text.length / 4);
+          budget.tokens = budget.promptTokens + budget.completionTokens;
+          if (done.text) {
+            history.push({ role: "assistant", content: done.text });
+          }
+          const status: LoopStatus = done.aborted || request.signal.aborted ? "stopped" : "done";
+          sync();
+          usage.status = status;
+          await this.store(request.conversationId, root.path, request.prompt);
+          return { status, text: done.text, usage };
+        } finally {
+          await piBackend.dispose();
+        }
+      }
+
       const specs = await this.specs(root.path, settings, trusted, { budget, model: request.model?.id, events });
       const prompt = await buildPromptContext(root.path, request.prompt, settings.editorContext ? (this.deps.editorContext?.() ?? null) : null);
       for (const note of prompt.notes) events?.onNotice?.(note);
@@ -804,4 +924,125 @@ function compactionNote(result: CompactionResult): string | null {
     return `Older tool output was folded to save context (${result.folded} result${result.folded === 1 ? "" : "s"}; about ${result.tokensBefore.toLocaleString("en-US")} → ${result.tokensAfter.toLocaleString("en-US")} tokens).`;
   }
   return null;
+}
+
+export interface ResolveAgentEngineOptions {
+  engine?: AgentEngine;
+  piBinaryPath?: string;
+  workspaceRoot?: string;
+  env?: NodeJS.ProcessEnv;
+  probeAvailable?: (binaryPath: string) => Promise<boolean>;
+}
+
+/**
+ * Resolve which agent execution engine (`"pi"` or `"builtin"`) to use:
+ * - `"builtin"` always selects the built-in loop without probing `pi`.
+ * - `"pi"` requires Pi 1.0 (`isPiAvailable(piBinaryPath)` must return `true`, otherwise throws).
+ * - `"auto"` (default) uses Pi 1.0 when `await isPiAvailable(piBinaryPath)` is `true` and falls back to `"builtin"` otherwise.
+ */
+export async function resolveAgentEngine(options: ResolveAgentEngineOptions = {}): Promise<"pi" | "builtin"> {
+  const mode: AgentEngine = options.engine ?? "auto";
+  if (mode === "builtin") {
+    return "builtin";
+  }
+  const binaryPath = options.piBinaryPath?.trim() || "pi";
+  const available = options.probeAvailable
+    ? await options.probeAvailable(binaryPath)
+    : await isPiAvailable(binaryPath, { cwd: options.workspaceRoot, env: options.env });
+  if (mode === "pi") {
+    if (!available) {
+      throw new Error(`Pi 1.0 binary "${binaryPath}" was not found on PATH (required when matterwave.agent.engine is "pi").`);
+    }
+    return "pi";
+  }
+  return available ? "pi" : "builtin";
+}
+
+export interface CreateAgentRunnerOptions extends Omit<PiAgentBackendOptions, "binaryPath" | "fallbackLoop" | "probeAvailable"> {
+  engine?: AgentEngine;
+  piBinaryPath?: string;
+  binaryPath?: string;
+  probeAvailable?: (binaryPath: string) => Promise<boolean>;
+  fallbackLoop?: PiFallbackRunner;
+}
+
+export interface AgentRunner {
+  readonly engine: AgentEngine;
+  readonly piBinaryPath: string;
+  resolveEngine(): Promise<"pi" | "builtin">;
+  prompt(text: string, options?: PiPromptOptions): Promise<PiDoneEvent>;
+  abort(): Promise<void>;
+  dispose(): Promise<void>;
+}
+
+/**
+ * Create an agent runner that routes turns according to `engine` (`"auto"`, `"pi"`, or `"builtin"`)
+ * and `piBinaryPath`:
+ * - `"auto"` delegates to `PiAgentBackend` when `isPiAvailable(piBinaryPath)` is true, falling back to `fallbackLoop` otherwise.
+ * - `"pi"` requires `PiAgentBackend` (fails when `pi` is not available, never falling back).
+ * - `"builtin"` always runs the built-in `fallbackLoop` without spawning `pi`.
+ */
+export function createAgentRunner(options: CreateAgentRunnerOptions): AgentRunner {
+  const engine: AgentEngine = options.engine ?? "auto";
+  const piBinaryPath = options.piBinaryPath?.trim() || options.binaryPath?.trim() || "pi";
+  const probe = options.probeAvailable
+    ? () => options.probeAvailable!(piBinaryPath)
+    : () => isPiAvailable(piBinaryPath, { cwd: options.workspaceRoot, env: options.env });
+
+  const backend = new PiAgentBackend({
+    ...options,
+    binaryPath: piBinaryPath,
+    probeAvailable: probe,
+    fallbackLoop: engine === "auto" ? options.fallbackLoop : undefined,
+  });
+
+  return {
+    engine,
+    piBinaryPath,
+    resolveEngine: () =>
+      resolveAgentEngine({
+        engine,
+        piBinaryPath,
+        workspaceRoot: options.workspaceRoot,
+        env: options.env,
+        probeAvailable: options.probeAvailable,
+      }),
+    async prompt(text: string, promptOptions?: PiPromptOptions): Promise<PiDoneEvent> {
+      if (engine === "builtin") {
+        if (!options.fallbackLoop) {
+          throw new Error("Built-in agent loop runner is required when engine is \"builtin\".");
+        }
+        const callbacks: PiBackendCallbacks = {
+          onDelta: promptOptions?.callbacks?.onDelta ?? options.onDelta,
+          onToolStart: promptOptions?.callbacks?.onToolStart ?? options.onToolStart,
+          onToolUpdate: promptOptions?.callbacks?.onToolUpdate ?? options.onToolUpdate,
+          onToolEnd: promptOptions?.callbacks?.onToolEnd ?? options.onToolEnd,
+          onDone: promptOptions?.callbacks?.onDone ?? options.onDone,
+          onError: promptOptions?.callbacks?.onError ?? options.onError,
+        };
+        let accumulated = "";
+        const wrappedCallbacks: PiBackendCallbacks = {
+          ...callbacks,
+          onDelta: (delta) => {
+            accumulated += delta;
+            callbacks.onDelta?.(delta);
+          },
+        };
+        const res = await options.fallbackLoop(text, wrappedCallbacks, promptOptions);
+        const doneEvent: PiDoneEvent =
+          res && typeof res === "object" && "text" in res
+            ? { ...res, usedFallback: true }
+            : {
+                text: typeof res === "string" ? res : accumulated,
+                toolCalls: [],
+                usedFallback: true,
+              };
+        callbacks.onDone?.(doneEvent);
+        return doneEvent;
+      }
+      return backend.prompt(text, promptOptions);
+    },
+    abort: () => backend.abort(),
+    dispose: () => backend.dispose(),
+  };
 }

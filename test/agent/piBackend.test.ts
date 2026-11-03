@@ -1,6 +1,8 @@
+import { readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -12,6 +14,12 @@ import {
   type PiToolStartEvent,
   type PiToolUpdateEvent,
 } from "../../src/agent/piBackend";
+import {
+  AgentSession,
+  createAgentRunner,
+  resolveAgentEngine,
+  type AgentEngine,
+} from "../../src/agent/session";
 
 /**
  * Node one-liner script acting as a mock `pi --mode rpc` JSONL server over stdin/stdout.
@@ -428,5 +436,147 @@ describe("PiAgentBackend (pi --mode rpc)", () => {
 
     // 3. Tool execution event emitted by RPC targeting .env.production is blocked and aborts the turn
     await expect(guardedBackend.prompt("secret-tool")).rejects.toThrow(/\.env\.production/i);
+  });
+
+  it("contributes matterwave.agent.engine and matterwave.agent.piBinaryPath settings in package.json", () => {
+    const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+    const manifest = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8")) as {
+      contributes: {
+        configuration: {
+          properties: Record<string, { type: string; enum?: string[]; default: unknown; description: string }>;
+        };
+      };
+    };
+    const nls = JSON.parse(readFileSync(path.join(repoRoot, "package.nls.json"), "utf8")) as Record<string, string>;
+
+    const engineSetting = manifest.contributes.configuration.properties["matterwave.agent.engine"];
+    expect(engineSetting).toBeDefined();
+    expect(engineSetting?.type).toBe("string");
+    expect(engineSetting?.enum).toEqual(["auto", "pi", "builtin"]);
+    expect(engineSetting?.default).toBe("auto");
+    const engineDescKey = engineSetting?.description.slice(1, -1) ?? "";
+    expect(nls[engineDescKey]).toBe(
+      "Agent execution engine: 'auto' uses Pi 1.0 (pi --mode rpc) when installed and falls back to the built-in loop, 'pi' requires Pi 1.0, and 'builtin' always uses the built-in loop.",
+    );
+
+    const binarySetting = manifest.contributes.configuration.properties["matterwave.agent.piBinaryPath"];
+    expect(binarySetting).toBeDefined();
+    expect(binarySetting?.type).toBe("string");
+    expect(binarySetting?.default).toBe("pi");
+    const binaryDescKey = binarySetting?.description.slice(1, -1) ?? "";
+    expect(nls[binaryDescKey]).toBe(
+      "Path or command name for the Pi 1.0 coding agent binary (used with --mode rpc).",
+    );
+  });
+
+  it("routes sessions according to matterwave.agent.engine ('auto', 'pi', 'builtin')", async () => {
+    // 1. resolveAgentEngine & createAgentRunner routing
+    expect(await resolveAgentEngine({ engine: "builtin", probeAvailable: async () => true })).toBe("builtin");
+    expect(await resolveAgentEngine({ engine: "auto", probeAvailable: async () => true })).toBe("pi");
+    expect(await resolveAgentEngine({ engine: "auto", probeAvailable: async () => false })).toBe("builtin");
+    expect(await resolveAgentEngine({ engine: "pi", probeAvailable: async () => true })).toBe("pi");
+    await expect(
+      resolveAgentEngine({ engine: "pi", piBinaryPath: "custom-pi", probeAvailable: async () => false }),
+    ).rejects.toThrow(/custom-pi/i);
+
+    const builtinRunner = createAgentRunner({
+      engine: "builtin",
+      piBinaryPath: process.execPath,
+      args: ["-e", MOCK_PI_RPC_SCRIPT, "--", "--mode", "rpc"],
+      workspaceRoot,
+      apiKey: "mw_test_key",
+      baseUrl: "https://api.matterwave.test",
+      fallbackLoop: async () => ({ text: "Handled by built-in loop", toolCalls: [] }),
+    });
+    const builtinDone = await builtinRunner.prompt("stream-tools");
+    expect(builtinDone.usedFallback).toBe(true);
+    expect(builtinDone.text).toBe("Handled by built-in loop");
+    await builtinRunner.dispose();
+
+    // 2. AgentSession routing across "auto" (with Pi available / unavailable), "pi", and "builtin"
+    let currentEngine: AgentEngine = "auto";
+    let piAvailableFlag = true;
+    let builtinCalls = 0;
+
+    const session = new AgentSession({
+      client: {
+        baseUrl: "https://api.matterwave.test",
+        async *chatCompletionsStream() {
+          builtinCalls += 1;
+          yield { choices: [{ index: 0, delta: { content: "Built-in session reply" }, finish_reason: "stop" }] };
+        },
+      },
+      review: {
+        open: async () => ({ proposal: async () => "", reveal: async () => {}, close: async () => {} }),
+        apply: async (_c, content) => content,
+      },
+      confirmYolo: async () => false,
+      settings: () => ({
+        maxSteps: 10,
+        maxTokens: 50_000,
+        defaultMode: "ask",
+        webFetch: false,
+        editorContext: false,
+        engine: currentEngine,
+        piBinaryPath: process.execPath,
+      }),
+      workspace: () => ({ roots: [{ name: "ws", path: workspaceRoot }], trusted: true }),
+      apiKey: () => "mw_session_key",
+      baseUrl: () => "https://api.matterwave.test",
+      piArgs: ["-e", MOCK_PI_RPC_SCRIPT, "--", "--mode", "rpc"],
+      probePiAvailable: async () => piAvailableFlag,
+      onChange: () => {},
+    });
+
+    // (a) engine = "auto" and Pi available -> uses PiAgentBackend
+    currentEngine = "auto";
+    piAvailableFlag = true;
+    const autoPiSummary = await session.run({
+      prompt: "stream-tools",
+      conversationId: "conv-auto-pi",
+      model: { id: "grt-1", context_window: 32000 },
+      signal: new AbortController().signal,
+    });
+    expect(autoPiSummary.status).toBe("done");
+    expect(autoPiSummary.text).toContain("Inspecting project files... All done!");
+    expect(builtinCalls).toBe(0);
+
+    // (b) engine = "auto" and Pi unavailable -> falls back to built-in loop
+    currentEngine = "auto";
+    piAvailableFlag = false;
+    const autoFallbackSummary = await session.run({
+      prompt: "Hello builtin",
+      conversationId: "conv-auto-builtin",
+      model: { id: "grt-1", context_window: 32000 },
+      signal: new AbortController().signal,
+    });
+    expect(autoFallbackSummary.status).toBe("done");
+    expect(autoFallbackSummary.text).toBe("Built-in session reply");
+    expect(builtinCalls).toBe(1);
+
+    // (c) engine = "builtin" even when Pi is available -> always uses built-in loop
+    currentEngine = "builtin";
+    piAvailableFlag = true;
+    const forcedBuiltinSummary = await session.run({
+      prompt: "Force builtin",
+      conversationId: "conv-builtin",
+      model: { id: "grt-1", context_window: 32000 },
+      signal: new AbortController().signal,
+    });
+    expect(forcedBuiltinSummary.status).toBe("done");
+    expect(forcedBuiltinSummary.text).toBe("Built-in session reply");
+    expect(builtinCalls).toBe(2);
+
+    // (d) engine = "pi" when Pi is unavailable -> fails with error requiring Pi 1.0
+    currentEngine = "pi";
+    piAvailableFlag = false;
+    const missingPiSummary = await session.run({
+      prompt: "Require pi",
+      conversationId: "conv-pi-missing",
+      model: { id: "grt-1", context_window: 32000 },
+      signal: new AbortController().signal,
+    });
+    expect(missingPiSummary.status).toBe("error");
+    expect(String(missingPiSummary.error)).toMatch(/not found on PATH/i);
   });
 });

@@ -58,6 +58,8 @@
   "config.agent.defaultMode.plan": "Read and search only: no file changes, no commands.",
   "config.agent.defaultMode.ask": "Every file change and every command needs your approval (the default).",
   "config.agent.defaultMode.autoEdit": "File changes are applied without asking (a change to the agent's or the editor's own settings still asks); commands still ask.",
+  "config.agent.engine.description": "Agent execution engine: 'auto' uses Pi 1.0 (pi --mode rpc) when installed and falls back to the built-in loop, 'pi' requires Pi 1.0, and 'builtin' always uses the built-in loop.",
+  "config.agent.piBinaryPath.description": "Path or command name for the Pi 1.0 coding agent binary (used with --mode rpc).",
   "config.agent.maxSteps.description": "The most model calls one agent run makes before it stops and says so. A workspace's settings can lower it, not raise it past yours.",
   "config.agent.maxTokens.description": "The most tokens one agent run spends (prompt and completion, every step) before it stops and says so. A workspace's settings can lower it, not raise it past yours.",
   "config.agent.editorContext.description": "Send the active file's name, the selection (up to 8,000 characters) and the recently opened files' names with each agent prompt. Files the deny list covers are never sent.",

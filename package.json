@@ -90,6 +90,23 @@
           "description": "%config.agent.defaultMode.description%",
           "scope": "window"
         },
+        "matterwave.agent.engine": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "pi",
+            "builtin"
+          ],
+          "default": "auto",
+          "description": "%config.agent.engine.description%",
+          "scope": "window"
+        },
+        "matterwave.agent.piBinaryPath": {
+          "type": "string",
+          "default": "pi",
+          "description": "%config.agent.piBinaryPath.description%",
+          "scope": "window"
+        },
         "matterwave.agent.maxSteps": {
           "type": "integer",
           "default": 40,

@@ -79,11 +79,11 @@ export interface ChatDeps {
   /** Open a URL in the browser: where a notification's link leads when it is not a conversation. */
   openLink?: (url: string) => void;
   /**
-   * Assemble one @-mention's context (a QuickPick flow on the editor side).
-   * Null is the person backing out: the message is not sent, since it was
-   * written expecting the context it names.
+   * Assemble one @-mention's context (a QuickPick flow on the editor side,
+   * or a workspace search for `@workspace`). Null is the person backing out:
+   * the message is not sent, since it was written expecting the context it names.
    */
-  resolveMention?: (mention: Mention) => Promise<ResolvedContext | null>;
+  resolveMention?: (mention: Mention, prompt?: string) => Promise<ResolvedContext | null>;
   /** The prompt library a `/name` expands to, when this editor keeps one, and its names for completion. */
   prompts?: { get(name: string): Promise<string | null>; names?(): Promise<string[]> };
   /**
@@ -1189,7 +1189,7 @@ export class ChatController {
     for (const mention of mentions) {
       let part: ResolvedContext | null;
       try {
-        part = await resolve(mention);
+        part = await resolve(mention, content);
       } catch (error) {
         this.fail(error);
         part = null;
@@ -1374,7 +1374,7 @@ export class ChatController {
     for (const mention of parseMentions(content)) {
       let part: ResolvedContext | null;
       try {
-        part = await resolve(mention);
+        part = await resolve(mention, content);
       } catch (error) {
         part = null;
         this.fail(error);

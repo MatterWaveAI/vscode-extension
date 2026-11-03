@@ -55,7 +55,7 @@ describe("suggestionsAt", () => {
         { insert: "@folder", detail: "a folder's tree" },
       ],
     });
-    expect(suggestionsAt("@", 1, [])?.items.map((i) => i.insert)).toEqual(["@file", "@folder", "@terminal", "@git", "@docs"]);
+    expect(suggestionsAt("@", 1, [])?.items.map((i) => i.insert)).toEqual(["@file", "@folder", "@workspace", "@terminal", "@git", "@docs"]);
   });
 
   it("leaves emails and finished mentions alone", () => {

@@ -58,6 +58,8 @@
   "config.agent.defaultMode.plan": "Solo leer y buscar: sin cambios en archivos ni comandos.",
   "config.agent.defaultMode.ask": "Cada cambio en un archivo y cada comando necesitan tu aprobación (el valor predeterminado).",
   "config.agent.defaultMode.autoEdit": "Los cambios en archivos se aplican sin preguntar (un cambio en la configuración del agente o del propio editor sigue preguntando); los comandos siguen preguntando.",
+  "config.agent.engine.description": "Motor de ejecución del agente: 'auto' usa Pi 1.0 (pi --mode rpc) cuando está instalado y recurre al bucle integrado como alternativa, 'pi' requiere Pi 1.0 y 'builtin' usa siempre el bucle integrado.",
+  "config.agent.piBinaryPath.description": "Ruta o nombre del comando del binario del agente de código Pi 1.0 (usado con --mode rpc).",
   "config.agent.maxSteps.description": "El máximo de llamadas al modelo que hace una ejecución del agente antes de detenerse y decirlo. La configuración de un espacio de trabajo puede bajarlo, no subirlo por encima del tuyo.",
   "config.agent.maxTokens.description": "El máximo de tokens que gasta una ejecución del agente (prompt y respuesta, en cada paso) antes de detenerse y decirlo. La configuración de un espacio de trabajo puede bajarlo, no subirlo por encima del tuyo.",
   "config.agent.editorContext.description": "Enviar con cada prompt del agente el nombre del archivo activo, la selección (hasta 8.000 caracteres) y los nombres de los archivos abiertos recientemente. Los archivos que cubre la lista de denegación nunca se envían.",

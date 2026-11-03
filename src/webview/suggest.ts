@@ -25,6 +25,7 @@ export interface Suggestions {
 const MENTION_DETAIL: Record<string, string> = {
   file: "a file's contents",
   folder: "a folder's tree",
+  workspace: "relevant code across the workspace",
   terminal: "a terminal's recent commands and output",
   git: "the working tree's or last commit's diff",
   docs: "the text of a web page",

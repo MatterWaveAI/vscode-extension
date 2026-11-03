@@ -24,7 +24,7 @@ import {
   MatterWaveCodeActions,
   TESTS_QUESTION,
 } from "./codeActions";
-import { AgentSession, type AgentSettings } from "./agent/session";
+import { AGENT_ENGINES, AgentSession, type AgentEngine, type AgentSettings } from "./agent/session";
 import { EditorReviewSurface, EditorTracker, PROPOSAL_SCHEME, ProposalFileSystem, openDocumentText } from "./agent/editor";
 import { McpManager, type McpServerConfig } from "./agent/mcp";
 import { describeServer, isMatterWaveMcp, resolveMcpServers, type PendingServer } from "./agent/mcpConfig";
@@ -41,7 +41,9 @@ import {
   folderTree,
   gitContext,
   mentionLabel,
+  searchWorkspaceContext,
   terminalContext,
+  WorkspaceIndex,
 } from "./contextProviders";
 import { mentionTitle, type Mention } from "./chat/mentions";
 import { proposedCommand, terminalCommandPrompt, TerminalHistory, terminalText } from "./terminalOutput";
@@ -222,9 +224,21 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
     mcp,
     mcpConfigs: () => mcpConfigs(context.workspaceState, declinedServers, agent.root()?.path ?? null),
     fetch: (input, init) => transport(input, init ?? {}),
+    apiKey: () => tokens.get(),
+    baseUrl,
     onChange: () => chat.emit(),
     log: (line) => agentLog.appendLine(line),
   });
+  let workspaceIndex: WorkspaceIndex | null = null;
+  let workspaceIndexRootsKey = "";
+  const getWorkspaceIndex = (roots: { name: string; path: string }[]): WorkspaceIndex => {
+    const key = roots.map((r) => `${r.name}:${r.path}`).join("|");
+    if (!workspaceIndex || workspaceIndexRootsKey !== key) {
+      workspaceIndex = new WorkspaceIndex({ roots });
+      workspaceIndexRootsKey = key;
+    }
+    return workspaceIndex;
+  };
   const chat: ChatController = new ChatController({
     client,
     agent,
@@ -248,7 +262,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
     // Where a notification's link leads when it is not a conversation of
     // this deployment; only http(s) URLs the classifier accepted get here.
     openLink: (url) => void vscode.env.openExternal(vscode.Uri.parse(url)),
-    resolveMention: (mention) => resolveMention(mention, terminals),
+    resolveMention: (mention, prompt) => resolveMention(mention, terminals, prompt ?? "", getWorkspaceIndex),
     prompts: { get: (name) => prompts.get(name), names: async () => [...new Set((await prompts.list()).map((row) => row.name))] },
     applyCode: async ({ block }) => {
       await applyCodeBlockFlow(chat, checkpoints, block);
@@ -1285,12 +1299,20 @@ function agentSettings(): AgentSettings {
     const project = [layers?.workspaceValue, layers?.workspaceFolderValue].filter((v): v is number => typeof v === "number");
     return Math.min(own, ...project);
   };
+  const rawEngine = config.get<string>("engine");
+  const engine: AgentEngine =
+    typeof rawEngine === "string" && AGENT_ENGINES.includes(rawEngine as AgentEngine)
+      ? (rawEngine as AgentEngine)
+      : "auto";
+  const piBinaryPath = config.get<string>("piBinaryPath")?.trim() || "pi";
   return {
     maxSteps: cap("maxSteps", 40),
     maxTokens: cap("maxTokens", 500_000),
     defaultMode: mode,
     webFetch: config.get<boolean>("webFetch") ?? true,
     editorContext: config.get<boolean>("editorContext") ?? true,
+    engine,
+    piBinaryPath,
   };
 }
 
@@ -1372,7 +1394,12 @@ async function pickApprovalMode(agent: AgentSession): Promise<void> {
  * backing out -- the message names context it is not going to get, so the
  * controller sends nothing.
  */
-async function resolveMention(mention: Mention, history: TerminalHistory): Promise<{ filename: string; text: string } | null> {
+async function resolveMention(
+  mention: Mention,
+  history: TerminalHistory,
+  prompt = "",
+  getWorkspaceIndex?: (roots: { name: string; path: string }[]) => WorkspaceIndex,
+): Promise<{ filename: string; text: string } | null> {
   const title = mentionTitle(mention);
   switch (mention.kind) {
     case "file": {
@@ -1395,6 +1422,17 @@ async function resolveMention(mention: Mention, history: TerminalHistory): Promi
       // workspace folders share is never read from the wrong one.
       const tree = await folderTree(path, (at) => readDirUnder(dir, at === path ? "" : at.slice(path.length + 1)));
       return folderContext(path, tree);
+    }
+    case "workspace": {
+      const roots = (vscode.workspace.workspaceFolders ?? [])
+        .filter((folder) => folder.uri.scheme === "file")
+        .map((folder) => ({ name: folder.name, path: folder.uri.fsPath }));
+      if (roots.length === 0) {
+        void vscode.window.showInformationMessage("Open a workspace folder to attach @workspace context.");
+        return null;
+      }
+      const index = getWorkspaceIndex ? getWorkspaceIndex(roots) : new WorkspaceIndex({ roots });
+      return searchWorkspaceContext(prompt, { roots, index });
     }
     case "terminal": {
       const terminals = vscode.window.terminals;

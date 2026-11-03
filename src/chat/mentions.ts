@@ -9,7 +9,7 @@
  * message's own text, not context.
  */
 
-export const MENTION_KINDS = ["file", "folder", "terminal", "git", "docs"] as const;
+export const MENTION_KINDS = ["file", "folder", "workspace", "terminal", "git", "docs"] as const;
 
 export type MentionKind = (typeof MENTION_KINDS)[number];
 

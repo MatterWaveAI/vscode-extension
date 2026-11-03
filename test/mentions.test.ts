@@ -5,14 +5,15 @@ const one = (kind: string) => ({ kind, token: `@${kind}`, ordinal: 1, of: 1 });
 
 describe("parseMentions", () => {
   it("recognises every provider kind as its own word", () => {
-    expect(parseMentions("Explain @file then @folder with @terminal, @git and @docs")).toEqual([
+    expect(parseMentions("Explain @file then @folder with @workspace, @terminal, @git and @docs")).toEqual([
       one("file"),
       one("folder"),
+      one("workspace"),
       one("terminal"),
       one("git"),
       one("docs"),
     ]);
-    expect(MENTION_KINDS).toHaveLength(5);
+    expect(MENTION_KINDS).toHaveLength(6);
   });
 
   it("is case-insensitive and keeps the order typed", () => {

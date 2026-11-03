@@ -54,8 +54,8 @@ applies). Under each answer: the tokens it used and their cost at the model's li
 
 In the composer:
 
-- `@file`, `@folder`, `@terminal`, `@git` and `@docs` attach context: a file, a folder's tree,
-  a terminal's recent commands with their output and exit codes, the working tree's or the last
+- `@file`, `@folder`, `@workspace`, `@terminal`, `@git` and `@docs` attach context: a file, a folder's tree,
+  relevant code snippets across the workspace, a terminal's recent commands with their output and exit codes, the working tree's or the last
   commit's diff, or a web page's text. Each mention is its own pick; typing `@` offers them.
 - `/help`, `/model`, `/clear`, `/compact`, `/share`, `/export` and the agent's commands (see
   [Agent mode](#agent-mode)) run commands, and `/name` sends one of your saved prompts (**Prompt
@@ -276,6 +276,8 @@ Each run's totals also show when it ends.
 | `matterwave.commitMessageStyle` | empty | How commit messages are written; a workspace can set its own. |
 | `matterwave.showAnswerUsage` | on | Tokens and cost under each answer. |
 | `matterwave.agent.defaultMode` | `ask` | The agent's approval mode in a new workspace: `plan`, `ask` or `auto-edit`. A workspace's settings can only make it stricter. |
+| `matterwave.agent.engine` | `auto` | Agent execution engine: `auto` uses Pi 1.0 (`pi --mode rpc`) when installed and falls back to the built-in loop, `pi` requires Pi 1.0, and `builtin` always uses the built-in loop. |
+| `matterwave.agent.piBinaryPath` | `pi` | Path or command name for the Pi 1.0 coding agent binary (used with `--mode rpc`). |
 | `matterwave.agent.maxSteps` | `40` | Model calls per agent run. A workspace's settings can only lower it. |
 | `matterwave.agent.maxTokens` | `500000` | Tokens per agent run, every step counted. A workspace's settings can only lower it. |
 | `matterwave.agent.editorContext` | `true` | Send the active file, the selection and recent files with agent prompts. |

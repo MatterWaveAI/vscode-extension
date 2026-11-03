@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, mkdir, rm, utimes, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   clip,
+  cosineSimilarity,
   docsContext,
   fetchDocText,
   fileContext,
@@ -10,7 +14,12 @@ import {
   MAX_CONTEXT_CHARS,
   MAX_TREE_DEPTH,
   MAX_TREE_ENTRIES,
+  mentionLabel,
+  searchWorkspaceContext,
   terminalContext,
+  tokenizeWorkspaceText,
+   workspaceContext,
+  WorkspaceIndex,
 } from "../src/contextProviders";
 
 describe("fileContext and folderContext", () => {
@@ -117,5 +126,213 @@ describe("clip", () => {
     const cut = clip("x".repeat(MAX_CONTEXT_CHARS + 10));
     expect(cut.startsWith("xxxxxx")).toBe(true);
     expect(cut).toContain(`(cut at ${MAX_CONTEXT_CHARS.toLocaleString()} characters)`);
+  });
+});
+
+describe("@workspace codebase context provider", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "mw-workspace-ctx-"));
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it("retrieves relevant code from unopened workspace files with file paths and line ranges", async () => {
+    await mkdir(path.join(root, "src", "auth"), { recursive: true });
+    await mkdir(path.join(root, "src", "billing"), { recursive: true });
+
+    await writeFile(
+      path.join(root, "src", "auth", "jwtVerifier.ts"),
+      [
+        "export interface JwtClaims {",
+        "  sub: string;",
+        "  orgId: string;",
+        "}",
+        "",
+        "export function verifyJwtSignature(token: string, publicKey: string): JwtClaims {",
+        "  if (!token.startsWith('eyJ')) {",
+        "    throw new Error('Malformed JWT header');",
+        "  }",
+        "  return { sub: 'user_1', orgId: 'org_1' };",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await writeFile(
+      path.join(root, "src", "billing", "invoiceCalculator.ts"),
+      [
+        "export function calculateMonthlyInvoice(seatCount: number, unitPriceCents: number): number {",
+        "  return seatCount * unitPriceCents;",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+
+    expect(mentionLabel("workspace")).toBe("Workspace codebase");
+
+    const part = await searchWorkspaceContext("@workspace how does verifyJwtSignature validate tokens?", {
+      roots: root,
+      topK: 3,
+    });
+
+    expect(part.filename).toBe("workspace-context.txt");
+    expect(part.text).toContain("src/auth/jwtVerifier.ts (lines 1-11)");
+    expect(part.text).toContain("export function verifyJwtSignature");
+    // Unopened file ranked first
+    const jwtIndex = part.text.indexOf("src/auth/jwtVerifier.ts");
+    const billingIndex = part.text.indexOf("src/billing/invoiceCalculator.ts");
+    expect(jwtIndex).toBeGreaterThanOrEqual(0);
+    if (billingIndex !== -1) {
+      expect(jwtIndex).toBeLessThan(billingIndex);
+    }
+  });
+
+  it("strictly respects .gitignore, .matterwaveignore, and the .env / secret / binary deny rules", async () => {
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await mkdir(path.join(root, "ignored-dir"), { recursive: true });
+    await mkdir(path.join(root, "node_modules", "pkg"), { recursive: true });
+    await mkdir(path.join(root, "dist"), { recursive: true });
+
+    await writeFile(path.join(root, ".gitignore"), "ignored-dir/\n*.generated.ts\n", "utf8");
+    await writeFile(path.join(root, ".matterwaveignore"), "internal-notes.txt\n", "utf8");
+
+    // Denied secret files containing the exact search keyword "superSecretPaymentKey"
+    await writeFile(path.join(root, ".env"), "SUPER_SECRET_PAYMENT_KEY=superSecretPaymentKey_env\n", "utf8");
+    await writeFile(path.join(root, ".env.production"), "SUPER_SECRET_PAYMENT_KEY=superSecretPaymentKey_prod\n", "utf8");
+    await writeFile(path.join(root, "server.pem"), "superSecretPaymentKey_pem\n", "utf8");
+    await writeFile(path.join(root, "id_ed25519"), "superSecretPaymentKey_ssh\n", "utf8");
+
+    // Gitignored / matterwaveignored / skipped dir files containing the search keyword
+    await writeFile(path.join(root, "ignored-dir", "secret.ts"), "export const k = 'superSecretPaymentKey_gitignored';\n", "utf8");
+    await writeFile(path.join(root, "src", "schema.generated.ts"), "export const k = 'superSecretPaymentKey_generated';\n", "utf8");
+    await writeFile(path.join(root, "internal-notes.txt"), "superSecretPaymentKey_mwignore\n", "utf8");
+    await writeFile(path.join(root, "node_modules", "pkg", "index.js"), "export const k = 'superSecretPaymentKey_node_modules';\n", "utf8");
+    await writeFile(path.join(root, "dist", "bundle.js"), "export const k = 'superSecretPaymentKey_dist';\n", "utf8");
+
+    // Binary file with null byte
+    await writeFile(path.join(root, "src", "binary.dat"), Buffer.from("superSecretPaymentKey_binary\0hidden", "utf8"));
+
+    // Legitimate workspace source file
+    await writeFile(
+      path.join(root, "src", "paymentClient.ts"),
+      "export function configurePaymentClient(headerName = 'X-Payment-Key') {\n  return { headerName, label: 'superSecretPaymentKey_safe_source' };\n}\n",
+      "utf8",
+    );
+
+    const index = new WorkspaceIndex({ roots: root });
+    const snippets = await index.search("superSecretPaymentKey");
+
+    expect(snippets.map((s) => s.path)).toEqual(["src/paymentClient.ts"]);
+    const formatted = workspaceContext("superSecretPaymentKey", snippets);
+    expect(formatted.text).toContain("superSecretPaymentKey_safe_source");
+    expect(formatted.text).not.toContain("superSecretPaymentKey_env");
+    expect(formatted.text).not.toContain("superSecretPaymentKey_prod");
+    expect(formatted.text).not.toContain("superSecretPaymentKey_pem");
+    expect(formatted.text).not.toContain("superSecretPaymentKey_ssh");
+    expect(formatted.text).not.toContain("superSecretPaymentKey_gitignored");
+    expect(formatted.text).not.toContain("superSecretPaymentKey_generated");
+    expect(formatted.text).not.toContain("superSecretPaymentKey_mwignore");
+    expect(formatted.text).not.toContain("superSecretPaymentKey_node_modules");
+    expect(formatted.text).not.toContain("superSecretPaymentKey_dist");
+    expect(formatted.text).not.toContain("superSecretPaymentKey_binary");
+  });
+
+  it("caches indexed files and invalidates/updates entries when file content or mtime changes or files are deleted", async () => {
+    await mkdir(path.join(root, "src"), { recursive: true });
+    const fileA = path.join(root, "src", "alpha.ts");
+    const fileB = path.join(root, "src", "beta.ts");
+
+    await writeFile(fileA, "export function computeAlphaMetric() { return 'alpha_v1'; }\n", "utf8");
+    await writeFile(fileB, "export function computeBetaMetric() { return 'beta_v1'; }\n", "utf8");
+
+    const index = new WorkspaceIndex({ roots: root });
+
+    const first = await index.search("computeAlphaMetric");
+    expect(first[0]?.path).toBe("src/alpha.ts");
+    expect(first[0]?.content).toContain("alpha_v1");
+    expect(index.stats).toEqual({ indexedFiles: 2, cacheHits: 0, cacheUpdates: 2 });
+
+    // Second search without any file changes reuses cached entries
+    const second = await index.search("computeAlphaMetric");
+    expect(second[0]?.content).toContain("alpha_v1");
+    expect(index.stats).toEqual({ indexedFiles: 2, cacheHits: 2, cacheUpdates: 0 });
+
+    // Update fileA content and advance its mtime
+    await writeFile(fileA, "export function computeAlphaMetric() { return 'alpha_v2_updated'; }\n", "utf8");
+    const future = new Date(Date.now() + 5000);
+    await utimes(fileA, future, future);
+
+    const third = await index.search("alpha_v2_updated");
+    expect(third[0]?.path).toBe("src/alpha.ts");
+    expect(third[0]?.content).toContain("alpha_v2_updated");
+    expect(index.stats.cacheHits).toBe(1);
+    expect(index.stats.cacheUpdates).toBe(1);
+
+    // Delete fileB and verify it is evicted from the cache
+    await rm(fileB);
+    const afterDelete = await index.search("beta_v1");
+    expect(afterDelete).toEqual([]);
+    expect(index.cachedFileCount).toBe(1);
+  });
+
+  it("enforces file count and per-file byte size caps", async () => {
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "src", "a.ts"), "export const sharedToken = 'one';\n", "utf8");
+    await writeFile(path.join(root, "src", "b.ts"), "export const sharedToken = 'two';\n", "utf8");
+    await writeFile(path.join(root, "src", "c.ts"), "export const sharedToken = 'three';\n", "utf8");
+    await writeFile(path.join(root, "src", "huge.ts"), `export const sharedToken = '${"x".repeat(2048)}';\n`, "utf8");
+
+    const index = new WorkspaceIndex({
+      roots: root,
+      maxFiles: 2,
+      maxFileBytes: 512,
+    });
+    const results = await index.search("sharedToken", { topK: 10 });
+    expect(index.cachedFileCount).toBe(2);
+    expect(results.map((r) => r.path)).toEqual(["src/a.ts", "src/b.ts"]);
+  });
+
+  it("ranks with optional /v1/embeddings cosine similarity and falls back to lexical BM25 when embeddings fail", async () => {
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(
+      path.join(root, "src", " semanticTarget.ts".trim()),
+      "export function dispatchNotificationQueue() { return true; }\n",
+      "utf8",
+    );
+    await writeFile(
+      path.join(root, "src", "other.ts"),
+      "export function parseCliFlags() { return false; }\n",
+      "utf8",
+    );
+
+    // 1. With embeddings fetcher that gives semanticTarget.ts a high cosine similarity vector
+    const embedTexts = async (texts: string[]) =>
+      texts.map((t) => (t.includes("dispatchNotificationQueue") || t.includes("background worker alerts") ? [1, 0] : [0, 1]));
+
+    const semanticIndex = new WorkspaceIndex({ roots: root, embedTexts });
+    const semResults = await semanticIndex.search("background worker alerts", { topK: 1 });
+    expect(semResults).toHaveLength(1);
+    expect(semResults[0]?.path).toBe("src/semanticTarget.ts");
+
+    // 2. When embeddings fetcher rejects (e.g. offline), automatically falls back to lexical ranking
+    const failingIndex = new WorkspaceIndex({
+      roots: root,
+      embedTexts: async () => {
+        throw new Error("Embeddings endpoint unreachable");
+      },
+    });
+    const fallbackResults = await failingIndex.search("parseCliFlags", { topK: 1 });
+    expect(fallbackResults).toHaveLength(1);
+    expect(fallbackResults[0]?.path).toBe("src/other.ts");
+
+    expect(cosineSimilarity([1, 0], [1, 0])).toBeCloseTo(1);
+    expect(cosineSimilarity([1, 0], [0, 1])).toBeCloseTo(0);
+    expect(tokenizeWorkspaceText("@workspace parseCliFlags")).toContain("parse");
+    expect(tokenizeWorkspaceText("@workspace parseCliFlags")).toContain("cli");
+    expect(tokenizeWorkspaceText("@workspace parseCliFlags")).toContain("flags");
   });
 });

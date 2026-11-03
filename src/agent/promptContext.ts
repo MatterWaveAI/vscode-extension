@@ -1,4 +1,5 @@
 import { stat } from "node:fs/promises";
+import { searchWorkspaceContext, type WorkspaceIndex } from "../contextProviders";
 import { PathRefusedError } from "../lib/sdk/agent/deny";
 import { confine } from "../lib/sdk/agent/confine";
 import { readHead } from "./readConfined";
@@ -64,12 +65,30 @@ export async function buildPromptContext(
   root: string,
   prompt: string,
   editor: EditorContext | null,
-  options: { includeEditor?: boolean } = {},
+  options: { includeEditor?: boolean; workspaceIndex?: WorkspaceIndex } = {},
 ): Promise<PromptContext> {
   const notes: string[] = [];
   const attached: string[] = [];
   const blocks: string[] = [];
   let budget = MAX_MENTION_TOTAL_CHARS;
+
+  if (/(^|[^A-Za-z0-9_@])@workspace(?![A-Za-z0-9_])/i.test(prompt) && !prompt.includes("workspace-context.txt:")) {
+    try {
+      const part = await searchWorkspaceContext(prompt, {
+        roots: root,
+        index: options.workspaceIndex,
+      });
+      const cap = Math.min(MAX_MENTION_FILE_CHARS, budget);
+      if (cap > 0 && part.text.trim()) {
+        const body = part.text.length > cap ? `${part.text.slice(0, cap)}\n[cut at ${cap.toLocaleString("en-US")} characters]` : part.text;
+        budget -= body.length;
+        blocks.push(`${part.filename}:\n${body}`);
+        attached.push(part.filename);
+      }
+    } catch {
+      notes.push("@workspace context could not be assembled.");
+    }
+  }
   for (const mention of parsePathMentions(prompt)) {
     let target;
     try {
