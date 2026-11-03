@@ -385,3 +385,19 @@ export interface Library {
   tags: TagRow[];
   assignments: Record<string, string[]>;
 }
+
+/** `GET` / `PUT /api/me/preferences`: cross-client account preferences. */
+export interface UserPreferences {
+  default_model?: string | null;
+  voice?: string | null;
+  locale?: string | null;
+  email?: {
+    product_updates?: boolean;
+    usage_alerts?: boolean;
+    billing_receipts?: boolean;
+  };
+  notifications?: {
+    budget_warn?: boolean;
+  };
+  [key: string]: unknown;
+}

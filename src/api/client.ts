@@ -48,6 +48,7 @@ import type {
   TagRow,
   UsageReport,
   UserInstructions,
+  UserPreferences,
 } from "./types";
 
 /**
@@ -523,7 +524,17 @@ export class MatterWaveClient {
     await this.json("DELETE", `/api/library/tags/${encodeURIComponent(id)}`);
   }
 
-  // --- instructions ---------------------------------------------------------
+  // --- instructions and preferences -----------------------------------------
+
+  /** `GET /api/me/preferences`: the person's cross-client preferences. */
+  getPreferences(): Promise<UserPreferences> {
+    return this.json("GET", "/api/me/preferences");
+  }
+
+  /** `PUT /api/me/preferences`: update the person's cross-client preferences. */
+  updatePreferences(preferences: Partial<UserPreferences>): Promise<UserPreferences> {
+    return this.json("PUT", "/api/me/preferences", preferences);
+  }
 
   /** `GET /api/me/instructions`: the person's own about/style text. */
   myInstructions(): Promise<UserInstructions> {

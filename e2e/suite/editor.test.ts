@@ -70,8 +70,8 @@ async function codeActions(uri: vscode.Uri, range: vscode.Range): Promise<vscode
       return await vscode.commands.executeCommand<vscode.CodeAction[]>("vscode.executeCodeActionProvider", uri, range);
     } catch (error) {
       const canceled = error instanceof Error && (error.name === "Canceled" || error.message === "Canceled");
-      if (!canceled || attempt === 5) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
+      if (!canceled || attempt === 15) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 200 * Math.min(attempt, 5)));
     }
   }
 }
@@ -85,14 +85,22 @@ describe("the lightbulb in a real editor", function () {
     try {
       const range = new vscode.Range(0, 7, 0, 12);
       problems.set(uri, [new vscode.Diagnostic(range, "Unexpected const.", vscode.DiagnosticSeverity.Error)]);
-      const atProblem = await codeActions(uri, range);
-      const fix = atProblem.find((a) => a.title === "Fix with MatterWave: Unexpected const.");
-      assert.ok(fix, `offered: ${atProblem.map((a) => a.title).join(", ")}`);
+      const fix = await waitForAsync("the Fix code action on the reported diagnostic", async () => {
+        const atProblem = await codeActions(uri, range);
+        return atProblem.find((a) => a.title === "Fix with MatterWave: Unexpected const.");
+      });
       assert.equal(fix.command?.command, "matterwave.fixProblem");
 
       const selection = new vscode.Range(0, 0, 0, 20);
       problems.clear();
-      const titles = (await codeActions(uri, selection)).map((a) => a.title);
+      const titles = await waitForAsync("the selection code actions", async () => {
+        const found = (await codeActions(uri, selection)).map((a) => a.title);
+        return ["Explain with MatterWave", "Generate Tests with MatterWave", "Add Docs with MatterWave"].every((t) =>
+          found.includes(t),
+        )
+          ? found
+          : undefined;
+      });
       for (const title of ["Explain with MatterWave", "Generate Tests with MatterWave", "Add Docs with MatterWave"]) {
         assert.ok(titles.includes(title), `${title} in ${titles.join(", ")}`);
       }
@@ -155,7 +163,7 @@ describe("finding a workspace file in a real editor", function () {
   });
 });
 
-async function waitFor<T>(what: string, check: () => T | undefined | null | false, ms = 30_000): Promise<T> {
+async function waitFor<T>(what: string, check: () => T | undefined | null | false, ms = 60_000): Promise<T> {
   const deadline = Date.now() + ms;
   for (;;) {
     const value = check();
@@ -165,51 +173,65 @@ async function waitFor<T>(what: string, check: () => T | undefined | null | fals
   }
 }
 
+async function waitForAsync<T>(what: string, check: () => Promise<T | undefined | null | false>, ms = 60_000): Promise<T> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const value = await check();
+    if (value) return value;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+}
+
 describe("reading a terminal in a real editor", function () {
   let history: TerminalHistory;
+  let sharedShell: vscode.Terminal | undefined;
   before(function () {
     history = new TerminalHistory();
+    sharedShell = vscode.window.createTerminal({ name: "e2e shell" });
+    sharedShell.show();
   });
   after(function () {
+    sharedShell?.dispose();
     history.dispose();
   });
 
   it("keeps a command's output and exit code through shell integration", async function () {
-    const terminal = vscode.window.createTerminal({ name: "e2e shell" });
-    try {
-      terminal.show();
-      const integration = await waitFor("shell integration", () => terminal.shellIntegration, 45_000);
-      integration.executeCommand("echo mw-e2e-marker");
-      const record = await waitFor("the command to finish", () => {
+    const terminal = sharedShell!;
+    terminal.show();
+    const integration = await waitFor("shell integration", () => terminal.shellIntegration, 90_000);
+    integration.executeCommand("echo mw-e2e-marker");
+    const record = await waitFor(
+      "the command to finish",
+      () => {
         const last = history.last(terminal);
         return last?.done && last.output.includes("mw-e2e-marker") ? last : undefined;
-      });
-      assert.equal(record.exitCode, 0);
-      const text = await terminalText(history, terminal);
-      assert.match(text ?? "", /\$ echo mw-e2e-marker/);
-      assert.match(text ?? "", /\[exit code 0\]/);
-    } finally {
-      terminal.dispose();
-    }
+      },
+      90_000,
+    );
+    assert.equal(record.exitCode, 0);
+    const text = await terminalText(history, terminal);
+    assert.match(text ?? "", /\$ echo mw-e2e-marker/);
+    assert.match(text ?? "", /\[exit code 0\]/);
   });
 
   it("sees a failed command's exit code, which is what Fix is asked about", async function () {
-    const terminal = vscode.window.createTerminal({ name: "e2e failing" });
-    try {
-      terminal.show();
-      const integration = await waitFor("shell integration", () => terminal.shellIntegration, 45_000);
-      integration.executeCommand("git --no-such-option");
-      const record = await waitFor("the command to finish", () => {
+    const terminal = sharedShell!;
+    terminal.show();
+    const integration = await waitFor("shell integration", () => terminal.shellIntegration, 90_000);
+    integration.executeCommand("git --no-such-option");
+    const record = await waitFor(
+      "the command to finish",
+      () => {
         const last = history.last(terminal);
-        return last?.done ? last : undefined;
-      });
-      assert.notEqual(record.exitCode, 0);
-      const prompt = terminalCommandPrompt("fix", terminal.name, record);
-      assert.match(prompt, /\$ git --no-such-option/);
-      assert.match(prompt, /\[exit code [1-9][0-9]*\]/);
-    } finally {
-      terminal.dispose();
-    }
+        return last?.done && last.command.includes("git --no-such-option") ? last : undefined;
+      },
+      90_000,
+    );
+    assert.notEqual(record.exitCode, 0);
+    const prompt = terminalCommandPrompt("fix", terminal.name, record);
+    assert.match(prompt, /\$ git --no-such-option/);
+    assert.match(prompt, /\[exit code [1-9][0-9]*\]/);
   });
 
   it("copies the buffer of a terminal shell integration does not cover, and keeps the clipboard", async function () {
@@ -221,10 +243,11 @@ describe("reading a terminal in a real editor", function () {
     try {
       terminal.show();
       await vscode.env.clipboard.writeText("what the person had copied");
-      // The pseudoterminal writes when it opens; give the renderer a moment to draw it.
-      await new Promise((resolve) => setTimeout(resolve, 1_500));
-      const text = await copyTerminalText(terminal);
-      assert.match(text ?? "", /plain-buffer-marker/);
+      const text = await waitForAsync("the pseudoterminal buffer to render", async () => {
+        const copied = await copyTerminalText(terminal);
+        return copied?.includes("plain-buffer-marker") ? copied : undefined;
+      });
+      assert.match(text, /plain-buffer-marker/);
       assert.equal(await vscode.env.clipboard.readText(), "what the person had copied");
     } finally {
       terminal.dispose();

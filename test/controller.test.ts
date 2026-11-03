@@ -68,7 +68,11 @@ function routes(over: Record<string, (call: Call) => Response> = {}) {
 
 async function setup(
   over: Parameters<typeof routes>[0] = {},
-  extra: { resolveMention?: (mention: unknown) => Promise<unknown>; prompts?: { get(name: string): Promise<string | null> } } = {},
+  extra: {
+    resolveMention?: (mention: unknown) => Promise<unknown>;
+    prompts?: { get(name: string): Promise<string | null> };
+    rememberedModel?: { get(): string | null; set(id: string): void };
+  } = {},
 ) {
   const secrets = new MemorySecrets();
   const tokens = new TokenStore(secrets as unknown as vscode.SecretStorage, () => "https://mw.test");
@@ -97,7 +101,7 @@ async function setup(
     client,
     post: (message) => provider.post(message),
     isSignedIn: async () => (await tokens.get()) !== null,
-    rememberedModel: { get: () => null, set: () => undefined },
+    rememberedModel: extra.rememberedModel ?? { get: () => null, set: () => undefined },
     runCommand: (command) => void runCommands.push(command),
     openLink,
     resolveMention: extra.resolveMention as never,
@@ -1977,6 +1981,58 @@ describe("presets", () => {
     expect(controller.snapshot().preset).toBeNull();
     expect(controller.availablePresets()).toEqual([]);
     expect(controller.retiredConversationPreset()).toBeNull();
+  });
+});
+
+describe("preferences sync", () => {
+  it("reads default_model from /api/me/preferences when no local model is set and syncs on selection", async () => {
+    let savedPrefs: Record<string, unknown> = { default_model: "partner-x" };
+    const remembered: string[] = [];
+    const { controller, calls } = await setup(
+      {
+        "GET /api/me/preferences": () => json(savedPrefs),
+        "PUT /api/me/preferences": (call) => {
+          savedPrefs = { ...savedPrefs, ...JSON.parse(String(call.body)) };
+          return json(savedPrefs);
+        },
+      },
+      {
+        rememberedModel: {
+          get: () => remembered.at(-1) ?? null,
+          set: (id) => void remembered.push(id),
+        },
+      },
+    );
+    await controller.refresh();
+    expect(controller.snapshot().model?.id).toBe("partner-x");
+
+    const nextModel = MODELS.data.find((m) => m.id === "grt-next") as ModelInfo;
+    expect(controller.setModel(nextModel)).toBe(true);
+    expect(controller.snapshot().model?.id).toBe("grt-next");
+    expect(remembered).toEqual(["grt-next"]);
+
+    await vi.waitFor(() => {
+      const putCall = calls.find((c) => c.method === "PUT" && c.url === "/api/me/preferences");
+      expect(putCall).toBeDefined();
+      expect(JSON.parse(String(putCall?.body))).toEqual({ default_model: "grt-next" });
+    });
+    expect(savedPrefs.default_model).toBe("grt-next");
+  });
+
+  it("keeps the workspace/local remembered model over /api/me/preferences on startup", async () => {
+    const { controller } = await setup(
+      {
+        "GET /api/me/preferences": () => json({ default_model: "partner-x" }),
+      },
+      {
+        rememberedModel: {
+          get: () => "grt-next",
+          set: () => undefined,
+        },
+      },
+    );
+    await controller.refresh();
+    expect(controller.snapshot().model?.id).toBe("grt-next");
   });
 });
 

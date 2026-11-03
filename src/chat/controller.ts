@@ -394,6 +394,7 @@ export class ChatController {
       this.archivedCursor = archived.nextCursor;
       // These are best-effort: a deployment without the route still chats.
       await Promise.all([
+        this.loadPreferences(models.default_model),
         this.loadPresets(),
         this.loadNotifications(),
         this.loadUsage(),
@@ -1943,10 +1944,32 @@ export class ChatController {
     return true;
   }
 
+  private async loadPreferences(serverDefault: string | null): Promise<void> {
+    if (this.deps.rememberedModel.get()) return;
+    try {
+      const prefs = await this.deps.client.getPreferences();
+      const prefModel = typeof prefs?.default_model === "string" && prefs.default_model ? prefs.default_model : null;
+      if (prefModel && !this.deps.rememberedModel.get()) {
+        this.model = initialModel(this.models, prefModel, serverDefault);
+      }
+    } catch {
+      // A deployment without the route, or a key that cannot read preferences, keeps the local/server default.
+    }
+  }
+
   async loadModels(): Promise<readonly ModelInfo[]> {
     const list = await this.deps.client.models();
     this.models = list.data;
-    if (!this.model) this.model = initialModel(list.data, this.deps.rememberedModel.get(), list.default_model);
+    if (!this.model) {
+      let preferred = this.deps.rememberedModel.get();
+      if (!preferred) {
+        const prefs = await this.deps.client.getPreferences().catch(() => null);
+        if (typeof prefs?.default_model === "string" && prefs.default_model) {
+          preferred = prefs.default_model;
+        }
+      }
+      this.model = initialModel(list.data, preferred, list.default_model);
+    }
     return this.models;
   }
 
@@ -1972,6 +1995,9 @@ export class ChatController {
     if (!model.included) return false;
     this.model = model;
     this.deps.rememberedModel.set(model.id);
+    void this.deps.client.updatePreferences({ default_model: model.id }).catch(() => {
+      /* a key-authenticated or offline session keeps the model locally */
+    });
     const conversationId = this.activeId;
     if (conversationId) {
       void this.deps.client.updateConversation(conversationId, { default_model: model.id }).catch(() => {
