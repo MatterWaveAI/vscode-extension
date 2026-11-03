@@ -45,6 +45,7 @@
     }
   },
   "main": "./dist/extension.js",
+  "l10n": "./l10n",
   "activationEvents": [],
   "contributes": {
     "configuration": {
@@ -438,6 +439,16 @@
       {
         "command": "matterwave.selectAgentEngine",
         "title": "%command.selectAgentEngine.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.compactPiSession",
+        "title": "%command.compactPiSession.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.newPiSession",
+        "title": "%command.newPiSession.title%",
         "category": "%command.category%"
       }
     ],

@@ -68,6 +68,28 @@ rl.on("line", (line) => {
     return;
   }
 
+  if (msg.type === "compact") {
+    send({
+      id: msg.id,
+      type: "response",
+      command: "compact",
+      success: true,
+      data: { compacted: true, customInstructions: msg.customInstructions || null },
+    });
+    return;
+  }
+
+  if (msg.type === "new_session") {
+    send({
+      id: msg.id,
+      type: "response",
+      command: "new_session",
+      success: true,
+      data: { cancelled: false, parentSession: msg.parentSession || null },
+    });
+    return;
+  }
+
   if (msg.type === "abort") {
     if (slowTimer) {
       clearTimeout(slowTimer);
@@ -578,5 +600,59 @@ describe("PiAgentBackend (pi --mode rpc)", () => {
     });
     expect(missingPiSummary.status).toBe("error");
     expect(String(missingPiSummary.error)).toMatch(/not found on PATH/i);
+
+    // (e) Pi 1.0 session controls: compactPiSession and newPiSession over RPC
+    currentEngine = "pi";
+    piAvailableFlag = true;
+    const compactResp = await session.compactPiSession({
+      customInstructions: "preserve test summary",
+      conversationId: "conv-auto-pi",
+    });
+    expect(compactResp).toMatchObject({
+      type: "response",
+      command: "compact",
+      success: true,
+      data: { compacted: true, customInstructions: "preserve test summary" },
+    });
+
+    const newSessionResp = await session.newPiSession({
+      parentSession: "conv-auto-pi",
+      conversationId: "conv-auto-pi",
+    });
+    expect(newSessionResp).toMatchObject({
+      type: "response",
+      command: "new_session",
+      success: true,
+      data: { cancelled: false, parentSession: "conv-auto-pi" },
+    });
+  });
+
+  it("sends compact and new_session RPC commands directly via PiAgentBackend", async () => {
+    const backend = track(
+      new PiAgentBackend({
+        binaryPath: process.execPath,
+        args: ["-e", MOCK_PI_RPC_SCRIPT, "--", "--mode", "rpc"],
+        probeAvailable: async () => true,
+        workspaceRoot,
+        apiKey: "mw_test_key_session",
+        baseUrl: "https://api.matterwave.test",
+      }),
+    );
+
+    const compactRes = await backend.compact("summarize earlier tool calls");
+    expect(compactRes).toMatchObject({
+      type: "response",
+      command: "compact",
+      success: true,
+      data: { compacted: true, customInstructions: "summarize earlier tool calls" },
+    });
+
+    const newSessionRes = await backend.newSession("parent_session_123");
+    expect(newSessionRes).toMatchObject({
+      type: "response",
+      command: "new_session",
+      success: true,
+      data: { cancelled: false, parentSession: "parent_session_123" },
+    });
   });
 });

@@ -598,3 +598,18 @@ export class FakeWebview {
     this.listener?.(message);
   }
 }
+
+export const l10n = {
+  bundle: null as Record<string, string> | null,
+  t(message: string, ...args: Array<string | number | boolean> | [Record<string, unknown>]): string {
+    const template = l10n.bundle?.[message] ?? message;
+    if (args.length === 1 && typeof args[0] === "object" && args[0] !== null) {
+      const record = args[0] as Record<string, unknown>;
+      return template.replace(/\{(\w+)\}/g, (_match, key: string) => String(record[key] ?? `{${key}}`));
+    }
+    return template.replace(/\{(\d+)\}/g, (_match, index: string) => {
+      const val = (args as Array<string | number | boolean>)[Number(index)];
+      return val !== undefined ? String(val) : `{${index}}`;
+    });
+  },
+};

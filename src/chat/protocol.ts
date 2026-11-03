@@ -234,6 +234,8 @@ export interface ViewState {
   announcements: AnnouncementView[];
   /** The saved prompts' names, for the composer's `/` completion. */
   promptNames: string[];
+  /** Optional localized strings passed from the extension host during the webview state handshake. */
+  strings?: Record<string, string>;
 }
 
 /** One announcement as its banner shows it. */

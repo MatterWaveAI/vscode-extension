@@ -20,6 +20,17 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Verify tagged commit is on main
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          git fetch origin main --depth=1
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Release tags (v*) may only be cut from commits merged into origin/main ($GITHUB_SHA is not an ancestor of origin/main)."
+            exit 1
+          fi
       # The tag must name the version it releases (v0.3.1 tags 0.3.1, nothing
       # else), and that version must have its CHANGELOG section: both are
       # checked before anything is built.

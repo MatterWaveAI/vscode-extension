@@ -22,6 +22,7 @@ import {
   type PiDoneEvent,
   type PiFallbackRunner,
   type PiPromptOptions,
+  type PiRpcResponse,
 } from "./piBackend";
 import { failure, ok, promptTools, type Approvals, type ChangeOutcome, type ChangeRequest, type ConfirmRequest, type ToolContext, type ToolOutcome, type ToolSpec } from "./tools";
 import { StepAccumulator, type ChatMessage, type ToolCall } from "./wire";
@@ -787,6 +788,110 @@ export class AgentSession {
     return compactionNote(result) ?? "Nothing to compact: there is no old tool output to fold and nothing to summarise.";
   }
 
+  /**
+   * Compact the active Pi 1.0 session over RPC (`{ "type": "compact" }`).
+   * When Pi 1.0 is available in the workspace, sends `{ "type": "compact" }` to the Pi RPC backend;
+   * otherwise compacts the in-memory agent history and returns a synthetic response.
+   */
+  async compactPiSession(options?: {
+    customInstructions?: string;
+    conversationId?: string | null;
+    backend?: { compact(customInstructions?: string): Promise<PiRpcResponse> };
+  }): Promise<PiRpcResponse> {
+    if (options?.backend) {
+      return options.backend.compact(options.customInstructions);
+    }
+    const root = this.root();
+    const settings = this.deps.settings();
+    const binaryPath = settings.piBinaryPath?.trim() || "pi";
+    const canRunPi =
+      root !== null &&
+      (this.deps.piArgs !== undefined ||
+        (this.deps.probePiAvailable
+          ? await this.deps.probePiAvailable(binaryPath)
+          : await isPiAvailable(binaryPath, { cwd: root.path })));
+    if (canRunPi && root) {
+      const resolvedKey = (await this.deps.apiKey?.()) ?? "";
+      const resolvedBaseUrl = this.deps.baseUrl?.() ?? this.deps.client.baseUrl ?? "https://app.matterwave.ai";
+      const piBackend = new PiAgentBackend({
+        binaryPath,
+        args: this.deps.piArgs,
+        workspaceRoot: root.path,
+        apiKey: resolvedKey,
+        baseUrl: resolvedBaseUrl,
+        probeAvailable: () => Promise.resolve(true),
+      });
+      try {
+        return await piBackend.compact(options?.customInstructions);
+      } finally {
+        await piBackend.dispose();
+      }
+    }
+    const note = await this.compactNow(options?.conversationId ?? null, null, new AbortController().signal);
+    return {
+      type: "response",
+      command: "compact",
+      success: true,
+      data: { note },
+    };
+  }
+
+  /**
+   * Reset or start a new Pi 1.0 session over RPC (`{ "type": "new_session" }`)
+   * and clear the stored in-memory agent history for the active conversation.
+   */
+  async newPiSession(options?: {
+    parentSession?: string;
+    conversationId?: string | null;
+    backend?: { newSession(parentSession?: string): Promise<PiRpcResponse> };
+  }): Promise<PiRpcResponse> {
+    if (options?.conversationId) {
+      this.histories.delete(options.conversationId);
+    } else {
+      this.histories.clear();
+    }
+    this.todos = [];
+    this.status = null;
+    this.output = null;
+    this.changed();
+
+    if (options?.backend) {
+      return options.backend.newSession(options.parentSession);
+    }
+    const root = this.root();
+    const settings = this.deps.settings();
+    const binaryPath = settings.piBinaryPath?.trim() || "pi";
+    const canRunPi =
+      root !== null &&
+      (this.deps.piArgs !== undefined ||
+        (this.deps.probePiAvailable
+          ? await this.deps.probePiAvailable(binaryPath)
+          : await isPiAvailable(binaryPath, { cwd: root.path })));
+    if (canRunPi && root) {
+      const resolvedKey = (await this.deps.apiKey?.()) ?? "";
+      const resolvedBaseUrl = this.deps.baseUrl?.() ?? this.deps.client.baseUrl ?? "https://app.matterwave.ai";
+      const piBackend = new PiAgentBackend({
+        binaryPath,
+        args: this.deps.piArgs,
+        workspaceRoot: root.path,
+        apiKey: resolvedKey,
+        baseUrl: resolvedBaseUrl,
+        probeAvailable: () => Promise.resolve(true),
+      });
+      try {
+        return await piBackend.newSession(options?.parentSession);
+      } finally {
+        await piBackend.dispose();
+      }
+    }
+    return {
+      type: "response",
+      command: "new_session",
+      success: true,
+      data: { cancelled: false },
+    };
+  }
+
   /** `/context`: what the next step would carry, in a few lines. */
   async contextReport(conversationId: string | null, model: { id: string; label: string; context_window: number | null } | null): Promise<string> {
     const root = this.root();
@@ -973,6 +1078,8 @@ export interface AgentRunner {
   readonly piBinaryPath: string;
   resolveEngine(): Promise<"pi" | "builtin">;
   prompt(text: string, options?: PiPromptOptions): Promise<PiDoneEvent>;
+  compact(customInstructions?: string): Promise<PiRpcResponse>;
+  newSession(parentSession?: string): Promise<PiRpcResponse>;
   abort(): Promise<void>;
   dispose(): Promise<void>;
 }
@@ -1044,6 +1151,8 @@ export function createAgentRunner(options: CreateAgentRunnerOptions): AgentRunne
       }
       return backend.prompt(text, promptOptions);
     },
+    compact: (customInstructions?: string) => backend.compact(customInstructions),
+    newSession: (parentSession?: string) => backend.newSession(parentSession),
     abort: () => backend.abort(),
     dispose: () => backend.dispose(),
   };

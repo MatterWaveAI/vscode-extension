@@ -10,6 +10,42 @@ export interface SpeechTranscriber {
   transcribeAudio(audioBytes: Uint8Array, mimeType?: string, filename?: string): Promise<SpeechTranscription>;
 }
 
+export interface DictationL10n {
+  t?(message: string, ...args: Array<string | number | boolean>): string;
+}
+
+/** Localize a dictation string via `vscode.l10n.t(...)` with a safe fallback when `vscode.l10n?.t` is unavailable. */
+export function translateDictation(
+  message: string,
+  l10n?: DictationL10n,
+  ...args: Array<string | number | boolean>
+): string {
+  if (typeof l10n?.t === "function") {
+    return l10n.t(message, ...args);
+  }
+  return message.replace(/\{(\d+)\}/g, (_match, index: string) => {
+    const val = args[Number(index)];
+    return val !== undefined ? String(val) : `{${index}}`;
+  });
+}
+
+/** Localized labels and titles for voice dictation dialogs and composer controls. */
+export function dictationStrings(l10n?: DictationL10n): {
+  dialogTitle: string;
+  openLabel: string;
+  audioFilterLabel: string;
+  buttonLabel: string;
+  buttonTitle: string;
+} {
+  return {
+    dialogTitle: translateDictation("Select an audio recording to transcribe into the composer", l10n),
+    openLabel: translateDictation("Transcribe", l10n),
+    audioFilterLabel: translateDictation("Audio", l10n),
+    buttonLabel: translateDictation("Dictate", l10n),
+    buttonTitle: translateDictation("Dictate a prompt using voice transcription", l10n),
+  };
+}
+
 const MIME_EXTENSIONS: Readonly<Record<string, string>> = {
   "audio/webm": "webm",
   "audio/ogg": "ogg",

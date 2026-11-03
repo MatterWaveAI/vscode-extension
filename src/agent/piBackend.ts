@@ -796,6 +796,44 @@ export class PiAgentBackend {
   }
 
   /**
+   * Compact the active Pi 1.0 RPC session by sending `{ type: "compact" }`.
+   */
+  async compact(customInstructions?: string): Promise<PiRpcResponse> {
+    const proc = this.ensureRpcProcess();
+    const trimmed = customInstructions?.trim();
+    return proc.request({
+      type: "compact",
+      ...(trimmed ? { customInstructions: trimmed } : {}),
+    });
+  }
+
+  /**
+   * Alias for `compact` to compact the active Pi 1.0 RPC session.
+   */
+  async compactSession(customInstructions?: string): Promise<PiRpcResponse> {
+    return this.compact(customInstructions);
+  }
+
+  /**
+   * Start a new Pi 1.0 RPC session by sending `{ type: "new_session" }`.
+   */
+  async newSession(parentSession?: string): Promise<PiRpcResponse> {
+    const proc = this.ensureRpcProcess();
+    const trimmed = parentSession?.trim();
+    return proc.request({
+      type: "new_session",
+      ...(trimmed ? { parentSession: trimmed } : {}),
+    });
+  }
+
+  /**
+   * Alias for `newSession` to reset the active Pi 1.0 RPC session.
+   */
+  async resetSession(parentSession?: string): Promise<PiRpcResponse> {
+    return this.newSession(parentSession);
+  }
+
+  /**
    * Abort the active turn by sending `{ type: "abort" }` over RPC and resolving
    * the active turn cleanly.
    */

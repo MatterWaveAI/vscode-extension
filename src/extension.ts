@@ -25,8 +25,8 @@ import {
   TESTS_QUESTION,
 } from "./codeActions";
 import { AGENT_ENGINES, AgentSession, type AgentEngine, type AgentSettings } from "./agent/session";
-import { isPiAvailable } from "./agent/piBackend";
-import { audioMimeTypeForPath } from "./chat/dictation";
+import { isPiAvailable, type PiRpcResponse } from "./agent/piBackend";
+import { audioMimeTypeForPath, dictationStrings } from "./chat/dictation";
 import { EditorReviewSurface, EditorTracker, PROPOSAL_SCHEME, ProposalFileSystem, openDocumentText } from "./agent/editor";
 import { McpManager, type McpServerConfig } from "./agent/mcp";
 import { describeServer, isMatterWaveMcp, resolveMcpServers, type PendingServer } from "./agent/mcpConfig";
@@ -72,6 +72,38 @@ const DISMISSED_KEY = "matterwave.dismissedAnnouncements";
 /** Set once the server prompt has been shown, whatever was answered: it is a first-run question, not a nag. */
 const SERVER_PROMPTED_KEY = "matterwave.serverPrompted";
 
+/** Localize a runtime string via `vscode.l10n.t(...)` with a safe fallback when `vscode.l10n?.t` is unavailable. */
+export function t(message: string, ...args: Array<string | number | boolean>): string {
+  if (typeof vscode.l10n?.t === "function") {
+    return vscode.l10n.t(message, ...args);
+  }
+  return message.replace(/\{(\d+)\}/g, (_match, index: string) => {
+    const val = args[Number(index)];
+    return val !== undefined ? String(val) : `{${index}}`;
+  });
+}
+
+/** Localized strings passed to the webview during the state handshake. */
+export function webviewStrings(): Record<string, string> {
+  const dictation = dictationStrings(vscode.l10n);
+  return {
+    "Search conversations…": t("Search conversations…"),
+    "Search conversations": t("Search conversations"),
+    Archived: t("Archived"),
+    "Ask MatterWave…  (@file, @folder, @terminal, @git, @docs add context — Enter to send)": t(
+      "Ask MatterWave…  (@file, @folder, @terminal, @git, @docs add context — Enter to send)",
+    ),
+    "Tell the agent what to do…  (@path adds a file, /help lists commands, Shift+Tab changes the mode)": t(
+      "Tell the agent what to do…  (@path adds a file, /help lists commands, Shift+Tab changes the mode)",
+    ),
+    "MatterWave cannot be reached. Your draft is kept.": t("MatterWave cannot be reached. Your draft is kept."),
+    Send: t("Send"),
+    Stop: t("Stop"),
+    New: t("New"),
+    Dictate: dictation.buttonLabel,
+  };
+}
+
 function baseUrl(): string {
   const value = vscode.workspace.getConfiguration("matterwave").get<string>("baseUrl");
   return value && value.trim() ? value.trim() : DEFAULT_BASE_URL;
@@ -96,8 +128,8 @@ async function promptForServer(context: vscode.ExtensionContext): Promise<void> 
   if (!shouldPromptForServer({ configured: config.get<string>("baseUrl"), prompted })) return;
   await context.globalState.update(SERVER_PROMPTED_KEY, true);
   const answer = await vscode.window.showInputBox({
-    title: "MatterWave server",
-    prompt: "The URL of the MatterWave deployment this editor talks to (the matterwave.baseUrl setting).",
+    title: t("MatterWave server"),
+    prompt: t("The URL of the MatterWave deployment this editor talks to (the matterwave.baseUrl setting)."),
     value: DEFAULT_BASE_URL,
     ignoreFocusOut: true,
     validateInput: serverUrlProblem,
@@ -211,7 +243,10 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
     pickRoot: async (roots) => {
       const picked = await vscode.window.showQuickPick(
         roots.map((root) => ({ label: root.name, description: root.path, path: root.path })),
-        { title: "MatterWave agent: root folder", placeHolder: "The folder the agent reads, writes and runs commands in" },
+        {
+          title: t("MatterWave agent: root folder"),
+          placeHolder: t("The folder the agent reads, writes and runs commands in"),
+        },
       );
       return picked?.path ?? null;
     },
@@ -276,9 +311,10 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
     report: (target) => reportFlow(client, target),
     copyCode: async (code) => {
       await vscode.env.clipboard.writeText(code);
-      void vscode.window.setStatusBarMessage("Code copied to the clipboard.", 3000);
+      void vscode.window.setStatusBarMessage(t("Code copied to the clipboard."), 3000);
     },
     insertCode: (code) => insertAtCursor(code),
+    strings: () => webviewStrings(),
     dismissedAnnouncements: {
       has: (id) => (context.globalState.get<string[]>(DISMISSED_KEY) ?? []).includes(id),
       add: (id) => {
@@ -378,18 +414,18 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
   command("matterwave.signOut", async () => {
     switch (await signOut(client, tokens)) {
       case "not_signed_in":
-        void vscode.window.showInformationMessage("Not signed in to MatterWave.");
+        void vscode.window.showInformationMessage(t("Not signed in to MatterWave."));
         return;
       case "revoked":
-        void vscode.window.showInformationMessage("Signed out of MatterWave; the editor's key was revoked.");
+        void vscode.window.showInformationMessage(t("Signed out of MatterWave; the editor's key was revoked."));
         return;
       case "revoke_failed":
         void vscode.window.showWarningMessage(
-          "Signed out of MatterWave, but its key could not be revoked on the server. Revoke it under Settings → API keys.",
+          t("Signed out of MatterWave, but its key could not be revoked on the server. Revoke it under Settings → API keys."),
         );
         return;
       case "kept":
-        void vscode.window.showInformationMessage("Signed out of MatterWave.");
+        void vscode.window.showInformationMessage(t("Signed out of MatterWave."));
         return;
     }
   });
@@ -405,7 +441,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
   command("matterwave.account", () => showAccount(client));
   command("matterwave.compactNow", async () => {
     if (!chat.hasConversation()) {
-      void vscode.window.showInformationMessage("Open a conversation to compact it.");
+      void vscode.window.showInformationMessage(t("Open a conversation to compact it."));
       return;
     }
     await view.reveal();
@@ -413,42 +449,42 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
   });
   command("matterwave.copyRequestId", async () => {
     if (!chat.lastRequestId) {
-      void vscode.window.showInformationMessage("No MatterWave request has been made yet.");
+      void vscode.window.showInformationMessage(t("No MatterWave request has been made yet."));
       return;
     }
     await vscode.env.clipboard.writeText(chat.lastRequestId);
-    void vscode.window.showInformationMessage(`Copied request id ${chat.lastRequestId}.`);
+    void vscode.window.showInformationMessage(t("Copied request id {0}.", chat.lastRequestId));
   });
   command("matterwave.exportConversation", async () => {
     if (!chat.hasConversation()) {
-      void vscode.window.showInformationMessage("Open a conversation to export it.");
+      void vscode.window.showInformationMessage(t("Open a conversation to export it."));
       return;
     }
     const id = chat.activeConversationId();
     const title = chat.snapshot().conversations.find((c) => c.id === id)?.title ?? "";
     const target = await vscode.window.showSaveDialog({
-      title: "Export conversation as Markdown",
-      saveLabel: "Export",
+      title: t("Export conversation as Markdown"),
+      saveLabel: t("Export"),
       defaultUri: vscode.Uri.file(`${safeFilename(title)}.md`),
       filters: { Markdown: ["md"] },
     });
     if (!target) return;
     await vscode.workspace.fs.writeFile(target, new TextEncoder().encode(conversationToMarkdown(chat.snapshot())));
-    void vscode.window.showInformationMessage(`Conversation exported to ${target.path}.`);
+    void vscode.window.showInformationMessage(t("Conversation exported to {0}.", target.path));
   });
   command("matterwave.shareConversation", async () => {
     const id = chat.activeConversationId();
     if (!id) {
-      void vscode.window.showInformationMessage("Open a conversation to share it.");
+      void vscode.window.showInformationMessage(t("Open a conversation to share it."));
       return;
     }
     try {
       const share = await client.createShare(id);
       const url = `${client.baseUrl}${share.path}`;
       await vscode.env.clipboard.writeText(url);
-      void vscode.window.showInformationMessage(`Share link copied to the clipboard: ${url}`);
+      void vscode.window.showInformationMessage(t("Share link copied to the clipboard: {0}", url));
     } catch (error) {
-      void vscode.window.showErrorMessage(`The share link could not be created: ${describe(error)}`);
+      void vscode.window.showErrorMessage(t("The share link could not be created: {0}", describe(error)));
     }
   });
   command("matterwave.manageShares", () => manageShares(client));
@@ -458,7 +494,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
   command("matterwave.reportConversation", () => {
     const conversationId = chat.activeConversationId();
     if (!conversationId) {
-      void vscode.window.showInformationMessage("Open the conversation to report it.");
+      void vscode.window.showInformationMessage(t("Open the conversation to report it."));
       return;
     }
     return reportFlow(client, { conversationId });
@@ -494,7 +530,7 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
   command("matterwave.agent.resume", async () => {
     const runs = agent.resumable();
     if (runs.length === 0) {
-      void vscode.window.showInformationMessage("No agent runs to resume in this workspace yet.");
+      void vscode.window.showInformationMessage(t("No agent runs to resume in this workspace yet."));
       return;
     }
     const picked = await vscode.window.showQuickPick(
@@ -504,7 +540,10 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
         description: new Date(run.updatedAt).toLocaleString(),
         detail: `${run.messages} messages · ${run.root}`,
       })),
-      { title: "MatterWave: resume an agent run", placeHolder: "The run continues with its earlier tool rounds in context" },
+      {
+        title: t("MatterWave: resume an agent run"),
+        placeHolder: t("The run continues with its earlier tool rounds in context"),
+      },
     );
     if (!picked) return;
     await view.reveal();
@@ -527,6 +566,18 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
     ),
   );
   command("matterwave.selectAgentEngine", () => selectAgentEngine());
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "matterwave.compactPiSession",
+      (options?: { customInstructions?: string; backend?: { compact(customInstructions?: string): Promise<PiRpcResponse> } }) =>
+        compactPiSession(agent, chat, view, options),
+    ),
+    vscode.commands.registerCommand(
+      "matterwave.newPiSession",
+      (options?: { parentSession?: string; backend?: { newSession(parentSession?: string): Promise<PiRpcResponse> } }) =>
+        newPiSession(agent, chat, view, options),
+    ),
+  );
 
   void chat.refresh();
 
@@ -549,7 +600,7 @@ async function signInWithDeviceCode(client: MatterWaveClient, tokens: TokenStore
   try {
     authorization = await client.startDeviceLogin(`VS Code (${vscode.env.appName})`);
   } catch (error) {
-    void vscode.window.showErrorMessage(`MatterWave sign-in could not start: ${describe(error)}`);
+    void vscode.window.showErrorMessage(t("MatterWave sign-in could not start: {0}", describe(error)));
     return;
   }
   const opened = await vscode.env.openExternal(vscode.Uri.parse(authorization.verification_uri_complete));
@@ -570,7 +621,7 @@ async function signInWithDeviceCode(client: MatterWaveClient, tokens: TokenStore
           isCancelled: () => cancel.isCancellationRequested,
         });
         await rememberSignedIn(client, tokens, token.access_token, true);
-        void vscode.window.showInformationMessage("Signed in to MatterWave.");
+        void vscode.window.showInformationMessage(t("Signed in to MatterWave."));
       } catch (error) {
         if (error instanceof DeviceLoginError && error.reason === "cancelled") return;
         void vscode.window.showErrorMessage(describe(error));
@@ -581,11 +632,11 @@ async function signInWithDeviceCode(client: MatterWaveClient, tokens: TokenStore
 
 async function signInWithApiKey(client: MatterWaveClient, tokens: TokenStore): Promise<void> {
   const key = await vscode.window.showInputBox({
-    title: "MatterWave API key",
-    prompt: "Paste an API key (mw_…) from Settings → API keys. It is kept in the editor's secret storage.",
+    title: t("MatterWave API key"),
+    prompt: t("Paste an API key (mw_…) from Settings → API keys. It is kept in the editor's secret storage."),
     password: true,
     ignoreFocusOut: true,
-    validateInput: (value) => (looksLikeApiKey(value) ? null : "An API key starts with mw_"),
+    validateInput: (value) => (looksLikeApiKey(value) ? null : t("An API key starts with mw_")),
   });
   if (!key) return;
   // Verified before it is kept: a key that does not work should fail here,
@@ -598,9 +649,9 @@ async function signInWithApiKey(client: MatterWaveClient, tokens: TokenStore): P
   try {
     const me = await probe.me();
     await rememberSignedIn(client, tokens, key.trim(), false, me);
-    void vscode.window.showInformationMessage(`Signed in to MatterWave as ${me.name || me.email || me.subject}.`);
+    void vscode.window.showInformationMessage(t("Signed in to MatterWave as {0}.", me.name || me.email || me.subject));
   } catch (error) {
-    void vscode.window.showErrorMessage(`That key was not accepted: ${describe(error)}`);
+    void vscode.window.showErrorMessage(t("That key was not accepted: {0}", describe(error)));
   }
 }
 
@@ -639,10 +690,13 @@ async function rememberSignedIn(
 async function askAboutSelection(chat: ChatController, view: ChatViewProvider): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.selection.isEmpty) {
-    void vscode.window.showInformationMessage("Select some code first, or use MatterWave: Ask about File.");
+    void vscode.window.showInformationMessage(t("Select some code first, or use MatterWave: Ask about File."));
     return;
   }
-  const question = await vscode.window.showInputBox({ title: "Ask about the selection", value: "Explain this code." });
+  const question = await vscode.window.showInputBox({
+    title: t("Ask about the selection"),
+    value: t("Explain this code."),
+  });
   if (!question) return;
   const { selection, document } = editor;
   const content = selectionContent({
@@ -667,10 +721,13 @@ async function askAboutSelection(chat: ChatController, view: ChatViewProvider): 
 async function askAboutFile(chat: ChatController, view: ChatViewProvider): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
-    void vscode.window.showInformationMessage("Open a file first.");
+    void vscode.window.showInformationMessage(t("Open a file first."));
     return;
   }
-  const question = await vscode.window.showInputBox({ title: "Ask about the file", value: "Explain this file." });
+  const question = await vscode.window.showInputBox({
+    title: t("Ask about the file"),
+    value: t("Explain this file."),
+  });
   if (!question) return;
   const path = relativePath(editor.document.uri);
   await view.reveal();
@@ -696,7 +753,7 @@ async function codeAt(uri: unknown, range: unknown): Promise<{ document: vscode.
   }
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.selection.isEmpty) {
-    void vscode.window.showInformationMessage("Select some code first.");
+    void vscode.window.showInformationMessage(t("Select some code first."));
     return null;
   }
   return { document: editor.document, range: editor.selection };
@@ -950,14 +1007,14 @@ async function inlineEdit(chat: ChatController, checkpoints: CheckpointStore): P
   if (!(await requireTrust("Inline edit"))) return;
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.selection.isEmpty) {
-    void vscode.window.showInformationMessage("Select the code to edit first.");
+    void vscode.window.showInformationMessage(t("Select the code to edit first."));
     return;
   }
   const { selection, document } = editor;
   const instruction = await vscode.window.showInputBox({
-    title: "Edit selection with MatterWave",
-    prompt: "What should change? A diff opens before anything is written.",
-    placeHolder: "e.g. add error handling; make this async; extract a helper",
+    title: t("Edit selection with MatterWave"),
+    prompt: t("What should change? A diff opens before anything is written."),
+    placeHolder: t("e.g. add error handling; make this async; extract a helper"),
     ignoreFocusOut: true,
   });
   if (!instruction?.trim()) return;
@@ -1371,16 +1428,17 @@ async function approveProjectServers(pending: PendingServer[]): Promise<string[]
 
 /** Yolo's per-session flag: a modal that says what it means. Never saved. */
 async function confirmYolo(): Promise<boolean> {
+  const allowLabel = t("Allow for this session");
   const answer = await vscode.window.showWarningMessage(
-    "Allow yolo mode for this session?",
+    t("Allow yolo mode for this session?"),
     {
       modal: true,
       detail:
         "File changes and commands will run without asking. Commands run as you, with no sandbox: whatever you can do, they can do, including sending files elsewhere. Yolo is not saved and ends with this window.",
     },
-    "Allow for this session",
+    allowLabel,
   );
-  return answer === "Allow for this session";
+  return answer === allowLabel;
 }
 
 async function pickApprovalMode(agent: AgentSession): Promise<void> {
@@ -1391,7 +1449,10 @@ async function pickApprovalMode(agent: AgentSession): Promise<void> {
       detail: MODES_BY_NAME[mode].summary,
       description: mode === "yolo" ? "this session only, asks first" : mode === "ask" ? "default" : "",
     })),
-    { title: "MatterWave agent: approval mode", placeHolder: "What the agent may do without asking (Shift+Tab cycles in the composer)" },
+    {
+      title: t("MatterWave agent: approval mode"),
+      placeHolder: t("What the agent may do without asking (Shift+Tab cycles in the composer)"),
+    },
   );
   if (picked) await agent.setMode(picked.mode);
 }
@@ -1417,24 +1478,24 @@ export async function selectAgentEngine(options: SelectAgentEngineOptions = {}):
       engine: "auto",
       label: `${current === "auto" ? "$(check) " : ""}auto`,
       description: formatAgentEngineStatus("auto", piAvailable),
-      detail: "Use Pi 1.0 (pi --mode rpc) when installed and fall back to the built-in loop",
+      detail: t("Use Pi 1.0 (pi --mode rpc) when installed and fall back to the built-in loop"),
     },
     {
       engine: "pi",
       label: `${current === "pi" ? "$(check) " : ""}pi`,
       description: formatAgentEngineStatus("pi", piAvailable),
-      detail: `Require the Pi 1.0 coding agent binary (${binary} --mode rpc)`,
+      detail: t("Require the Pi 1.0 coding agent binary ({0} --mode rpc)", binary),
     },
     {
       engine: "builtin",
       label: `${current === "builtin" ? "$(check) " : ""}builtin`,
       description: formatAgentEngineStatus("builtin", piAvailable),
-      detail: "Always use the built-in MatterWave agent loop",
+      detail: t("Always use the built-in MatterWave agent loop"),
     },
   ];
   const picked = await vscode.window.showQuickPick(items, {
-    title: `MatterWave agent: engine (${statusLabel})`,
-    placeHolder: "Select the coding agent execution engine (matterwave.agent.engine)",
+    title: t("MatterWave agent: engine ({0})", statusLabel),
+    placeHolder: t("Select the coding agent execution engine (matterwave.agent.engine)"),
   });
   if (!picked) return undefined;
   const config = vscode.workspace.getConfiguration("matterwave.agent");
@@ -1458,11 +1519,12 @@ export async function dictatePrompt(
   if (input && typeof input === "object" && input.audioBytes instanceof Uint8Array) {
     return chat.dictateAudio(input.audioBytes, input.mimeType, input.filename);
   }
+  const strings = dictationStrings(vscode.l10n);
   const picked = await vscode.window.showOpenDialog({
-    title: "Select an audio recording to transcribe into the composer",
+    title: strings.dialogTitle,
     canSelectMany: false,
-    openLabel: "Transcribe",
-    filters: { Audio: ["webm", "wav", "mp3", "m4a", "ogg", "flac", "aac", "mp4"] },
+    openLabel: strings.openLabel,
+    filters: { [strings.audioFilterLabel]: ["webm", "wav", "mp3", "m4a", "ogg", "flac", "aac", "mp4"] },
   });
   const file = picked?.[0];
   if (!file) return null;
@@ -1470,6 +1532,57 @@ export async function dictatePrompt(
   const mimeType = audioMimeTypeForPath(filename);
   const bytes = await vscode.workspace.fs.readFile(file);
   return chat.dictateAudio(bytes, mimeType, filename);
+}
+
+/**
+ * Compact the active Pi 1.0 session (`matterwave.compactPiSession`) by sending
+ * `{"type": "compact"}` over the Pi RPC backend.
+ */
+export async function compactPiSession(
+  agent: AgentSession,
+  chat: ChatController,
+  view: { reveal(): Promise<void> | void },
+  options?: { customInstructions?: string; backend?: { compact(customInstructions?: string): Promise<PiRpcResponse> } },
+): Promise<PiRpcResponse | null> {
+  await view.reveal();
+  try {
+    const response = await agent.compactPiSession({
+      customInstructions: options?.customInstructions,
+      conversationId: chat.activeConversationId(),
+      backend: options?.backend,
+    });
+    void vscode.window.showInformationMessage(t("Pi session compacted."));
+    return response;
+  } catch (error) {
+    void vscode.window.showErrorMessage(t("Pi session could not be compacted: {0}", describe(error)));
+    return null;
+  }
+}
+
+/**
+ * Start a new Pi 1.0 session (`matterwave.newPiSession`) by sending
+ * `{"type": "new_session"}` over the Pi RPC backend and resetting the active session.
+ */
+export async function newPiSession(
+  agent: AgentSession,
+  chat: ChatController,
+  view: { reveal(): Promise<void> | void },
+  options?: { parentSession?: string; backend?: { newSession(parentSession?: string): Promise<PiRpcResponse> } },
+): Promise<PiRpcResponse | null> {
+  await view.reveal();
+  try {
+    const response = await agent.newPiSession({
+      parentSession: options?.parentSession,
+      conversationId: chat.activeConversationId(),
+      backend: options?.backend,
+    });
+    chat.newChat();
+    void vscode.window.showInformationMessage(t("Started a new Pi session."));
+    return response;
+  } catch (error) {
+    void vscode.window.showErrorMessage(t("Pi session could not be reset: {0}", describe(error)));
+    return null;
+  }
 }
 
 // --- @-mention context providers -------------------------------------------------
@@ -1937,7 +2050,7 @@ async function pickModel(chat: ChatController, client: MatterWaveClient): Promis
   try {
     models = await chat.loadModels();
   } catch (error) {
-    void vscode.window.showErrorMessage(`The model list could not be loaded: ${describe(error)}`);
+    void vscode.window.showErrorMessage(t("The model list could not be loaded: {0}", describe(error)));
     return;
   }
   const activePreset = chat.activePreset();
@@ -1949,7 +2062,9 @@ async function pickModel(chat: ChatController, client: MatterWaveClient): Promis
       : { label: row.label, description: row.description, row },
   );
   const picked = await vscode.window.showQuickPick(items, {
-    title: activePreset ? `Model fixed to ${fixedLabel} by the ${activePreset.name} preset` : "MatterWave model",
+    title: activePreset
+      ? t("Model fixed to {0} by the {1} preset", fixedLabel, activePreset.name)
+      : t("MatterWave model"),
     matchOnDescription: true,
   });
   if (!picked) return;
@@ -1964,13 +2079,14 @@ async function pickModel(chat: ChatController, client: MatterWaveClient): Promis
   }
   if (picked.row.kind === "model") {
     const plan = picked.row.model.upgrade_to;
+    const plansAction = t(PLANS_ACTION);
     const answer = await vscode.window.showInformationMessage(
       plan
-        ? `${picked.row.model.label || picked.row.model.id} is not on your plan. ${plan} includes it.`
-        : `${picked.row.model.label || picked.row.model.id} is not on your plan.`,
-      PLANS_ACTION,
+        ? t("{0} is not on your plan. {1} includes it.", picked.row.model.label || picked.row.model.id, plan)
+        : t("{0} is not on your plan.", picked.row.model.label || picked.row.model.id),
+      plansAction,
     );
-    if (answer === PLANS_ACTION) openPlans(client.baseUrl);
+    if (answer === plansAction) openPlans(client.baseUrl);
   }
 }
 
@@ -1983,20 +2099,20 @@ async function choosePreset(chat: ChatController): Promise<void> {
   try {
     presets = await chat.loadPresets();
   } catch (error) {
-    void vscode.window.showErrorMessage(`The presets could not be loaded: ${describe(error)}`);
+    void vscode.window.showErrorMessage(t("The presets could not be loaded: {0}", describe(error)));
     return;
   }
   const active = chat.activePreset();
   const retired = chat.retiredConversationPreset();
   if (presets.length === 0 && !active) {
-    void vscode.window.showInformationMessage("Your organisation has no presets configured.");
+    void vscode.window.showInformationMessage(t("Your organisation has no presets configured."));
     return;
   }
   const items: PresetPickItem[] = [
     {
-      label: "No preset",
+      label: t("No preset"),
       description: active === null ? "current" : undefined,
-      detail: "Your own model and instructions.",
+      detail: t("Your own model and instructions."),
       presetId: null,
     },
   ];
@@ -2017,7 +2133,7 @@ async function choosePreset(chat: ChatController): Promise<void> {
     });
   }
   const picked = await vscode.window.showQuickPick(items, {
-    title: "MatterWave preset",
+    title: t("MatterWave preset"),
     matchOnDescription: true,
     matchOnDetail: true,
   });
@@ -2078,7 +2194,7 @@ async function showAccount(client: MatterWaveClient): Promise<void> {
     { label: "$(cloud-download) Export my data…", detail: "Everything this account has stored, as one JSON file", action: "export" },
     { label: "$(link-external) See plans", detail: "Change the plan in the web app (owner or admin)", action: "plans" },
   );
-  const picked = await vscode.window.showQuickPick(rows, { title: "MatterWave account", placeHolder: "Pick an action" });
+  const picked = await vscode.window.showQuickPick(rows, { title: t("MatterWave account"), placeHolder: t("Pick an action") });
   if (picked?.action === "export") await exportAccount(client);
   else if (picked?.action === "plans") openPlans(client.baseUrl);
   else if (picked?.action === "appeal" && enforcement?.appeal_path) {

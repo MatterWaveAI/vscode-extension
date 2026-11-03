@@ -76,5 +76,7 @@
   "command.agent.resume.title": "Reanudar una ejecución del agente",
   "command.showUsage.title": "Mostrar uso",
   "command.dictatePrompt.title": "Dictar prompt",
-  "command.selectAgentEngine.title": "Seleccionar el motor del agente"
+  "command.selectAgentEngine.title": "Seleccionar el motor del agente",
+  "command.compactPiSession.title": "Compactar sesión de Pi",
+  "command.newPiSession.title": "Nueva sesión de Pi"
 }

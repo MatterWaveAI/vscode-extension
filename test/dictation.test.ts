@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
+import spanishBundle from "../l10n/bundle.l10n.es.json";
 import { MatterWaveClient } from "../src/api/client";
 import { ChatController } from "../src/chat/controller";
 import {
@@ -8,11 +9,21 @@ import {
   audioMimeTypeForPath,
   decodeBase64Audio,
   defaultAudioFilename,
+  dictationStrings,
   transcribeAudio,
 } from "../src/chat/dictation";
 import type { HostMessage, ViewState, WebviewMessage } from "../src/chat/protocol";
-import { activate, dictatePrompt, formatAgentEngineStatus, selectAgentEngine } from "../src/extension";
-import { commands, ExtensionMode, MemorySecrets, Uri, window as vscodeWindow, workspace } from "./vscode-mock";
+import {
+  activate,
+  compactPiSession,
+  dictatePrompt,
+  formatAgentEngineStatus,
+  newPiSession,
+  selectAgentEngine,
+  webviewStrings,
+} from "../src/extension";
+import { statusText } from "../src/statusBar";
+import { commands, ExtensionMode, l10n, MemorySecrets, Uri, window as vscodeWindow, workspace } from "./vscode-mock";
 
 describe("transcribeAudio (/api/speech/transcribe)", () => {
   it("posts multipart audio bytes to /api/speech/transcribe and returns the transcript", async () => {
@@ -267,7 +278,7 @@ describe("selectAgentEngine and formatAgentEngineStatus", () => {
     expect(workspace.getConfiguration("matterwave.agent").get("engine")).toBe("builtin");
   });
 
-  it("registers matterwave.selectAgentEngine and matterwave.dictatePrompt on activate", () => {
+  it("registers matterwave.selectAgentEngine, matterwave.dictatePrompt, matterwave.compactPiSession, and matterwave.newPiSession on activate", async () => {
     const context = {
       extensionMode: ExtensionMode.Production,
       extensionUri: Uri.file("/ext"),
@@ -281,5 +292,120 @@ describe("selectAgentEngine and formatAgentEngineStatus", () => {
     activate(context);
     expect(commands.registered.has("matterwave.selectAgentEngine")).toBe(true);
     expect(commands.registered.has("matterwave.dictatePrompt")).toBe(true);
+    expect(commands.registered.has("matterwave.compactPiSession")).toBe(true);
+    expect(commands.registered.has("matterwave.newPiSession")).toBe(true);
+
+    let compactCalledWith: string | undefined = "not-called";
+    let newSessionCalledWith: string | undefined = "not-called";
+    const infoMessages: string[] = [];
+    vscodeWindow.showInformationMessage = ((msg: string) => {
+      infoMessages.push(msg);
+      return Promise.resolve(undefined);
+    }) as unknown as typeof vscodeWindow.showInformationMessage;
+
+    const compactHandler = commands.registered.get("matterwave.compactPiSession")!;
+    const compactRes = await compactHandler({
+      customInstructions: "keep architecture decisions",
+      backend: {
+        compact: async (instr?: string) => {
+          compactCalledWith = instr;
+          return { id: "pi_1", type: "response" as const, command: "compact", success: true };
+        },
+      },
+    });
+    expect(compactCalledWith).toBe("keep architecture decisions");
+    expect(compactRes).toMatchObject({ command: "compact", success: true });
+    expect(infoMessages).toContain("Pi session compacted.");
+
+    const newSessionHandler = commands.registered.get("matterwave.newPiSession")!;
+    const newSessionRes = await newSessionHandler({
+      parentSession: "sess_prev",
+      backend: {
+        newSession: async (parent?: string) => {
+          newSessionCalledWith = parent;
+          return { id: "pi_2", type: "response" as const, command: "new_session", success: true };
+        },
+      },
+    });
+    expect(newSessionCalledWith).toBe("sess_prev");
+    expect(newSessionRes).toMatchObject({ command: "new_session", success: true });
+    expect(infoMessages).toContain("Started a new Pi session.");
+  });
+
+  it("localizes statusBar, dictation, extension notifications, and webview handshake strings via vscode.l10n", () => {
+    l10n.bundle = spanishBundle as Record<string, string>;
+    try {
+      const signedOut = statusText({
+        signedIn: false,
+        offline: false,
+        identity: null,
+        model: null,
+        meterPercent: null,
+        unreadNotifications: 0,
+        usage: null,
+      });
+      expect(signedOut.text).toBe("$(account) MatterWave: iniciar sesión");
+      expect(signedOut.tooltip).toBe("Iniciar sesión en MatterWave");
+
+      const signedIn = statusText({
+        signedIn: true,
+        offline: false,
+        identity: "Ada",
+        model: "GRT 1",
+        meterPercent: 42,
+        unreadNotifications: 2,
+        usage: null,
+        agentEngine: "auto",
+        piAvailable: false,
+      });
+      expect(signedIn.tooltip).toContain("Sesión iniciada como Ada");
+      expect(signedIn.tooltip).toContain("Modelo: GRT 1");
+      expect(signedIn.tooltip).toContain("Motor del agente: Integrado (alternativa automática)");
+
+      expect(formatAgentEngineStatus("auto", false)).toBe("Integrado (alternativa automática)");
+      expect(dictationStrings(vscode.l10n)).toEqual({
+        dialogTitle: "Selecciona una grabación de audio para transcribir en el cuadro de mensaje",
+        openLabel: "Transcribir",
+        audioFilterLabel: "Audio",
+        buttonLabel: "Dictar",
+        buttonTitle: "Dictar un prompt mediante transcripción de voz",
+      });
+      const strings = webviewStrings();
+      expect(strings.Dictate).toBe("Dictar");
+      expect(strings.Send).toBe("Enviar");
+      expect(strings.Stop).toBe("Detener");
+      expect(strings.New).toBe("Nuevo");
+      expect(strings.Archived).toBe("Archivadas");
+    } finally {
+      l10n.bundle = null;
+    }
+  });
+
+  it("handles compactPiSession and newPiSession errors gracefully", async () => {
+    const errors: string[] = [];
+    vscodeWindow.showErrorMessage = ((msg: string) => {
+      errors.push(msg);
+      return Promise.resolve(undefined);
+    }) as unknown as typeof vscodeWindow.showErrorMessage;
+    const fakeAgent = {
+      compactPiSession: async () => {
+        throw new Error("RPC socket closed");
+      },
+      newPiSession: async () => {
+        throw new Error("Process exited");
+      },
+    } as unknown as Parameters<typeof compactPiSession>[0];
+    const fakeChat = {
+      activeConversationId: () => "conv-1",
+      newChat: () => undefined,
+    } as unknown as Parameters<typeof compactPiSession>[1];
+    const fakeView = { reveal: () => undefined };
+
+    expect(await compactPiSession(fakeAgent, fakeChat, fakeView)).toBeNull();
+    expect(await newPiSession(fakeAgent, fakeChat, fakeView)).toBeNull();
+    expect(errors).toEqual([
+      "Pi session could not be compacted: RPC socket closed",
+      "Pi session could not be reset: Process exited",
+    ]);
   });
 });

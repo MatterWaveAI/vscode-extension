@@ -364,6 +364,10 @@ function submit(): void {
 
 // --- rendering ------------------------------------------------------------------
 
+function w(key: string): string {
+  return state?.strings?.[key] ?? key;
+}
+
 function render(): void {
   if (!state) return;
   if (!state.signedIn) {
@@ -380,13 +384,18 @@ function render(): void {
   renderUsage(state);
   renderTranscript(state);
   renderAgent(state);
+  sendButton.textContent = w("Send");
+  stopButton.textContent = w("Stop");
+  dictateButton.textContent = w("Dictate");
+  convoSearch.placeholder = w("Search conversations…");
+  convoSearch.setAttribute("aria-label", w("Search conversations"));
   sendButton.disabled = state.streaming || state.offline;
   dictateButton.disabled = state.streaming || state.offline;
   stopButton.hidden = !state.streaming;
   // Offline, the composer closes but the textarea is never replaced, so the
   // draft is there when the connection is.
   input.disabled = state.offline;
-  input.placeholder = state.offline ? OFFLINE_PLACEHOLDER : state.agent?.enabled && state.agent.available ? AGENT_PLACEHOLDER : PLACEHOLDER;
+  input.placeholder = state.offline ? w(OFFLINE_PLACEHOLDER) : state.agent?.enabled && state.agent.available ? w(AGENT_PLACEHOLDER) : w(PLACEHOLDER);
   // The temporary toggle belongs to the not-yet-created chat: it is gone
   // once the first send has made a conversation, whatever kind it is.
   temporaryRow.hidden = Boolean(state.activeId) || state.temporary;

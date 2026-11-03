@@ -76,5 +76,7 @@
   "command.agent.resume.title": "Resume an Agent Run",
   "command.showUsage.title": "Show Usage",
   "command.dictatePrompt.title": "Dictate Prompt",
-  "command.selectAgentEngine.title": "Select Agent Engine"
+  "command.selectAgentEngine.title": "Select Agent Engine",
+  "command.compactPiSession.title": "Compact Pi Session",
+  "command.newPiSession.title": "New Pi Session"
 }

@@ -81,8 +81,12 @@ export interface ChatDeps {
       | "agentResume"
       | "agentPickMode"
       | "dictatePrompt"
-      | "selectAgentEngine",
+      | "selectAgentEngine"
+      | "compactPiSession"
+      | "newPiSession",
   ) => void;
+  /** Optional localized string map passed to the webview on state emission. */
+  strings?: () => Record<string, string>;
   /** Open a URL in the browser: where a notification's link leads when it is not a conversation. */
   openLink?: (url: string) => void;
   /**
@@ -2077,6 +2081,7 @@ export class ChatController {
       budget: this.budget,
       promptNames: this.promptNames,
       answerUsage: this.deps.showAnswerUsage?.() === false ? {} : Object.fromEntries(this.answerUsage),
+      ...(this.deps.strings ? { strings: this.deps.strings() } : {}),
     };
   }
 

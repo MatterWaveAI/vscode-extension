@@ -159,4 +159,27 @@ describe("the extension manifest", () => {
     expect(readFileSync(root("LICENSE"), "utf8")).toMatch(/Apache License\s+Version 2\.0, January 2004/);
     expect(ignore).toContain("!CHANGELOG.md");
   });
+
+  it("wires runtime l10n bundles (English and Spanish) with matching key sets and ships ./l10n in package.json", () => {
+    expect(manifest.l10n).toBe("./l10n");
+    const ignore = readFileSync(root(".vscodeignore"), "utf8").split(/\r?\n/);
+    expect(ignore).toContain("!l10n/**");
+
+    const runtimeEn = JSON.parse(readFileSync(root("l10n/bundle.l10n.json"), "utf8")) as Record<string, string>;
+    const runtimeEs = JSON.parse(readFileSync(root("l10n/bundle.l10n.es.json"), "utf8")) as Record<string, string>;
+
+    const enKeys = Object.keys(runtimeEn).sort();
+    const esKeys = Object.keys(runtimeEs).sort();
+    expect(enKeys.length).toBeGreaterThan(0);
+    expect(esKeys).toEqual(enKeys);
+
+    for (const key of enKeys) {
+      expect(runtimeEn[key]?.trim(), `en: ${key}`).toBeTruthy();
+      expect(runtimeEs[key]?.trim(), `es: ${key}`).toBeTruthy();
+      // Placeholder indices like {0}, {1} must match between English and Spanish.
+      const enPlaceholders = [...(runtimeEn[key]?.matchAll(/\{\d+\}/g) ?? [])].map((m) => m[0]).sort();
+      const esPlaceholders = [...(runtimeEs[key]?.matchAll(/\{\d+\}/g) ?? [])].map((m) => m[0]).sort();
+      expect(esPlaceholders, `placeholders for ${key}`).toEqual(enPlaceholders);
+    }
+  });
 });

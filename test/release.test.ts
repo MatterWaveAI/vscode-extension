@@ -70,3 +70,23 @@ describe("the SBOM script", () => {
     expect(bom.dependencies[0].dependsOn).toHaveLength(bom.components.length);
   }, 60_000);
 });
+
+describe("the release workflow and RELEASING.md", () => {
+  const root = (p: string) => fileURLToPath(new URL(`../${p}`, import.meta.url));
+
+  it("verifies in .github/workflows/release.yml that the tagged commit is an ancestor of origin/main", () => {
+    const workflow = readFileSync(root(".github/workflows/release.yml"), "utf8");
+    expect(workflow).toContain("git fetch origin main --depth=1");
+    expect(workflow).toContain('git merge-base --is-ancestor "$GITHUB_SHA" origin/main');
+  });
+
+  it("documents the release process and main-branch tag gate in RELEASING.md", () => {
+    const doc = readFileSync(root("RELEASING.md"), "utf8");
+    expect(doc).toContain("develop");
+    expect(doc).toContain("main");
+    expect(doc).toContain("CHANGELOG.md");
+    expect(doc).toContain("git merge-base --is-ancestor");
+    expect(doc).toContain("VSCE_TOKEN");
+    expect(doc).toContain("OVSX_TOKEN");
+  });
+});
