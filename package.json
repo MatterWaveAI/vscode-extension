@@ -456,6 +456,36 @@
         "command": "matterwave.newPiSession",
         "title": "%command.newPiSession.title%",
         "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.listConnectors",
+        "title": "%command.listConnectors.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.inspectRunDecisionTrail",
+        "title": "%command.inspectRunDecisionTrail.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.replayRun",
+        "title": "%command.replayRun.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.resumeRunCheckpoint",
+        "title": "%command.resumeRunCheckpoint.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.showReliabilityMetrics",
+        "title": "%command.showReliabilityMetrics.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.planTools",
+        "title": "%command.planTools.title%",
+        "category": "%command.category%"
       }
     ],
     "menus": {

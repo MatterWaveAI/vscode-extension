@@ -79,5 +79,11 @@
   "command.dictatePrompt.title": "Dictar prompt",
   "command.selectAgentEngine.title": "Seleccionar el motor del agente",
   "command.compactPiSession.title": "Compactar sesión de Pi",
-  "command.newPiSession.title": "Nueva sesión de Pi"
+  "command.newPiSession.title": "Nueva sesión de Pi",
+  "command.listConnectors.title": "Explorar conectores universales",
+  "command.inspectRunDecisionTrail.title": "Inspeccionar rastro de decisiones de ejecución",
+  "command.replayRun.title": "Repetir ejecución (simulada / contrafactual)",
+  "command.resumeRunCheckpoint.title": "Reanudar ejecución desde punto de control",
+  "command.showReliabilityMetrics.title": "Mostrar métricas de fiabilidad del agente",
+  "command.planTools.title": "Planificar herramientas para objetivo"
 }

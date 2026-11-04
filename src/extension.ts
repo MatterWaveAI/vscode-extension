@@ -7,7 +7,20 @@ import { looksLikeApiKey, TokenStore } from "./auth/session";
 import { signOut } from "./auth/signOut";
 import { ChatController, libraryBadge } from "./chat/controller";
 import type { HostMessage } from "./chat/protocol";
-import type { FolderRow, Library, TagRow } from "./api/types";
+import type {
+  ApiKeyListing,
+  ConnectorCatalogList,
+  DecisionTrail,
+  FolderRow,
+  ImportRecord,
+  Library,
+  ReliabilityMetrics,
+  ReplayMode,
+  ReplayRunResult,
+  ResumeRunResult,
+  TagRow,
+  ToolPlan,
+} from "./api/types";
 import { ChatViewProvider } from "./chat/viewProvider";
 import { fitsContentCap, MAX_CONTENT_CHARS, imageAttachment, imageContentType, selectionContent } from "./context";
 import { applyToFile, registerApplyContentProvider } from "./apply";
@@ -52,7 +65,6 @@ import { mentionTitle, type Mention } from "./chat/mentions";
 import { proposedCommand, terminalCommandPrompt, TerminalHistory, terminalText } from "./terminalOutput";
 import { keyDetail } from "./keys";
 import { conversationToMarkdown, safeFilename } from "./chat/export";
-import type { ApiKeyListing, ImportRecord } from "./api/types";
 import { pickerRows, resolvePick, type PickerRow } from "./models";
 import { DEFAULT_BASE_URL, normalizeServerUrl, serverUrlProblem, shouldPromptForServer } from "./settings";
 import { formatAgentEngineStatus, StatusBar } from "./statusBar";
@@ -584,6 +596,33 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
       "matterwave.newPiSession",
       (options?: { parentSession?: string; backend?: { newSession(parentSession?: string): Promise<PiRpcResponse> } }) =>
         newPiSession(agent, chat, view, options),
+    ),
+    vscode.commands.registerCommand(
+      "matterwave.listConnectors",
+      (options?: { category?: string; q?: string }) => browseConnectors(client, options),
+    ),
+    vscode.commands.registerCommand(
+      "matterwave.inspectRunDecisionTrail",
+      (options?: string | { runId?: string }) => inspectRunDecisionTrail(client, options),
+    ),
+    vscode.commands.registerCommand(
+      "matterwave.replayRun",
+      (options?: { runId?: string; mode?: ReplayMode; overrides?: Record<string, unknown> }) =>
+        replayRunCommand(client, options),
+    ),
+    vscode.commands.registerCommand(
+      "matterwave.resumeRunCheckpoint",
+      (options?: { runId?: string; checkpointId?: string; stateOverrides?: Record<string, unknown> }) =>
+        resumeRunCheckpointCommand(client, options),
+    ),
+    vscode.commands.registerCommand(
+      "matterwave.showReliabilityMetrics",
+      (options?: string | { agentId?: string }) => showReliabilityMetrics(client, options),
+    ),
+    vscode.commands.registerCommand(
+      "matterwave.planTools",
+      (options?: string | { goal?: string; availableTools?: string[]; constraints?: Record<string, unknown> }) =>
+        planToolsCommand(client, options),
     ),
   );
 
@@ -2632,4 +2671,266 @@ function summarizeImport(record: ImportRecord): string {
   if (record.conversations_skipped > 0) parts.push(`${plural(record.conversations_skipped, "conversation", "conversations")} skipped`);
   if (record.attachments_skipped > 0) parts.push(`${plural(record.attachments_skipped, "attachment", "attachments")} skipped`);
   return `${parts.join(", ")}.`;
+}
+
+// --- universal connectors, decision trail, replay, reliability & tool planner ---
+
+/**
+ * Browse the universal connector catalog (`matterwave.listConnectors`),
+ * optionally filtered by category or search query.
+ */
+export async function browseConnectors(
+  client: Pick<MatterWaveClient, "listConnectorCatalog">,
+  options?: { category?: string; q?: string },
+): Promise<ConnectorCatalogList | null> {
+  const category = options?.category;
+  let query = options?.q;
+  if (!options) {
+    const filterInput = await vscode.window.showInputBox({
+      title: "MatterWave: Browse Universal Connectors",
+      prompt: "Optional category or search query (leave empty to list all connectors).",
+      placeHolder: "e.g. communication, crm, github",
+      ignoreFocusOut: true,
+    });
+    if (filterInput === undefined) return null;
+    const trimmed = filterInput.trim();
+    if (trimmed) query = trimmed;
+  }
+  try {
+    const catalog = await client.listConnectorCatalog(category, query);
+    if (catalog.data.length === 0) {
+      void vscode.window.showInformationMessage("No connectors matched the filter.");
+      return catalog;
+    }
+    if (!options) {
+      const picked = await vscode.window.showQuickPick(
+        catalog.data.map((connector) => ({
+          connector,
+          label: connector.name || connector.provider_id,
+          description: `${connector.category} · ${connector.auth_types.join(", ")}`,
+          detail: connector.api_base_url,
+        })),
+        {
+          title: `Universal Connectors (${catalog.total})`,
+          placeHolder: "Pick a connector to inspect its details",
+        },
+      );
+      if (picked) {
+        const scopes = picked.connector.default_scopes?.length
+          ? ` · scopes: ${picked.connector.default_scopes.join(", ")}`
+          : "";
+        void vscode.window.showInformationMessage(
+          `${picked.connector.name} (${picked.connector.provider_id}) — ${picked.connector.category}, auth: ${picked.connector.auth_types.join(", ")}${scopes}`,
+        );
+      }
+    } else {
+      void vscode.window.showInformationMessage(`Loaded ${catalog.data.length} connector(s) from the catalog.`);
+    }
+    return catalog;
+  } catch (error) {
+    void vscode.window.showErrorMessage(`Connectors could not be loaded: ${describe(error)}`);
+    return null;
+  }
+}
+
+/**
+ * Inspect the cryptographic decision trail DAG for a run (`matterwave.inspectRunDecisionTrail`).
+ */
+export async function inspectRunDecisionTrail(
+  client: Pick<MatterWaveClient, "getRunDecisionTrail">,
+  options?: string | { runId?: string },
+): Promise<DecisionTrail | null> {
+  let runId = typeof options === "string" ? options.trim() : options?.runId?.trim();
+  if (!runId) {
+    const input = await vscode.window.showInputBox({
+      title: "MatterWave: Inspect Run Decision Trail",
+      prompt: "Enter the run ID to inspect its cryptographic decision trail.",
+      placeHolder: "run_...",
+      ignoreFocusOut: true,
+      validateInput: (value) => (value.trim() ? null : "A run ID is required."),
+    });
+    if (!input?.trim()) return null;
+    runId = input.trim();
+  }
+  try {
+    const trail = await client.getRunDecisionTrail(runId);
+    const status = trail.statistics.success ? "succeeded" : "failed";
+    void vscode.window.showInformationMessage(
+      `Decision trail for ${trail.run_id}: ${trail.nodes.length} node(s), ${trail.edges.length} edge(s), ${status} (${trail.statistics.duration_ms} ms).`,
+    );
+    return trail;
+  } catch (error) {
+    void vscode.window.showErrorMessage(`Decision trail could not be loaded: ${describe(error)}`);
+    return null;
+  }
+}
+
+/**
+ * Replay a run in strict, simulated, or counterfactual mode (`matterwave.replayRun`).
+ */
+export async function replayRunCommand(
+  client: Pick<MatterWaveClient, "replayRun">,
+  options?: { runId?: string; mode?: ReplayMode; overrides?: Record<string, unknown> },
+): Promise<ReplayRunResult | null> {
+  let runId = options?.runId?.trim();
+  if (!runId) {
+    const input = await vscode.window.showInputBox({
+      title: "MatterWave: Replay Run",
+      prompt: "Enter the run ID to replay.",
+      placeHolder: "run_...",
+      ignoreFocusOut: true,
+      validateInput: (value) => (value.trim() ? null : "A run ID is required."),
+    });
+    if (!input?.trim()) return null;
+    runId = input.trim();
+  }
+  let mode: ReplayMode | undefined = options?.mode;
+  if (!mode) {
+    const picked = await vscode.window.showQuickPick(
+      [
+        { mode: "simulated" as const, label: "Simulated", detail: "Replay using recorded tool outputs without side effects" },
+        { mode: "counterfactual" as const, label: "Counterfactual", detail: "Replay with alternative parameters or overrides" },
+        { mode: "strict" as const, label: "Strict", detail: "Verify deterministic reproduction against recorded hashes" },
+      ],
+      { title: `Replay mode for ${runId}`, placeHolder: "Select how the run should be replayed" },
+    );
+    if (!picked) return null;
+    mode = picked.mode;
+  }
+  try {
+    const result = await client.replayRun(runId, mode, options?.overrides);
+    const status = result.success ? "succeeded" : "failed";
+    void vscode.window.showInformationMessage(
+      `Replay ${result.replay_id} (${result.mode}): ${status} · ${result.differences.length} difference(s).`,
+    );
+    return result;
+  } catch (error) {
+    void vscode.window.showErrorMessage(`Run replay failed: ${describe(error)}`);
+    return null;
+  }
+}
+
+/**
+ * Resume a run from a recorded checkpoint (`matterwave.resumeRunCheckpoint`).
+ */
+export async function resumeRunCheckpointCommand(
+  client: Pick<MatterWaveClient, "listRunCheckpoints" | "resumeRun">,
+  options?: { runId?: string; checkpointId?: string; stateOverrides?: Record<string, unknown> },
+): Promise<ResumeRunResult | null> {
+  let runId = options?.runId?.trim();
+  if (!runId) {
+    const input = await vscode.window.showInputBox({
+      title: "MatterWave: Resume Run from Checkpoint",
+      prompt: "Enter the run ID to list and resume from a checkpoint.",
+      placeHolder: "run_...",
+      ignoreFocusOut: true,
+      validateInput: (value) => (value.trim() ? null : "A run ID is required."),
+    });
+    if (!input?.trim()) return null;
+    runId = input.trim();
+  }
+  let checkpointId = options?.checkpointId?.trim();
+  try {
+    if (!checkpointId) {
+      const list = await client.listRunCheckpoints(runId);
+      if (list.data.length === 0) {
+        void vscode.window.showInformationMessage(`No checkpoints recorded for run ${runId}.`);
+        return null;
+      }
+      const picked = await vscode.window.showQuickPick(
+        list.data.map((cp) => ({
+          checkpoint: cp,
+          label: cp.checkpoint_id,
+          description: `Step ${cp.step_index} (${cp.step_id})`,
+          detail: cp.timestamp ? `Recorded ${cp.timestamp}` : undefined,
+        })),
+        { title: `Checkpoints for ${runId}`, placeHolder: "Pick a checkpoint to resume from" },
+      );
+      if (!picked) return null;
+      checkpointId = picked.checkpoint.checkpoint_id;
+    }
+    const resumed = await client.resumeRun(
+      runId,
+      checkpointId,
+      options?.stateOverrides ? { stateOverrides: options.stateOverrides } : undefined,
+    );
+    void vscode.window.showInformationMessage(
+      `Resumed run ${resumed.run_id} from checkpoint ${resumed.resumed_from_checkpoint_id} (step ${resumed.resumed_from_step}).`,
+    );
+    return resumed;
+  } catch (error) {
+    void vscode.window.showErrorMessage(`Run could not be resumed from checkpoint: ${describe(error)}`);
+    return null;
+  }
+}
+
+/**
+ * Show agent reliability metrics (`matterwave.showReliabilityMetrics`).
+ */
+export async function showReliabilityMetrics(
+  client: Pick<MatterWaveClient, "getReliabilityMetrics">,
+  options?: string | { agentId?: string },
+): Promise<ReliabilityMetrics | null> {
+  let agentId: string | undefined;
+  if (typeof options === "string") {
+    agentId = options.trim() || undefined;
+  } else if (options !== undefined) {
+    agentId = options.agentId?.trim() || undefined;
+  } else {
+    const input = await vscode.window.showInputBox({
+      title: "MatterWave: Show Agent Reliability Metrics",
+      prompt: "Optional agent ID (leave empty for aggregate organisation metrics).",
+      placeHolder: "agent_...",
+      ignoreFocusOut: true,
+    });
+    if (input === undefined) return null;
+    agentId = input.trim() || undefined;
+  }
+  try {
+    const metrics = await client.getReliabilityMetrics(agentId);
+    const sr = (metrics.sr * 100).toFixed(1);
+    const cr = (metrics.cr * 100).toFixed(1);
+    const target = metrics.agent_id ? `agent ${metrics.agent_id}` : "all agents";
+    void vscode.window.showInformationMessage(
+      `Reliability (${target}, ${metrics.total_runs} runs): SR ${sr}%, CR ${cr}%, TCL ${metrics.tcl} ms, WCT ${metrics.wct} ms, PC $${metrics.pc.toFixed(4)}.`,
+    );
+    return metrics;
+  } catch (error) {
+    void vscode.window.showErrorMessage(`Reliability metrics could not be loaded: ${describe(error)}`);
+    return null;
+  }
+}
+
+/**
+ * Generate a multi-step tool plan for a goal (`matterwave.planTools`).
+ */
+export async function planToolsCommand(
+  client: Pick<MatterWaveClient, "planTools">,
+  options?: string | { goal?: string; availableTools?: string[]; constraints?: Record<string, unknown> },
+): Promise<ToolPlan | null> {
+  let goal = typeof options === "string" ? options.trim() : options?.goal?.trim();
+  const availableTools = typeof options === "object" && options ? options.availableTools : undefined;
+  const constraints = typeof options === "object" && options ? options.constraints : undefined;
+  if (!goal) {
+    const input = await vscode.window.showInputBox({
+      title: "MatterWave: Plan Tools for Goal",
+      prompt: "Describe the goal to generate a multi-step tool execution plan.",
+      placeHolder: "e.g. Fetch failing CI logs and open a tracking issue",
+      ignoreFocusOut: true,
+      validateInput: (value) => (value.trim() ? null : "A goal description is required."),
+    });
+    if (!input?.trim()) return null;
+    goal = input.trim();
+  }
+  try {
+    const plan = await client.planTools(goal, availableTools, constraints ? { constraints } : undefined);
+    const chain = plan.steps.map((step) => step.tool_name).join(" -> ") || "no steps";
+    void vscode.window.showInformationMessage(
+      `Tool plan ${plan.plan_id} (${plan.steps.length} step${plan.steps.length === 1 ? "" : "s"}): ${chain}.`,
+    );
+    return plan;
+  } catch (error) {
+    void vscode.window.showErrorMessage(`Tool plan could not be generated: ${describe(error)}`);
+    return null;
+  }
 }

@@ -736,4 +736,286 @@ describe("key options and the account routes", () => {
     expect(() => new MatterWave({ baseUrl: "" })).toThrow(MatterWaveConfigError);
     expect(() => new MatterWave({ baseUrl: "" })).toThrow(MatterWaveError);
   });
+
+  it("wires connector catalog, OAuth proxy, decision trail, replay, checkpoints, reliability, guardrails, and tool planner routes", async () => {
+    const { api, calls } = client({
+      "GET /api/v1/oidc/config": () =>
+        json({
+          adapter: "zitadel",
+          issuer_url: "https://idp.example.com",
+          token_endpoint: "https://idp.example.com/oauth/v2/token",
+          jwks_uri: "https://idp.example.com/jwks",
+          admin_url: "https://idp.example.com/admin",
+          project_id: "proj_1",
+          connected: true,
+          status: "ready",
+        }),
+      "POST /api/v1/agent-keys/key_1/oidc-sync": () =>
+        json({
+          key_id: "key_1",
+          idp_client_id: "client_1",
+          oidc_issuer: "https://idp.example.com",
+          adapter: "zitadel",
+          synced_at: "2026-11-01T00:00:00Z",
+          scopes: ["chat:read", "chat:write"],
+          resource_pattern: "*",
+          a2a: {
+            allowed_tools: ["*"],
+            denied_tools: [],
+            allowed_models: ["*"],
+            cwd_scope: "/workspace",
+            limits: { max_tokens: 100000, max_duration_seconds: 300, max_cost_usd: 25 },
+          },
+        }),
+      "POST /api/v1/oidc/enforce-claims": () =>
+        json({
+          allowed: true,
+          violation_claim: null,
+          detail: "ok",
+          effective_tools: ["read_file"],
+          resolved_cwd: "/workspace",
+          limits: { max_tokens: 100000, max_duration_seconds: 300, max_cost_usd: 25 },
+        }),
+      "GET /api/v1/connectors/catalog": () =>
+        json({
+          data: [
+            {
+              provider_id: "github",
+              name: "GitHub",
+              category: "developer",
+              auth_types: ["oauth2"],
+              authorize_url: "https://github.com/login/oauth/authorize",
+              token_url: "https://github.com/login/oauth/access_token",
+              api_base_url: "https://api.github.com",
+              default_scopes: ["repo"],
+              pkce_supported: true,
+              refresh_supported: true,
+              revoke_url: "",
+              docs_url: "https://docs.github.com",
+              icon: "github",
+            },
+          ],
+          total: 1,
+        }),
+      "POST /api/v1/oauth/register": () =>
+        json({
+          authenticator_id: "auth_1",
+          name: "GitHub Org",
+          provider_id: "github",
+          org_id: "org_1",
+          client_id: "cid_1",
+          client_secret_masked: "***",
+          authorize_url: "https://github.com/login/oauth/authorize",
+          token_url: "https://github.com/login/oauth/access_token",
+          redirect_uri: "https://app.matterwave.ai/oauth/callback",
+          scopes: ["repo"],
+          api_base_url: "https://api.github.com",
+          tenant_id: null,
+          extra_authorize_params: {},
+          created_at: "2026-11-01T00:00:00Z",
+        }),
+      "POST /api/v1/oauth/proxy/cred_1": () =>
+        json({
+          credential_id: "cred_1",
+          provider_id: "github",
+          method: "POST",
+          target_url: "https://api.github.com/repos",
+          status_code: 200,
+          auto_refreshed: false,
+          broker: "nango",
+          headers_injected: ["Authorization"],
+          data: { ok: true },
+        }),
+      "GET /api/v1/runs/run_1/decision-trail": () =>
+        json({
+          run_id: "run_1",
+          org: "org_1",
+          nodes: [
+            {
+              id: "n_1",
+              type: "tool_call",
+              label: "read_file",
+              step_id: "s_1",
+              timestamp: "2026-11-01T00:00:00Z",
+              duration_ms: 10,
+              confidence: 0.99,
+              tokens_used: 50,
+              cost_usd: 0.001,
+              outcome: "success",
+              rationale: "Read source",
+              evidence: [],
+              metadata: {},
+            },
+          ],
+          edges: [{ from_node: "n_1", to_node: "n_2", edge_type: "next", label: "next" }],
+          statistics: {
+            total_nodes: 1,
+            total_edges: 1,
+            tool_calls_count: 1,
+            total_tokens: 50,
+            total_cost_usd: 0.001,
+            duration_ms: 10,
+            success: true,
+          },
+        }),
+      "POST /api/v1/runs/run_1/replay": () =>
+        json({
+          replay_id: "replay_1",
+          run_id: "run_1",
+          mode: "counterfactual",
+          success: true,
+          original_outcome: {},
+          replayed_outcome: {},
+          differences: [{ step_id: "s_1", field: "output", original: "a", replayed: "b", significance: "low" }],
+          duration_ms: 12,
+          created_at: "2026-11-01T00:00:00Z",
+        }),
+      "GET /api/v1/runs/run_1/checkpoints": () =>
+        json({
+          run_id: "run_1",
+          data: [
+            {
+              checkpoint_id: "cp_1",
+              thread_id: "th_1",
+              run_id: "run_1",
+              step_id: "s_2",
+              step_index: 2,
+              timestamp: "2026-11-01T00:00:00Z",
+              state: {},
+              metadata: {},
+              parent_checkpoint_id: null,
+            },
+          ],
+        }),
+      "POST /api/v1/runs/run_1/resume": () =>
+        json({
+          run_id: "run_2",
+          source_run_id: "run_1",
+          resumed_from_checkpoint_id: "cp_1",
+          resumed_from_step: "s_2",
+          state: "running",
+          restored_state: { step: 2 },
+          created_at: "2026-11-01T00:00:00Z",
+        }),
+      "GET /api/v1/reliability/metrics": () =>
+        json({
+          org: "org_1",
+          agent_id: "agent_1",
+          sr: 0.95,
+          cr: 1.0,
+          pc: 0.0125,
+          hir: 0.05,
+          ma: 0.98,
+          tcl: 42,
+          wct: 1200,
+          total_runs: 20,
+          window: "24h",
+        }),
+      "POST /api/v1/guardrails/evaluate": () =>
+        json({
+          rail_type: "input",
+          action: "allow",
+          allowed: true,
+          modified_content: "hello world",
+          refusal_message: null,
+          triggered_rails: [],
+          violations: [],
+        }),
+      "POST /api/v1/tools/plan": () =>
+        json({
+          plan_id: "plan_1",
+          task: "Run unit tests and summarize failures",
+          steps: [
+            {
+              step_id: "s_0",
+              tool_name: "run_shell",
+              description: "Execute test suite",
+              arguments: { command: "npm test" },
+              depends_on: [],
+              estimated_cost_usd: 0.001,
+              estimated_time_ms: 500,
+              fallback_tool: null,
+            },
+          ],
+          execution_order: [["s_0"]],
+          total_estimated_cost_usd: 0.001,
+          total_estimated_time_ms: 500,
+          confidence: 0.95,
+        }),
+    });
+
+    const oidc = await api.getOidcConfig();
+    expect(oidc.connected).toBe(true);
+    expect(calls[0]).toMatchObject({ method: "GET", url: "/api/v1/oidc/config" });
+
+    const synced = await api.syncAgentKeyOidc("key_1");
+    expect(synced.key_id).toBe("key_1");
+    expect(calls[1]).toMatchObject({ method: "POST", url: "/api/v1/agent-keys/key_1/oidc-sync" });
+
+    const enforced = await api.enforceOidcClaims({ key_id: "key_1", requested_tools: ["read_file"] });
+    expect(enforced.allowed).toBe(true);
+    expect(calls[2]).toMatchObject({ method: "POST", url: "/api/v1/oidc/enforce-claims" });
+
+    const catalog = await api.listConnectorCatalog("developer", "git");
+    expect(catalog.total).toBe(1);
+    expect(calls[3]).toMatchObject({ method: "GET", url: "/api/v1/connectors/catalog?category=developer&q=git" });
+
+    const auth = await api.registerOAuthAuthenticator({ provider_id: "github", name: "GitHub Org", client_id: "cid_1" });
+    expect(auth.authenticator_id).toBe("auth_1");
+    expect(calls[4]).toMatchObject({ method: "POST", url: "/api/v1/oauth/register" });
+
+    const proxied = await api.proxyOAuthRequest("cred_1", {
+      endpoint: "/repos",
+      method: "POST",
+      body: { name: "demo" },
+      dry_run: true,
+    });
+    expect(proxied.status_code).toBe(200);
+    expect(calls[5]).toMatchObject({ method: "POST", url: "/api/v1/oauth/proxy/cred_1" });
+    expect(JSON.parse(String(calls[5]?.body))).toEqual({
+      endpoint: "/repos",
+      method: "POST",
+      body: { name: "demo" },
+      dry_run: true,
+    });
+
+    const trail = await api.getRunDecisionTrail("run_1");
+    expect(trail.statistics.total_nodes).toBe(1);
+    expect(calls[6]).toMatchObject({ method: "GET", url: "/api/v1/runs/run_1/decision-trail" });
+
+    const replayed = await api.replayRun("run_1", "counterfactual", { temperature: 0 });
+    expect(replayed.replay_id).toBe("replay_1");
+    expect(calls[7]).toMatchObject({ method: "POST", url: "/api/v1/runs/run_1/replay" });
+    expect(JSON.parse(String(calls[7]?.body))).toEqual({
+      mode: "counterfactual",
+      overrides: { temperature: 0 },
+    });
+
+    const checkpoints = await api.listRunCheckpoints("run_1");
+    expect(checkpoints.data).toHaveLength(1);
+    expect(calls[8]).toMatchObject({ method: "GET", url: "/api/v1/runs/run_1/checkpoints" });
+
+    const resumed = await api.resumeRun("run_1", "cp_1");
+    expect(resumed.run_id).toBe("run_2");
+    expect(calls[9]).toMatchObject({ method: "POST", url: "/api/v1/runs/run_1/resume" });
+    expect(JSON.parse(String(calls[9]?.body))).toEqual({ checkpoint_id: "cp_1" });
+
+    const metrics = await api.getReliabilityMetrics("agent_1");
+    expect(metrics.sr).toBe(0.95);
+    expect(calls[10]).toMatchObject({ method: "GET", url: "/api/v1/reliability/metrics?agent_id=agent_1" });
+
+    const guard = await api.evaluateGuardrails("input", "hello world");
+    expect(guard.allowed).toBe(true);
+    expect(calls[11]).toMatchObject({ method: "POST", url: "/api/v1/guardrails/evaluate" });
+    expect(JSON.parse(String(calls[11]?.body))).toEqual({ rail_type: "input", content: "hello world" });
+
+    const plan = await api.planTools("Run unit tests and summarize failures", ["run_shell"]);
+    expect(plan.plan_id).toBe("plan_1");
+    expect(calls[12]).toMatchObject({ method: "POST", url: "/api/v1/tools/plan" });
+    expect(JSON.parse(String(calls[12]?.body))).toEqual({
+      task: "Run unit tests and summarize failures",
+      goal: "Run unit tests and summarize failures",
+      available_tools: ["run_shell"],
+    });
+  });
 });

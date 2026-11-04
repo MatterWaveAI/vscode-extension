@@ -858,6 +858,470 @@ export interface FimCompletionResponse {
   };
 }
 
+// --- OIDC, connectors, decision trail, replay, checkpoints & reliability ------
+
+/** `GET /api/v1/oidc/config`: the deployment's OIDC identity provider configuration. */
+export interface OidcConfig {
+  adapter: string;
+  issuer_url: string;
+  token_endpoint: string;
+  jwks_uri: string;
+  admin_url: string;
+  project_id: string;
+  connected: boolean;
+  status: string;
+}
+
+/** Execution bounds carried in an agent's A2A permission envelope. */
+export interface A2ALimits {
+  max_tokens: number;
+  max_duration_seconds: number;
+  max_cost_usd: number;
+}
+
+/** Agent-to-agent permission claims provisioned for an agent key. */
+export interface A2APermissionEnvelope {
+  allowed_tools: string[];
+  denied_tools: string[];
+  allowed_models: string[];
+  cwd_scope: string;
+  limits: A2ALimits;
+}
+
+/** `POST /api/v1/agent-keys/{key_id}/oidc-sync`: synchronized OIDC client binding and A2A claims. */
+export interface OidcSyncResult {
+  key_id: string;
+  idp_client_id: string;
+  oidc_issuer: string;
+  adapter: string;
+  synced_at: string;
+  scopes: string[];
+  resource_pattern: string;
+  a2a: A2APermissionEnvelope;
+}
+
+export interface EnforceOidcClaimsParams {
+  key_id?: string;
+  claims?: Record<string, unknown>;
+  requested_tools?: string[];
+  requested_model?: string;
+  requested_cwd?: string;
+  estimated_tokens?: number;
+  estimated_duration_seconds?: number;
+  estimated_cost_usd?: number;
+  [key: string]: unknown;
+}
+
+/** `POST /api/v1/oidc/enforce-claims`: decision and effective bounds after evaluating A2A claims. */
+export interface EnforceClaimsResult {
+  allowed: boolean;
+  violation_claim: string | null;
+  detail: string;
+  effective_tools: string[];
+  resolved_cwd: string;
+  limits: A2ALimits;
+}
+
+/** One provider in the universal connector catalog. */
+export interface ConnectorCatalogEntry {
+  provider_id: string;
+  name: string;
+  category: string;
+  auth_types: string[];
+  authorize_url: string;
+  token_url: string;
+  api_base_url: string;
+  default_scopes: string[];
+  pkce_supported: boolean;
+  refresh_supported: boolean;
+  revoke_url: string;
+  docs_url: string;
+  icon: string;
+}
+
+/** `GET /api/v1/connectors/catalog`: matching connector catalog entries and total count. */
+export interface ConnectorCatalogList {
+  data: ConnectorCatalogEntry[];
+  total: number;
+}
+
+export interface ListConnectorCatalogParams extends RequestOptions {
+  category?: string;
+  q?: string;
+}
+
+export interface RegisterOAuthAuthenticatorParams {
+  name: string;
+  provider_id: string;
+  client_id: string;
+  client_secret?: string;
+  authorize_url?: string;
+  token_url?: string;
+  redirect_uri?: string;
+  scopes?: string[];
+  api_base_url?: string;
+  tenant_id?: string | null;
+  extra_authorize_params?: Record<string, string>;
+  [key: string]: unknown;
+}
+
+/** `POST /api/v1/oauth/register`: a registered OAuth authenticator with its client secret masked. */
+export interface OAuthAuthenticator {
+  authenticator_id: string;
+  name: string;
+  provider_id: string;
+  org_id: string;
+  client_id: string;
+  client_secret_masked: string;
+  authorize_url: string;
+  token_url: string;
+  redirect_uri: string;
+  scopes: string[];
+  api_base_url: string;
+  tenant_id: string | null;
+  extra_authorize_params: Record<string, string>;
+  created_at: string;
+}
+
+export interface ProxyOAuthRequestOptions extends RequestOptions {
+  method?: string;
+  params?: Record<string, unknown>;
+  headers?: Record<string, string>;
+  body?: unknown;
+  dryRun?: boolean;
+  dry_run?: boolean;
+}
+
+export interface ProxyOAuthRequestInput extends ProxyOAuthRequestOptions {
+  endpoint: string;
+}
+
+/** `POST /api/v1/oauth/proxy/{credential_id}`: proxied outbound request response. */
+export interface CredentialProxyResponse {
+  credential_id: string;
+  provider_id: string;
+  method: string;
+  target_url: string;
+  status_code: number;
+  auto_refreshed: boolean;
+  broker: string;
+  headers_injected: string[];
+  data: Record<string, unknown>;
+}
+
+/** One node in a run's execution decision graph. */
+export interface DecisionNode {
+  id: string;
+  type: string;
+  label: string;
+  step_id: string;
+  timestamp: string;
+  duration_ms: number;
+  confidence: number;
+  tokens_used: number;
+  cost_usd: number;
+  outcome: string;
+  rationale: string;
+  evidence: Record<string, unknown>[];
+  metadata: Record<string, unknown>;
+}
+
+/** A directed edge between two nodes in a run's decision graph. */
+export interface DecisionEdge {
+  from_node: string;
+  to_node: string;
+  edge_type: string;
+  label: string;
+}
+
+/** Aggregate statistics across a run's decision trail. */
+export interface DecisionTrailStatistics {
+  total_nodes: number;
+  total_edges: number;
+  tool_calls_count: number;
+  total_tokens: number;
+  total_cost_usd: number;
+  duration_ms: number;
+  success: boolean;
+}
+
+/** `GET /api/v1/runs/{run_id}/decision-trail`: complete decision trail graph and statistics. */
+export interface DecisionTrail {
+  run_id: string;
+  org: string;
+  nodes: DecisionNode[];
+  edges: DecisionEdge[];
+  statistics: DecisionTrailStatistics;
+}
+
+export type ReplayMode = "strict" | "simulated" | "counterfactual" | (string & {});
+
+export interface ReplayRunOptions extends RequestOptions {
+  mode?: ReplayMode;
+  overrides?: Record<string, unknown>;
+  fromStepId?: string;
+  from_step_id?: string;
+}
+
+/** One field-level difference between the original run and a replay. */
+export interface ReplayDifference {
+  step_id: string;
+  field: string;
+  original: unknown;
+  replayed: unknown;
+  significance: string;
+}
+
+/** `POST /api/v1/runs/{run_id}/replay`: outcome and diff report from replaying a run. */
+export interface ReplayRunResult {
+  replay_id: string;
+  run_id: string;
+  mode: string;
+  success: boolean;
+  original_outcome: Record<string, unknown>;
+  replayed_outcome: Record<string, unknown>;
+  differences: ReplayDifference[];
+  duration_ms: number;
+  created_at: string;
+}
+
+/** One persisted execution checkpoint for a run. */
+export interface CheckpointRecord {
+  checkpoint_id: string;
+  thread_id: string;
+  run_id: string;
+  step_id: string;
+  step_index: number;
+  timestamp: string;
+  state: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  parent_checkpoint_id: string | null;
+}
+
+/** `GET /api/v1/runs/{run_id}/checkpoints`: checkpoints recorded for a run. */
+export interface CheckpointList {
+  run_id: string;
+  data: CheckpointRecord[];
+}
+
+export interface ResumeRunOptions extends RequestOptions {
+  stateOverrides?: Record<string, unknown>;
+  state_overrides?: Record<string, unknown>;
+}
+
+/** `POST /api/v1/runs/{run_id}/resume`: new run spawned from a checkpoint. */
+export interface ResumeRunResult {
+  run_id: string;
+  source_run_id: string;
+  resumed_from_checkpoint_id: string;
+  resumed_from_step: string;
+  state: string;
+  restored_state: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface GetReliabilityMetricsOptions extends RequestOptions {
+  agentId?: string;
+  agent_id?: string;
+}
+
+/** `GET /api/v1/reliability/metrics`: aggregate reliability indicators. */
+export interface ReliabilityMetrics {
+  org: string;
+  agent_id: string | null;
+  sr: number;
+  cr: number;
+  pc: number;
+  hir: number;
+  ma: number;
+  tcl: number;
+  wct: number;
+  total_runs: number;
+  window: string;
+}
+
+/** `GET /api/v1/reliability/slo`: service-level objective compliance report. */
+export interface ReliabilitySloReport {
+  org: string;
+  mtte_p95_ms: number;
+  mtte_target_ms: number;
+  mtte_compliant: boolean;
+  rsr: number;
+  rsr_target: number;
+  rsr_compliant: boolean;
+  overall_compliant: boolean;
+  total_measurements: number;
+  total_replays: number;
+}
+
+/** An anomaly detected across reliability metric trends. */
+export interface AnomalyAlert {
+  metric: string;
+  severity: string;
+  current_value: number;
+  baseline_value: number;
+  threshold: number;
+  message: string;
+  detected_at: string;
+}
+
+/** One time-bucketed slice of reliability metrics. */
+export interface ReliabilityTrendBucket {
+  bucket: string;
+  sr: number;
+  cr: number;
+  pc: number;
+  hir: number;
+  ma: number;
+  tcl: number;
+  wct: number;
+  runs: number;
+}
+
+/** `GET /api/v1/reliability/trends`: historical reliability buckets and detected anomalies. */
+export interface ReliabilityTrends {
+  org: string;
+  buckets: ReliabilityTrendBucket[];
+  anomalies: AnomalyAlert[];
+}
+
+/** One endpoint in the platform's observability stack. */
+export interface TelemetryServiceEndpoint {
+  service: string;
+  url: string;
+  healthy: boolean;
+  protocol: string;
+}
+
+/** `GET /api/v1/telemetry/status`: status of the OpenTelemetry, Prometheus, Grafana, Tempo, and Loki stack. */
+export interface TelemetryStackStatus {
+  org: string;
+  otel_enabled: boolean;
+  prometheus_scraped: boolean;
+  grafana_dashboards: string[];
+  tempo_tracing_enabled: boolean;
+  loki_logging_enabled: boolean;
+  endpoints: TelemetryServiceEndpoint[];
+}
+
+/** Telemetry metrics for a single step within an execution. */
+export interface StepTelemetryMetrics {
+  step_id: string;
+  step_name: string;
+  status: string;
+  duration_ms: number;
+  tokens_used: number;
+  cost_usd: number;
+  retries: number;
+}
+
+/** `GET /api/v1/telemetry/executions/{execution_id}/metrics`: per-step and total telemetry metrics. */
+export interface TelemetryExecutionMetrics {
+  execution_id: string;
+  pipeline_name: string;
+  status: string;
+  total_duration_ms: number;
+  total_tokens: number;
+  total_cost_usd: number;
+  trace_id: string;
+  steps: StepTelemetryMetrics[];
+}
+
+/** One human-in-the-loop interaction request and its resolution state. */
+export interface HitlInteraction {
+  interaction_id: string;
+  execution_id: string;
+  run_id: string;
+  step_id: string;
+  org: string;
+  title: string;
+  prompt: string;
+  channels: string[];
+  status: string;
+  ui_schema: Record<string, unknown>;
+  context: Record<string, unknown>;
+  decision: string | null;
+  response_data: Record<string, unknown> | null;
+  responded_by: string | null;
+  created_at: string;
+  responded_at: string | null;
+}
+
+/** `GET /api/v1/hitl/interactions`: human-in-the-loop interactions for the organisation. */
+export interface HitlInteractionList {
+  data: HitlInteraction[];
+  total: number;
+}
+
+export interface ListHitlInteractionsOptions extends RequestOptions {
+  status?: string;
+}
+
+export interface RespondHitlInteractionOptions extends RequestOptions {
+  responseData?: Record<string, unknown>;
+  response_data?: Record<string, unknown>;
+  respondedBy?: string;
+  responded_by?: string;
+}
+
+export type GuardrailType = "input" | "dialog" | "retrieval" | "execution" | "output" | (string & {});
+
+export interface EvaluateGuardrailsOptions extends RequestOptions {
+  toolName?: string;
+  tool_name?: string;
+  toolArgs?: Record<string, unknown>;
+  tool_args?: Record<string, unknown>;
+  policies?: string[];
+}
+
+/** One guardrail violation triggered during content evaluation. */
+export interface GuardrailViolation {
+  rail_id: string;
+  rail_type: string;
+  category: string;
+  severity: string;
+  message: string;
+  matched_text: string | null;
+}
+
+/** `POST /api/v1/guardrails/evaluate`: verdict, modified content, and triggered violations. */
+export interface GuardrailEvaluation {
+  rail_type: string;
+  action: string;
+  allowed: boolean;
+  modified_content: string;
+  refusal_message: string | null;
+  triggered_rails: string[];
+  violations: GuardrailViolation[];
+}
+
+export interface PlanToolsOptions extends RequestOptions {
+  constraints?: Record<string, unknown>;
+}
+
+/** One planned tool invocation step with dependencies and cost/time estimates. */
+export interface ToolPlanStep {
+  step_id: string;
+  tool_name: string;
+  description: string;
+  arguments: Record<string, unknown>;
+  depends_on: string[];
+  estimated_cost_usd: number;
+  estimated_time_ms: number;
+  fallback_tool: string | null;
+}
+
+/** `POST /api/v1/tools/plan`: execution plan of tool calls ordered into parallelizable stages. */
+export interface ToolPlan {
+  plan_id: string;
+  task: string;
+  steps: ToolPlanStep[];
+  execution_order: string[][];
+  total_estimated_cost_usd: number;
+  total_estimated_time_ms: number;
+  confidence: number;
+}
+
 /** @internal One operation, ready for `send`. */
 export interface Prepared {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -1147,6 +1611,326 @@ export class MatterWave {
     return this.json<FimCompletionResponse>(
       { method: "POST", path: "/v1/completions", body: defined({ ...params }), keyed: true, stream: false },
       options,
+    );
+  }
+
+  /** `GET /api/v1/oidc/config`: the deployment's OIDC identity provider configuration. */
+  getOidcConfig(options: RequestOptions = {}): Promise<WithRequestId<OidcConfig>> {
+    return this.json<OidcConfig>(
+      { method: "GET", path: "/api/v1/oidc/config", body: undefined, keyed: true, stream: false },
+      options,
+    );
+  }
+
+  /** `POST /api/v1/agent-keys/{key_id}/oidc-sync`: synchronize OIDC client credentials and A2A claims for `keyId`. */
+  syncAgentKeyOidc(keyId: string, options: RequestOptions = {}): Promise<WithRequestId<OidcSyncResult>> {
+    const seg = segment("keyId", keyId);
+    return this.json<OidcSyncResult>(
+      { method: "POST", path: `/api/v1/agent-keys/${seg}/oidc-sync`, body: undefined, keyed: true, stream: false },
+      options,
+    );
+  }
+
+  /** `POST /api/v1/oidc/enforce-claims`: evaluate an agent key's A2A permission envelope against a run request. */
+  enforceOidcClaims(
+    payload: EnforceOidcClaimsParams,
+    options: RequestOptions = {},
+  ): Promise<WithRequestId<EnforceClaimsResult>> {
+    if (!payload || typeof payload !== "object" || Object.keys(payload).length === 0) {
+      throw new MatterWaveConfigError("payload must not be empty");
+    }
+    return this.json<EnforceClaimsResult>(
+      { method: "POST", path: "/api/v1/oidc/enforce-claims", body: payload, keyed: true, stream: false },
+      options,
+    );
+  }
+
+  /** `GET /api/v1/connectors/catalog`: list providers in the universal connector catalog. */
+  listConnectorCatalog(
+    paramsOrCategory?: ListConnectorCatalogParams | string | null,
+    q?: string | null,
+    options: RequestOptions = {},
+  ): Promise<WithRequestId<ConnectorCatalogList>> {
+    let category: string | undefined;
+    let searchQ: string | undefined;
+    let reqOptions: RequestOptions = options;
+    if (typeof paramsOrCategory === "string") {
+      category = paramsOrCategory;
+      searchQ = q ?? undefined;
+    } else if (paramsOrCategory && typeof paramsOrCategory === "object") {
+      const { category: cat, q: queryStr, ...rest } = paramsOrCategory;
+      category = cat;
+      searchQ = queryStr ?? (q ?? undefined);
+      reqOptions = { ...rest, ...options };
+    } else if (q != null) {
+      searchQ = q;
+    }
+    const qs = query({ category, q: searchQ });
+    return this.json<ConnectorCatalogList>(
+      { method: "GET", path: `/api/v1/connectors/catalog${qs}`, body: undefined, keyed: true, stream: false },
+      reqOptions,
+    );
+  }
+
+  /** `POST /api/v1/oauth/register`: register an OAuth authenticator for a connector catalog provider. */
+  registerOAuthAuthenticator(
+    payload: RegisterOAuthAuthenticatorParams,
+    options: RequestOptions = {},
+  ): Promise<WithRequestId<OAuthAuthenticator>> {
+    if (!payload || typeof payload !== "object" || Object.keys(payload).length === 0) {
+      throw new MatterWaveConfigError("payload must not be empty");
+    }
+    return this.json<OAuthAuthenticator>(
+      { method: "POST", path: "/api/v1/oauth/register", body: payload, keyed: true, stream: false },
+      options,
+    );
+  }
+
+  /** `POST /api/v1/oauth/proxy/{credential_id}`: proxy an outbound API request through the credential broker. */
+  proxyOAuthRequest(
+    credentialId: string,
+    endpointOrRequest: string | ProxyOAuthRequestInput,
+    methodOrOptions: string | ProxyOAuthRequestOptions = "GET",
+    options: ProxyOAuthRequestOptions = {},
+  ): Promise<WithRequestId<CredentialProxyResponse>> {
+    const seg = segment("credentialId", credentialId);
+    let rawEndpoint: string;
+    let merged: ProxyOAuthRequestOptions;
+    if (typeof endpointOrRequest === "object" && endpointOrRequest !== null) {
+      const { endpoint, ...fromInput } = endpointOrRequest;
+      rawEndpoint = endpoint;
+      merged =
+        typeof methodOrOptions === "object" && methodOrOptions !== null
+          ? { ...fromInput, ...methodOrOptions, ...options }
+          : { ...fromInput, ...options };
+    } else {
+      rawEndpoint = endpointOrRequest;
+      merged =
+        typeof methodOrOptions === "string"
+          ? { ...options, method: methodOrOptions }
+          : { ...methodOrOptions, ...options };
+    }
+    const cleanedEndpoint = typeof rawEndpoint === "string" ? rawEndpoint.trim() : "";
+    if (!cleanedEndpoint) throw new MatterWaveConfigError("endpoint must not be empty");
+    const { method = "GET", params, headers, body, dryRun, dry_run, ...reqOptions } = merged;
+    const cleanedMethod = typeof method === "string" ? method.trim().toUpperCase() : "";
+    if (!cleanedMethod) throw new MatterWaveConfigError("method must not be empty");
+    const payload: Record<string, unknown> = {
+      endpoint: cleanedEndpoint,
+      method: cleanedMethod,
+    };
+    if (params !== undefined) payload.params = params;
+    if (headers !== undefined) payload.headers = headers;
+    if (body !== undefined) payload.body = body;
+    const resolvedDryRun = dryRun ?? dry_run;
+    if (resolvedDryRun !== undefined) payload.dry_run = resolvedDryRun;
+    return this.json<CredentialProxyResponse>(
+      { method: "POST", path: `/api/v1/oauth/proxy/${seg}`, body: payload, keyed: true, stream: false },
+      reqOptions,
+    );
+  }
+
+  /** `GET /api/v1/runs/{run_id}/decision-trail`: retrieve the execution decision graph and statistics for `runId`. */
+  getRunDecisionTrail(runId: string, options: RequestOptions = {}): Promise<WithRequestId<DecisionTrail>> {
+    const seg = segment("runId", runId);
+    return this.json<DecisionTrail>(
+      { method: "GET", path: `/api/v1/runs/${seg}/decision-trail`, body: undefined, keyed: true, stream: false },
+      options,
+    );
+  }
+
+  /** `POST /api/v1/runs/{run_id}/replay`: replay a run in `simulated`, `strict`, or `counterfactual` mode. */
+  replayRun(
+    runId: string,
+    modeOrOptions: ReplayMode | ReplayRunOptions = "simulated",
+    overrides?: Record<string, unknown> | null,
+    options: ReplayRunOptions = {},
+  ): Promise<WithRequestId<ReplayRunResult>> {
+    const seg = segment("runId", runId);
+    const merged: ReplayRunOptions =
+      typeof modeOrOptions === "string"
+        ? { ...options, mode: modeOrOptions, ...(overrides != null ? { overrides } : {}) }
+        : { ...modeOrOptions, ...options };
+    const { mode = "simulated", overrides: ov, fromStepId, from_step_id, ...reqOptions } = merged;
+    const cleanedMode = typeof mode === "string" ? mode.trim() : "";
+    if (!cleanedMode) throw new MatterWaveConfigError("mode must not be empty");
+    const payload: Record<string, unknown> = {
+      mode: cleanedMode,
+      overrides: ov ?? {},
+    };
+    const resolvedFromStep = fromStepId ?? from_step_id;
+    if (resolvedFromStep !== undefined) payload.from_step_id = resolvedFromStep;
+    return this.json<ReplayRunResult>(
+      { method: "POST", path: `/api/v1/runs/${seg}/replay`, body: payload, keyed: true, stream: false },
+      reqOptions,
+    );
+  }
+
+  /** `GET /api/v1/runs/{run_id}/checkpoints`: list persisted checkpoints for `runId`. */
+  listRunCheckpoints(runId: string, options: RequestOptions = {}): Promise<WithRequestId<CheckpointList>> {
+    const seg = segment("runId", runId);
+    return this.json<CheckpointList>(
+      { method: "GET", path: `/api/v1/runs/${seg}/checkpoints`, body: undefined, keyed: true, stream: false },
+      options,
+    );
+  }
+
+  /** `POST /api/v1/runs/{run_id}/resume`: resume a run from `checkpointId`. */
+  resumeRun(
+    runId: string,
+    checkpointId?: string | null,
+    options: ResumeRunOptions = {},
+  ): Promise<WithRequestId<ResumeRunResult>> {
+    const seg = segment("runId", runId);
+    const { stateOverrides, state_overrides, ...reqOptions } = options;
+    const payload: Record<string, unknown> = {};
+    if (checkpointId !== undefined && checkpointId !== null) {
+      const cleanedCheckpoint = checkpointId.trim();
+      if (!cleanedCheckpoint) throw new MatterWaveConfigError("checkpointId must not be empty");
+      payload.checkpoint_id = cleanedCheckpoint;
+    }
+    const resolvedOverrides = stateOverrides ?? state_overrides;
+    if (resolvedOverrides !== undefined) payload.state_overrides = resolvedOverrides;
+    return this.json<ResumeRunResult>(
+      { method: "POST", path: `/api/v1/runs/${seg}/resume`, body: payload, keyed: true, stream: false },
+      reqOptions,
+    );
+  }
+
+  /** `GET /api/v1/reliability/metrics`: retrieve aggregate reliability metrics. */
+  getReliabilityMetrics(
+    agentIdOrOptions?: string | GetReliabilityMetricsOptions | null,
+    options: RequestOptions = {},
+  ): Promise<WithRequestId<ReliabilityMetrics>> {
+    let agentId: string | undefined;
+    let reqOptions: RequestOptions = options;
+    if (typeof agentIdOrOptions === "string") {
+      agentId = agentIdOrOptions;
+    } else if (agentIdOrOptions && typeof agentIdOrOptions === "object") {
+      const { agentId: a1, agent_id: a2, ...rest } = agentIdOrOptions;
+      agentId = a1 ?? a2;
+      reqOptions = { ...rest, ...options };
+    }
+    const qs = query({ agent_id: agentId });
+    return this.json<ReliabilityMetrics>(
+      { method: "GET", path: `/api/v1/reliability/metrics${qs}`, body: undefined, keyed: true, stream: false },
+      reqOptions,
+    );
+  }
+
+  /** `GET /api/v1/reliability/slo`: retrieve the service-level objective compliance report. */
+  getReliabilitySlo(options: RequestOptions = {}): Promise<WithRequestId<ReliabilitySloReport>> {
+    return this.json<ReliabilitySloReport>(
+      { method: "GET", path: "/api/v1/reliability/slo", body: undefined, keyed: true, stream: false },
+      options,
+    );
+  }
+
+  /** `GET /api/v1/reliability/trends`: retrieve historical reliability trend buckets and anomalies. */
+  getReliabilityTrends(options: RequestOptions = {}): Promise<WithRequestId<ReliabilityTrends>> {
+    return this.json<ReliabilityTrends>(
+      { method: "GET", path: "/api/v1/reliability/trends", body: undefined, keyed: true, stream: false },
+      options,
+    );
+  }
+
+  /** `GET /api/v1/telemetry/status`: retrieve the status of the platform telemetry stack. */
+  getTelemetryStatus(options: RequestOptions = {}): Promise<WithRequestId<TelemetryStackStatus>> {
+    return this.json<TelemetryStackStatus>(
+      { method: "GET", path: "/api/v1/telemetry/status", body: undefined, keyed: true, stream: false },
+      options,
+    );
+  }
+
+  /** `GET /api/v1/telemetry/executions/{execution_id}/metrics`: retrieve per-step telemetry metrics for `executionId`. */
+  getExecutionTelemetry(
+    executionId: string,
+    options: RequestOptions = {},
+  ): Promise<WithRequestId<TelemetryExecutionMetrics>> {
+    const seg = segment("executionId", executionId);
+    return this.json<TelemetryExecutionMetrics>(
+      { method: "GET", path: `/api/v1/telemetry/executions/${seg}/metrics`, body: undefined, keyed: true, stream: false },
+      options,
+    );
+  }
+
+  /** `GET /api/v1/hitl/interactions`: list human-in-the-loop interaction requests. */
+  listHitlInteractions(options: ListHitlInteractionsOptions = {}): Promise<WithRequestId<HitlInteractionList>> {
+    const { status, ...reqOptions } = options;
+    const qs = query({ status });
+    return this.json<HitlInteractionList>(
+      { method: "GET", path: `/api/v1/hitl/interactions${qs}`, body: undefined, keyed: true, stream: false },
+      reqOptions,
+    );
+  }
+
+  /** `POST /api/v1/hitl/interactions/{interaction_id}/respond`: submit a decision for a HITL interaction. */
+  respondHitlInteraction(
+    interactionId: string,
+    decision: string,
+    options: RespondHitlInteractionOptions = {},
+  ): Promise<WithRequestId<HitlInteraction>> {
+    const seg = segment("interactionId", interactionId);
+    const cleanedDecision = typeof decision === "string" ? decision.trim() : "";
+    if (!cleanedDecision) throw new MatterWaveConfigError("decision must not be empty");
+    const { responseData, response_data, respondedBy, responded_by, ...reqOptions } = options;
+    const payload: Record<string, unknown> = {
+      decision: cleanedDecision,
+    };
+    const resolvedData = responseData ?? response_data;
+    if (resolvedData !== undefined) payload.response_data = resolvedData;
+    const resolvedBy = respondedBy ?? responded_by;
+    if (resolvedBy !== undefined) payload.responded_by = resolvedBy;
+    return this.json<HitlInteraction>(
+      { method: "POST", path: `/api/v1/hitl/interactions/${seg}/respond`, body: payload, keyed: true, stream: false },
+      reqOptions,
+    );
+  }
+
+  /** `POST /api/v1/guardrails/evaluate`: evaluate content or tool calls against guardrails. */
+  evaluateGuardrails(
+    railType: GuardrailType,
+    content: string,
+    options: EvaluateGuardrailsOptions = {},
+  ): Promise<WithRequestId<GuardrailEvaluation>> {
+    const cleanedRailType = typeof railType === "string" ? railType.trim() : "";
+    if (!cleanedRailType) throw new MatterWaveConfigError("railType must not be empty");
+    const { toolName, tool_name, toolArgs, tool_args, policies, ...reqOptions } = options;
+    const payload: Record<string, unknown> = {
+      rail_type: cleanedRailType,
+      content,
+    };
+    const resolvedToolName = toolName ?? tool_name;
+    if (resolvedToolName !== undefined) payload.tool_name = resolvedToolName;
+    const resolvedToolArgs = toolArgs ?? tool_args;
+    if (resolvedToolArgs !== undefined) payload.tool_args = resolvedToolArgs;
+    if (policies !== undefined) payload.policies = policies;
+    return this.json<GuardrailEvaluation>(
+      { method: "POST", path: "/api/v1/guardrails/evaluate", body: payload, keyed: true, stream: false },
+      reqOptions,
+    );
+  }
+
+  /** `POST /api/v1/tools/plan`: generate a dependency-ordered tool execution plan for `goal`. */
+  planTools(
+    goal: string,
+    availableTools?: string[] | null,
+    options: PlanToolsOptions = {},
+  ): Promise<WithRequestId<ToolPlan>> {
+    const cleanedGoal = typeof goal === "string" ? goal.trim() : "";
+    if (!cleanedGoal) throw new MatterWaveConfigError("goal must not be empty");
+    const { constraints, ...reqOptions } = options;
+    const payload: Record<string, unknown> = {
+      task: cleanedGoal,
+      goal: cleanedGoal,
+    };
+    if (availableTools !== undefined && availableTools !== null) {
+      payload.available_tools = availableTools;
+    }
+    if (constraints !== undefined) payload.constraints = constraints;
+    return this.json<ToolPlan>(
+      { method: "POST", path: "/api/v1/tools/plan", body: payload, keyed: true, stream: false },
+      reqOptions,
     );
   }
 

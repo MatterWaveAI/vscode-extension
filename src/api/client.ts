@@ -5,16 +5,114 @@ import {
   MatterWave,
   MatterWaveConfigError,
   sseEvents,
+  type A2ALimits,
+  type A2APermissionEnvelope,
+  type AnomalyAlert,
+  type CheckpointList,
+  type CheckpointRecord,
+  type ConnectorCatalogEntry,
+  type ConnectorCatalogList,
   type ConversationFrame,
   type ConversationStream,
+  type CredentialProxyResponse,
+  type DecisionEdge,
+  type DecisionNode,
+  type DecisionTrail,
+  type DecisionTrailStatistics,
+  type EnforceClaimsResult,
+  type EnforceOidcClaimsParams,
+  type EvaluateGuardrailsOptions,
   type Fetch,
   type FimCompletionChoice,
   type FimCompletionRequest,
   type FimCompletionResponse,
+  type GetReliabilityMetricsOptions,
+  type GuardrailEvaluation,
+  type GuardrailType,
+  type GuardrailViolation,
+  type HitlInteraction,
+  type HitlInteractionList,
+  type ListConnectorCatalogParams,
+  type ListHitlInteractionsOptions,
+  type OAuthAuthenticator,
+  type OidcConfig,
+  type OidcSyncResult,
+  type PlanToolsOptions,
+  type ProxyOAuthRequestInput,
+  type ProxyOAuthRequestOptions,
+  type RegisterOAuthAuthenticatorParams,
+  type ReliabilityMetrics,
+  type ReliabilitySloReport,
+  type ReliabilityTrendBucket,
+  type ReliabilityTrends,
+  type ReplayDifference,
+  type ReplayMode,
+  type ReplayRunOptions,
+  type ReplayRunResult,
   type RequestOptions,
+  type RespondHitlInteractionOptions,
+  type ResumeRunOptions,
+  type ResumeRunResult,
+  type StepTelemetryMetrics,
+  type TelemetryExecutionMetrics,
+  type TelemetryServiceEndpoint,
+  type TelemetryStackStatus,
+  type ToolPlan,
+  type ToolPlanStep,
 } from "../lib/matterwaveClient";
 
-export type { FimCompletionChoice, FimCompletionRequest, FimCompletionResponse };
+export type {
+  A2ALimits,
+  A2APermissionEnvelope,
+  AnomalyAlert,
+  CheckpointList,
+  CheckpointRecord,
+  ConnectorCatalogEntry,
+  ConnectorCatalogList,
+  CredentialProxyResponse,
+  DecisionEdge,
+  DecisionNode,
+  DecisionTrail,
+  DecisionTrailStatistics,
+  EnforceClaimsResult,
+  EnforceOidcClaimsParams,
+  EvaluateGuardrailsOptions,
+  FimCompletionChoice,
+  FimCompletionRequest,
+  FimCompletionResponse,
+  GetReliabilityMetricsOptions,
+  GuardrailEvaluation,
+  GuardrailType,
+  GuardrailViolation,
+  HitlInteraction,
+  HitlInteractionList,
+  ListConnectorCatalogParams,
+  ListHitlInteractionsOptions,
+  OAuthAuthenticator,
+  OidcConfig,
+  OidcSyncResult,
+  PlanToolsOptions,
+  ProxyOAuthRequestInput,
+  ProxyOAuthRequestOptions,
+  RegisterOAuthAuthenticatorParams,
+  ReliabilityMetrics,
+  ReliabilitySloReport,
+  ReliabilityTrendBucket,
+  ReliabilityTrends,
+  ReplayDifference,
+  ReplayMode,
+  ReplayRunOptions,
+  ReplayRunResult,
+  RespondHitlInteractionOptions,
+  ResumeRunOptions,
+  ResumeRunResult,
+  StepTelemetryMetrics,
+  TelemetryExecutionMetrics,
+  TelemetryServiceEndpoint,
+  TelemetryStackStatus,
+  ToolPlan,
+  ToolPlanStep,
+};
 import { ApiError, detailOf, parseRetryAfter } from "./errors";
 import { buildSpeechFormData } from "../chat/dictation";
 import type { ChatCompletionChunk, ChatCompletionRequest } from "../agent/wire";
@@ -729,6 +827,120 @@ export class MatterWaveClient {
    */
   fimComplete(request: FimCompletionRequest, signal?: AbortSignal): Promise<FimCompletionResponse> {
     return this.call(({ writes }) => writes.fimComplete(request, { signal }));
+  }
+
+  // --- OIDC, connectors, decision trail, replay, reliability & tool planner ---
+
+  /** `GET /api/v1/oidc/config`: OIDC discovery metadata and claim-to-role mapping configuration. */
+  getOidcConfig(): Promise<OidcConfig> {
+    return this.call(({ reads }) => reads.getOidcConfig());
+  }
+
+  /** `POST /api/v1/agent-keys/{keyId}/oidc-sync`: synchronize an agent key's scopes and A2A permission envelope with OIDC claims. */
+  syncAgentKeyOidc(keyId: string): Promise<OidcSyncResult> {
+    return this.call(({ writes }) => writes.syncAgentKeyOidc(keyId));
+  }
+
+  /** `POST /api/v1/oidc/enforce-claims`: evaluate OIDC group/role claims and compute the effective A2A permission envelope. */
+  enforceOidcClaims(payload: EnforceOidcClaimsParams): Promise<EnforceClaimsResult> {
+    return this.call(({ writes }) => writes.enforceOidcClaims(payload));
+  }
+
+  /** `GET /api/v1/connectors/catalog`: list connectors in the universal connector catalog. */
+  listConnectorCatalog(category?: string | ListConnectorCatalogParams, q?: string): Promise<ConnectorCatalogList> {
+    return this.call(({ reads }) => reads.listConnectorCatalog(category, q));
+  }
+
+  /** `POST /api/v1/oauth/register`: register an OAuth2 authenticator for a connector. */
+  registerOAuthAuthenticator(payload: RegisterOAuthAuthenticatorParams): Promise<OAuthAuthenticator> {
+    return this.call(({ writes }) => writes.registerOAuthAuthenticator(payload));
+  }
+
+  /** `POST /api/v1/oauth/proxy/{credentialId}`: execute a credential-brokered OAuth proxy request without exposing raw tokens. */
+  proxyOAuthRequest(
+    credentialId: string,
+    request: ProxyOAuthRequestInput | string,
+    methodOrOptions?: string | ProxyOAuthRequestOptions,
+    options?: ProxyOAuthRequestOptions,
+  ): Promise<CredentialProxyResponse> {
+    return this.call(({ writes }) => writes.proxyOAuthRequest(credentialId, request, methodOrOptions, options));
+  }
+
+  /** `GET /api/v1/runs/{runId}/decision-trail`: retrieve the cryptographically hashed decision trail DAG for a run. */
+  getRunDecisionTrail(runId: string): Promise<DecisionTrail> {
+    return this.call(({ reads }) => reads.getRunDecisionTrail(runId));
+  }
+
+  /** `POST /api/v1/runs/{runId}/replay`: replay a recorded run in strict, simulated, or counterfactual mode. */
+  replayRun(
+    runId: string,
+    mode: "strict" | "simulated" | "counterfactual" | ReplayMode | ReplayRunOptions = "simulated",
+    overrides?: Record<string, unknown> | null,
+  ): Promise<ReplayRunResult> {
+    return this.call(({ writes }) => writes.replayRun(runId, mode, overrides));
+  }
+
+  /** `GET /api/v1/runs/{runId}/checkpoints`: list execution state checkpoints for a run. */
+  listRunCheckpoints(runId: string): Promise<CheckpointList> {
+    return this.call(({ reads }) => reads.listRunCheckpoints(runId));
+  }
+
+  /** `POST /api/v1/runs/{runId}/resume`: resume a run from a recorded checkpoint. */
+  resumeRun(runId: string, checkpointId?: string, options?: ResumeRunOptions): Promise<ResumeRunResult> {
+    return this.call(({ writes }) => writes.resumeRun(runId, checkpointId, options));
+  }
+
+  /** `GET /api/v1/reliability/metrics`: retrieve agent reliability metrics (SR, CR, TCL, WCT, CPS). */
+  getReliabilityMetrics(agentId?: string | GetReliabilityMetricsOptions): Promise<ReliabilityMetrics> {
+    return this.call(({ reads }) => reads.getReliabilityMetrics(agentId));
+  }
+
+  /** `GET /api/v1/reliability/slo`: retrieve reliability SLO compliance and anomaly alerts. */
+  getReliabilitySlo(): Promise<ReliabilitySloReport> {
+    return this.call(({ reads }) => reads.getReliabilitySlo());
+  }
+
+  /** `GET /api/v1/reliability/trends`: retrieve reliability trend buckets across time windows. */
+  getReliabilityTrends(): Promise<ReliabilityTrends> {
+    return this.call(({ reads }) => reads.getReliabilityTrends());
+  }
+
+  /** `GET /api/v1/telemetry/status`: retrieve OpenTelemetry / Prometheus / Tempo / Loki stack status. */
+  getTelemetryStatus(): Promise<TelemetryStackStatus> {
+    return this.call(({ reads }) => reads.getTelemetryStatus());
+  }
+
+  /** `GET /api/v1/telemetry/executions/{executionId}/metrics`: retrieve step-level execution telemetry metrics for a run. */
+  getExecutionTelemetry(executionId: string): Promise<TelemetryExecutionMetrics> {
+    return this.call(({ reads }) => reads.getExecutionTelemetry(executionId));
+  }
+
+  /** `GET /api/v1/hitl/interactions`: list Human-in-the-Loop interactions. */
+  listHitlInteractions(options?: ListHitlInteractionsOptions): Promise<HitlInteractionList> {
+    return this.call(({ reads }) => reads.listHitlInteractions(options));
+  }
+
+  /** `POST /api/v1/hitl/interactions/{interactionId}/respond`: respond to a pending Human-in-the-Loop interaction. */
+  respondHitlInteraction(
+    interactionId: string,
+    decision: "approve" | "reject" | "modify",
+    options?: RespondHitlInteractionOptions,
+  ): Promise<HitlInteraction> {
+    return this.call(({ writes }) => writes.respondHitlInteraction(interactionId, decision, options));
+  }
+
+  /** `POST /api/v1/guardrails/evaluate`: evaluate programmable guardrails on input, output, tool call, retrieval, or dialog content. */
+  evaluateGuardrails(
+    railType: GuardrailType,
+    content: string,
+    options?: EvaluateGuardrailsOptions,
+  ): Promise<GuardrailEvaluation> {
+    return this.call(({ writes }) => writes.evaluateGuardrails(railType, content, options));
+  }
+
+  /** `POST /api/v1/tools/plan`: generate a structured multi-step tool execution plan for a goal. */
+  planTools(goal: string, availableTools?: string[], options?: PlanToolsOptions): Promise<ToolPlan> {
+    return this.call(({ writes }) => writes.planTools(goal, availableTools, options));
   }
 
   // --- plumbing ------------------------------------------------------------

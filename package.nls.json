@@ -79,5 +79,11 @@
   "command.dictatePrompt.title": "Dictate Prompt",
   "command.selectAgentEngine.title": "Select Agent Engine",
   "command.compactPiSession.title": "Compact Pi Session",
-  "command.newPiSession.title": "New Pi Session"
+  "command.newPiSession.title": "New Pi Session",
+  "command.listConnectors.title": "Browse Universal Connectors",
+  "command.inspectRunDecisionTrail.title": "Inspect Run Decision Trail",
+  "command.replayRun.title": "Replay Run (Simulated / Counterfactual)",
+  "command.resumeRunCheckpoint.title": "Resume Run from Checkpoint",
+  "command.showReliabilityMetrics.title": "Show Agent Reliability Metrics",
+  "command.planTools.title": "Plan Tools for Goal"
 }

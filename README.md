@@ -112,6 +112,9 @@ changes no file and runs no git until you trust it.
 | Draft MATTERWAVE.md (/init), Resume an Agent Run | `/init` and `/resume` from the palette. |
 | Dictate Prompt | Transcribe an audio clip via `/api/speech/transcribe` and insert it into the composer. |
 | Show Usage | This session's agent runs, the period's allowance and your spend. |
+| Browse Universal Connectors | Browse the universal connector catalog (`/api/v1/connectors/catalog`) by category or search query. |
+| Inspect Run Decision Trail, Replay Run (Simulated / Counterfactual), Resume Run from Checkpoint | Inspect a run's cryptographic decision trail DAG (`/api/v1/runs/{runId}/decision-trail`), replay a run in strict, simulated or counterfactual mode (`/api/v1/runs/{runId}/replay`), or resume a run from a recorded checkpoint (`/api/v1/runs/{runId}/resume`). |
+| Show Agent Reliability Metrics, Plan Tools for Goal | Show agent reliability metrics (SR, CR, TCL, WCT, CPS via `/api/v1/reliability/metrics`) or generate a multi-step tool plan for a goal (`/api/v1/tools/plan`). |
 
 ## Agent mode
 
