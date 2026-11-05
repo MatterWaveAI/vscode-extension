@@ -2,6 +2,9 @@ import {
   APIError,
   AuthenticationError,
   errorFromResponse,
+  GRT_HF_MODELS,
+  GRT_HF_ORG,
+  GRT_HF_ORG_URL,
   IDEMPOTENCY_HEADER,
   MATTERWAVE_PROVIDER_NAME,
   MatterWave,
@@ -1017,5 +1020,75 @@ describe("key options and the account routes", () => {
       goal: "Run unit tests and summarize failures",
       available_tools: ["run_shell"],
     });
+  });
+
+  it("wires the 9-model MatterWaveAI GRT HF suite, POST /v1/rerank, and POST /v1/audio/speech", async () => {
+    expect(GRT_HF_ORG).toBe("MatterWaveAI");
+    expect(GRT_HF_ORG_URL).toBe("https://huggingface.co/MatterWaveAI");
+    expect(GRT_HF_MODELS).toHaveLength(9);
+    expect(GRT_HF_MODELS.map((m) => m.repo_id)).toEqual([
+      "MatterWaveAI/grt-30m",
+      "MatterWaveAI/grt-30m-chat",
+      "MatterWaveAI/grt-30m-mor",
+      "MatterWaveAI/grt-30m-embedding",
+      "MatterWaveAI/grt-30m-reranker",
+      "MatterWaveAI/grt-30m-vl",
+      "MatterWaveAI/grt-30m-tts",
+      "MatterWaveAI/grt-30m-omni",
+      "MatterWaveAI/grt-30m-tokenizer",
+    ]);
+
+    const { api, calls } = client({
+      "POST /v1/rerank": () =>
+        json({
+          model: "MatterWaveAI/grt-30m-reranker",
+          results: [
+            { index: 1, relevance_score: 0.96, document: { text: "Neural reranking pipeline" } },
+            { index: 0, relevance_score: 0.42, document: { text: "Unrelated note" } },
+          ],
+        }),
+      "POST /v1/audio/speech": () =>
+        json({
+          model: "MatterWaveAI/grt-30m-tts",
+          voice: "aurora",
+          format: "wav",
+          sample_rate_hz: 24000,
+          duration_ms: 520,
+          audio_base64: "UklGRg==",
+        }),
+      "GET /api/v1/models/grt-suite": () =>
+        json({
+          organization: GRT_HF_ORG,
+          hf_url: GRT_HF_ORG_URL,
+          total: 9,
+          models: [...GRT_HF_MODELS],
+        }),
+    });
+
+    const reranked = await api.rerank("neural reranker", ["Unrelated note", "Neural reranking pipeline"]);
+    expect(reranked.model).toBe("MatterWaveAI/grt-30m-reranker");
+    expect(reranked.results[0]?.index).toBe(1);
+    expect(calls[0]).toMatchObject({ method: "POST", url: "/v1/rerank" });
+    expect(JSON.parse(String(calls[0]?.body))).toEqual({
+      query: "neural reranker",
+      documents: ["Unrelated note", "Neural reranking pipeline"],
+      model: "MatterWaveAI/grt-30m-reranker",
+    });
+
+    const speech = await api.synthesizeSpeech("Hello MatterWave", "MatterWaveAI/grt-30m-tts", "aurora");
+    expect(speech.model).toBe("MatterWaveAI/grt-30m-tts");
+    expect(speech.voice).toBe("aurora");
+    expect(calls[1]).toMatchObject({ method: "POST", url: "/v1/audio/speech" });
+    expect(JSON.parse(String(calls[1]?.body))).toEqual({
+      input: "Hello MatterWave",
+      text: "Hello MatterWave",
+      model: "MatterWaveAI/grt-30m-tts",
+      voice: "aurora",
+    });
+
+    const suite = await api.getGrtSuite();
+    expect(suite.total).toBe(9);
+    expect(suite.models).toHaveLength(9);
+    expect(calls[2]).toMatchObject({ method: "GET", url: "/api/v1/models/grt-suite" });
   });
 });

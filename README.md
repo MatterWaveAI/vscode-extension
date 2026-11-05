@@ -115,6 +115,7 @@ changes no file and runs no git until you trust it.
 | Browse Universal Connectors | Browse the universal connector catalog (`/api/v1/connectors/catalog`) by category or search query. |
 | Inspect Run Decision Trail, Replay Run (Simulated / Counterfactual), Resume Run from Checkpoint | Inspect a run's cryptographic decision trail DAG (`/api/v1/runs/{runId}/decision-trail`), replay a run in strict, simulated or counterfactual mode (`/api/v1/runs/{runId}/replay`), or resume a run from a recorded checkpoint (`/api/v1/runs/{runId}/resume`). |
 | Show Agent Reliability Metrics, Plan Tools for Goal | Show agent reliability metrics (SR, CR, TCL, WCT, CPS via `/api/v1/reliability/metrics`) or generate a multi-step tool plan for a goal (`/api/v1/tools/plan`). |
+| Rerank Documents (GRT-30M Reranker), Synthesize Speech (GRT-30M TTS) | Score and rank candidate documents against a query with `MatterWaveAI/grt-30m-reranker` (`/v1/rerank`), or synthesize speech audio from text with `MatterWaveAI/grt-30m-tts` (`/v1/audio/speech`). |
 
 ## Agent mode
 

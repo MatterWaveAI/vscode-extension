@@ -85,5 +85,7 @@
   "command.replayRun.title": "Replay Run (Simulated / Counterfactual)",
   "command.resumeRunCheckpoint.title": "Resume Run from Checkpoint",
   "command.showReliabilityMetrics.title": "Show Agent Reliability Metrics",
-  "command.planTools.title": "Plan Tools for Goal"
+  "command.planTools.title": "Plan Tools for Goal",
+  "command.rerankDocuments.title": "Rerank Documents (GRT-30M Reranker)",
+  "command.synthesizeSpeech.title": "Synthesize Speech (GRT-30M TTS)"
 }

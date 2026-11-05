@@ -1322,6 +1322,161 @@ export interface ToolPlan {
   confidence: number;
 }
 
+/** Metadata for one Hugging Face model in the 9-model MatterWaveAI GRT-30M suite. */
+export interface GrtModelEntry {
+  repo_id: string;
+  alias: string;
+  model_type: string;
+  auto_class: string;
+  pipeline_tag: string;
+  hf_url: string;
+  weight_sha256: string | null;
+  config_sha256: string;
+}
+
+/** `GET /api/v1/models/grt-suite`: catalog of the 9-model MatterWaveAI GRT-30M suite. */
+export interface GrtSuiteCatalog {
+  organization: string;
+  hf_url: string;
+  total: number;
+  models: GrtModelEntry[];
+  data?: GrtModelEntry[];
+}
+
+export interface RerankOptions extends RequestOptions {
+  model?: string;
+  topN?: number;
+  top_n?: number;
+}
+
+/** One scored candidate document from `POST /v1/rerank`. */
+export interface RerankItem {
+  index: number;
+  relevance_score: number;
+  score?: number;
+  document?: { text: string; [key: string]: unknown } | string;
+}
+
+/** `POST /v1/rerank`: ranked candidate documents scored against a query. */
+export interface RerankResult {
+  model: string;
+  query?: string;
+  results: RerankItem[];
+  data?: RerankItem[];
+}
+
+export interface SynthesizeSpeechOptions extends RequestOptions {
+  model?: string;
+  voice?: string;
+  format?: string;
+}
+
+/** `POST /v1/audio/speech`: synthesized audio metadata and base64 payload. */
+export interface SpeechSynthesisResult {
+  model: string;
+  voice: string;
+  format: string;
+  sample_rate_hz: number;
+  duration_ms?: number;
+  audio_base64: string;
+}
+
+export const GRT_HF_ORG = "MatterWaveAI";
+export const GRT_HF_ORG_URL = "https://huggingface.co/MatterWaveAI";
+
+export const GRT_HF_MODELS: readonly GrtModelEntry[] = [
+  {
+    repo_id: "MatterWaveAI/grt-30m",
+    alias: "grt-30m",
+    model_type: "grt",
+    auto_class: "GRTForCausalLM",
+    pipeline_tag: "text-generation",
+    hf_url: "https://huggingface.co/MatterWaveAI/grt-30m",
+    weight_sha256: "205f76f3ed59fee0ed54bb8133ea1b1a64527994c68776066057b4707f1b2456",
+    config_sha256: "5ffa4facb3cfba2b39512bbc54c7b7ecda637c70f40fd18ede13396cd8e5a86b",
+  },
+  {
+    repo_id: "MatterWaveAI/grt-30m-chat",
+    alias: "grt-30m-chat",
+    model_type: "grt",
+    auto_class: "GRTForCausalLM",
+    pipeline_tag: "text-generation",
+    hf_url: "https://huggingface.co/MatterWaveAI/grt-30m-chat",
+    weight_sha256: "ee613803cb7b2c618def7e6c79476e1aab4e887cc08e234204b6bad12ad772bc",
+    config_sha256: "c2b264a05e11914a8e41c1610f3c81e15d38151c459a1c66caaaa0381d804685",
+  },
+  {
+    repo_id: "MatterWaveAI/grt-30m-mor",
+    alias: "grt-30m-mor",
+    model_type: "grt_mor",
+    auto_class: "GRTForCausalLM",
+    pipeline_tag: "text-generation",
+    hf_url: "https://huggingface.co/MatterWaveAI/grt-30m-mor",
+    weight_sha256: "5633a578073e808d18fe3e52fb0fbf0005dc015b6bb10a1bff339f5d83225a07",
+    config_sha256: "bf652df2d4107c7e7ef3c23d0854436aedb0030f0821f97939ed6ed858254013",
+  },
+  {
+    repo_id: "MatterWaveAI/grt-30m-embedding",
+    alias: "grt-30m-embedding",
+    model_type: "grt",
+    auto_class: "GRTModel",
+    pipeline_tag: "feature-extraction",
+    hf_url: "https://huggingface.co/MatterWaveAI/grt-30m-embedding",
+    weight_sha256: "5cdab387c5e2ee9bb3907acaccfccfaa7cc10060c21e3f265ce981a4a7d38226",
+    config_sha256: "c987cec1b71deba4a1749a939032309921872ae2a6c21378f8160edb29b210df",
+  },
+  {
+    repo_id: "MatterWaveAI/grt-30m-reranker",
+    alias: "grt-30m-reranker",
+    model_type: "grt",
+    auto_class: "GRTForSequenceClassification",
+    pipeline_tag: "text-classification",
+    hf_url: "https://huggingface.co/MatterWaveAI/grt-30m-reranker",
+    weight_sha256: "6d090decc4426a1c21a372c1bd718a6b80626e2c7b460c9ab79b713d84320ef9",
+    config_sha256: "6f401b7ed6af93ed7fc93eedc6de44ad67f2f19ecdc5b3c96dcc92ee564750fc",
+  },
+  {
+    repo_id: "MatterWaveAI/grt-30m-vl",
+    alias: "grt-30m-vl",
+    model_type: "grt_vl",
+    auto_class: "GRTVLForConditionalGeneration",
+    pipeline_tag: "image-text-to-text",
+    hf_url: "https://huggingface.co/MatterWaveAI/grt-30m-vl",
+    weight_sha256: "b21667c9d39c67513671af4fe4480551f26ac738b23821902fd78ae55a4f1dfe",
+    config_sha256: "0fd2f34d415723412d54055ecb174bcbb60cccaf43235af52b6c13826e6bb859",
+  },
+  {
+    repo_id: "MatterWaveAI/grt-30m-tts",
+    alias: "grt-30m-tts",
+    model_type: "grt_tts",
+    auto_class: "GRTTTSForConditionalGeneration",
+    pipeline_tag: "text-to-speech",
+    hf_url: "https://huggingface.co/MatterWaveAI/grt-30m-tts",
+    weight_sha256: "9df117cf2d9fdd14a972495293628bfea4ab503ee4fbcb270ffb667763e314f4",
+    config_sha256: "74dca6d26f2726ae96033446d5d418a152aef8368a8e49aa49bb15f6364ca75a",
+  },
+  {
+    repo_id: "MatterWaveAI/grt-30m-omni",
+    alias: "grt-30m-omni",
+    model_type: "grt_omni",
+    auto_class: "GRTOmniForConditionalGeneration",
+    pipeline_tag: "any-to-any",
+    hf_url: "https://huggingface.co/MatterWaveAI/grt-30m-omni",
+    weight_sha256: "b314996ce883a0c875de18da67f5d23103c507c79b7421b8b8c52cef95d2fbf7",
+    config_sha256: "5bc88f708534280522872f046e89deade537f286a78bc261c1e039d03fa6d0cf",
+  },
+  {
+    repo_id: "MatterWaveAI/grt-30m-tokenizer",
+    alias: "grt-30m-tokenizer",
+    model_type: "grt",
+    auto_class: "AutoTokenizer",
+    pipeline_tag: "feature-extraction",
+    hf_url: "https://huggingface.co/MatterWaveAI/grt-30m-tokenizer",
+    weight_sha256: null,
+    config_sha256: "4c7ed24fcbaf5b1c62ec160296e682eb7b700ea19d88f0a8e01e363b125d505f",
+  },
+];
+
 /** @internal One operation, ready for `send`. */
 export interface Prepared {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -1931,6 +2086,71 @@ export class MatterWave {
     return this.json<ToolPlan>(
       { method: "POST", path: "/api/v1/tools/plan", body: payload, keyed: true, stream: false },
       reqOptions,
+    );
+  }
+
+  /** `POST /v1/rerank`: score and rank candidate documents against `queryStr` using `MatterWaveAI/grt-30m-reranker`. */
+  rerank(
+    queryStr: string,
+    documents: string[],
+    modelOrOptions: string | RerankOptions = "MatterWaveAI/grt-30m-reranker",
+    options: RerankOptions = {},
+  ): Promise<WithRequestId<RerankResult>> {
+    const cleanedQuery = typeof queryStr === "string" ? queryStr.trim() : "";
+    if (!cleanedQuery) throw new MatterWaveConfigError("query must not be empty");
+    if (!Array.isArray(documents) || documents.length === 0) {
+      throw new MatterWaveConfigError("documents must be a non-empty array");
+    }
+    const merged: RerankOptions =
+      typeof modelOrOptions === "string"
+        ? { ...options, model: modelOrOptions }
+        : { ...modelOrOptions, ...options };
+    const { model = "MatterWaveAI/grt-30m-reranker", topN, top_n, ...reqOptions } = merged;
+    const payload: Record<string, unknown> = {
+      query: cleanedQuery,
+      documents: [...documents],
+      model,
+    };
+    const resolvedTopN = topN ?? top_n;
+    if (resolvedTopN !== undefined) payload.top_n = resolvedTopN;
+    return this.json<RerankResult>(
+      { method: "POST", path: "/v1/rerank", body: payload, keyed: true, stream: false },
+      reqOptions,
+    );
+  }
+
+  /** `POST /v1/audio/speech`: synthesize speech audio from `text` using `MatterWaveAI/grt-30m-tts`. */
+  synthesizeSpeech(
+    text: string,
+    modelOrOptions: string | SynthesizeSpeechOptions = "MatterWaveAI/grt-30m-tts",
+    voice = "aurora",
+    options: SynthesizeSpeechOptions = {},
+  ): Promise<WithRequestId<SpeechSynthesisResult>> {
+    const cleanedText = typeof text === "string" ? text.trim() : "";
+    if (!cleanedText) throw new MatterWaveConfigError("text must not be empty");
+    const merged: SynthesizeSpeechOptions =
+      typeof modelOrOptions === "string"
+        ? { ...options, model: modelOrOptions, voice: options.voice ?? voice }
+        : { voice, ...modelOrOptions, ...options };
+    const { model = "MatterWaveAI/grt-30m-tts", voice: resolvedVoice = "aurora", format, ...reqOptions } = merged;
+    const payload: Record<string, unknown> = {
+      input: cleanedText,
+      text: cleanedText,
+      model,
+      voice: resolvedVoice,
+    };
+    if (format !== undefined) payload.format = format;
+    return this.json<SpeechSynthesisResult>(
+      { method: "POST", path: "/v1/audio/speech", body: payload, keyed: true, stream: false },
+      reqOptions,
+    );
+  }
+
+  /** `GET /api/v1/models/grt-suite`: retrieve the 9-model MatterWaveAI GRT-30M Hugging Face suite catalog. */
+  getGrtSuite(options: RequestOptions = {}): Promise<WithRequestId<GrtSuiteCatalog>> {
+    return this.json<GrtSuiteCatalog>(
+      { method: "GET", path: "/api/v1/models/grt-suite", body: undefined, keyed: true, stream: false },
+      options,
     );
   }
 

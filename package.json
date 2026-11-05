@@ -486,6 +486,16 @@
         "command": "matterwave.planTools",
         "title": "%command.planTools.title%",
         "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.rerankDocuments",
+        "title": "%command.rerankDocuments.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "matterwave.synthesizeSpeech",
+        "title": "%command.synthesizeSpeech.title%",
+        "category": "%command.category%"
       }
     ],
     "menus": {

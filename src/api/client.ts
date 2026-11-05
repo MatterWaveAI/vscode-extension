@@ -2,6 +2,9 @@ import {
   APIConnectionError,
   APIError,
   DeviceAuthError,
+  GRT_HF_MODELS,
+  GRT_HF_ORG,
+  GRT_HF_ORG_URL,
   MatterWave,
   MatterWaveConfigError,
   sseEvents,
@@ -27,6 +30,8 @@ import {
   type FimCompletionRequest,
   type FimCompletionResponse,
   type GetReliabilityMetricsOptions,
+  type GrtModelEntry,
+  type GrtSuiteCatalog,
   type GuardrailEvaluation,
   type GuardrailType,
   type GuardrailViolation,
@@ -49,17 +54,24 @@ import {
   type ReplayMode,
   type ReplayRunOptions,
   type ReplayRunResult,
+  type RerankItem,
+  type RerankOptions,
+  type RerankResult,
   type RequestOptions,
   type RespondHitlInteractionOptions,
   type ResumeRunOptions,
   type ResumeRunResult,
+  type SpeechSynthesisResult,
   type StepTelemetryMetrics,
+  type SynthesizeSpeechOptions,
   type TelemetryExecutionMetrics,
   type TelemetryServiceEndpoint,
   type TelemetryStackStatus,
   type ToolPlan,
   type ToolPlanStep,
 } from "../lib/matterwaveClient";
+
+export { GRT_HF_MODELS, GRT_HF_ORG, GRT_HF_ORG_URL };
 
 export type {
   A2ALimits,
@@ -81,6 +93,8 @@ export type {
   FimCompletionRequest,
   FimCompletionResponse,
   GetReliabilityMetricsOptions,
+  GrtModelEntry,
+  GrtSuiteCatalog,
   GuardrailEvaluation,
   GuardrailType,
   GuardrailViolation,
@@ -103,10 +117,15 @@ export type {
   ReplayMode,
   ReplayRunOptions,
   ReplayRunResult,
+  RerankItem,
+  RerankOptions,
+  RerankResult,
   RespondHitlInteractionOptions,
   ResumeRunOptions,
   ResumeRunResult,
+  SpeechSynthesisResult,
   StepTelemetryMetrics,
+  SynthesizeSpeechOptions,
   TelemetryExecutionMetrics,
   TelemetryServiceEndpoint,
   TelemetryStackStatus,
@@ -941,6 +960,31 @@ export class MatterWaveClient {
   /** `POST /api/v1/tools/plan`: generate a structured multi-step tool execution plan for a goal. */
   planTools(goal: string, availableTools?: string[], options?: PlanToolsOptions): Promise<ToolPlan> {
     return this.call(({ writes }) => writes.planTools(goal, availableTools, options));
+  }
+
+  /** `POST /v1/rerank`: score and rank candidate documents against a query using `MatterWaveAI/grt-30m-reranker`. */
+  rerank(
+    query: string,
+    documents: string[],
+    model: string | RerankOptions = "MatterWaveAI/grt-30m-reranker",
+    options?: RerankOptions,
+  ): Promise<RerankResult> {
+    return this.call(({ writes }) => writes.rerank(query, documents, model, options));
+  }
+
+  /** `POST /v1/audio/speech`: synthesize speech audio from text using `MatterWaveAI/grt-30m-tts`. */
+  synthesizeSpeech(
+    text: string,
+    model: string | SynthesizeSpeechOptions = "MatterWaveAI/grt-30m-tts",
+    voice = "aurora",
+    options?: SynthesizeSpeechOptions,
+  ): Promise<SpeechSynthesisResult> {
+    return this.call(({ writes }) => writes.synthesizeSpeech(text, model, voice, options));
+  }
+
+  /** `GET /api/v1/models/grt-suite`: retrieve the 9-model MatterWaveAI GRT-30M Hugging Face suite catalog. */
+  getGrtSuite(): Promise<GrtSuiteCatalog> {
+    return this.call(({ reads }) => reads.getGrtSuite());
   }
 
   // --- plumbing ------------------------------------------------------------

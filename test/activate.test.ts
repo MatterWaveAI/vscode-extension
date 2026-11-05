@@ -7,8 +7,10 @@ import {
   inspectRunDecisionTrail,
   planToolsCommand,
   replayRunCommand,
+  rerankDocumentsCommand,
   resumeRunCheckpointCommand,
   showReliabilityMetrics,
+  synthesizeSpeechCommand,
   type MatterWaveApi,
 } from "../src/extension";
 import type { Memento } from "../src/promptLibrary";
@@ -82,6 +84,8 @@ describe("activation", () => {
     expect(commands.registered.has("matterwave.resumeRunCheckpoint")).toBe(true);
     expect(commands.registered.has("matterwave.showReliabilityMetrics")).toBe(true);
     expect(commands.registered.has("matterwave.planTools")).toBe(true);
+    expect(commands.registered.has("matterwave.rerankDocuments")).toBe(true);
+    expect(commands.registered.has("matterwave.synthesizeSpeech")).toBe(true);
     expect(window.channels.map((channel) => channel.name)).toContain("MatterWave");
   });
 
@@ -237,7 +241,38 @@ describe("activation", () => {
       { goal: "Find TODO items", availableTools: ["grep"] },
     );
     expect(plan?.plan_id).toBe("plan_99");
-    expect(window.shown.length).toBeGreaterThanOrEqual(6);
+
+    const reranked = await rerankDocumentsCommand(
+      {
+        rerank: async (query, documents, model) => ({
+          model: typeof model === "string" ? model : "MatterWaveAI/grt-30m-reranker",
+          query,
+          results: documents.map((text, index) => ({
+            index,
+            relevance_score: 0.9 - index * 0.1,
+            document: { text },
+          })),
+        }),
+      },
+      { query: "vector search", documents: ["doc A", "doc B"] },
+    );
+    expect(reranked?.results).toHaveLength(2);
+
+    const speech = await synthesizeSpeechCommand(
+      {
+        synthesizeSpeech: async (_text, model, voice) => ({
+          model: typeof model === "string" ? model : "MatterWaveAI/grt-30m-tts",
+          voice: voice ?? "aurora",
+          format: "wav",
+          sample_rate_hz: 24000,
+          duration_ms: 480,
+          audio_base64: "UklGRg==",
+        }),
+      },
+      { text: "Hello GRT TTS", voice: "aurora" },
+    );
+    expect(speech?.model).toBe("MatterWaveAI/grt-30m-tts");
+    expect(window.shown.length).toBeGreaterThanOrEqual(8);
   });
 });
 

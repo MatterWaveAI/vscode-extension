@@ -17,7 +17,9 @@ import type {
   ReliabilityMetrics,
   ReplayMode,
   ReplayRunResult,
+  RerankResult,
   ResumeRunResult,
+  SpeechSynthesisResult,
   TagRow,
   ToolPlan,
 } from "./api/types";
@@ -623,6 +625,16 @@ export function activate(context: vscode.ExtensionContext): MatterWaveApi | unde
       "matterwave.planTools",
       (options?: string | { goal?: string; availableTools?: string[]; constraints?: Record<string, unknown> }) =>
         planToolsCommand(client, options),
+    ),
+    vscode.commands.registerCommand(
+      "matterwave.rerankDocuments",
+      (options?: { query?: string; documents?: string[]; model?: string }) =>
+        rerankDocumentsCommand(client, options),
+    ),
+    vscode.commands.registerCommand(
+      "matterwave.synthesizeSpeech",
+      (options?: string | { text?: string; model?: string; voice?: string }) =>
+        synthesizeSpeechCommand(client, options),
     ),
   );
 
@@ -2931,6 +2943,81 @@ export async function planToolsCommand(
     return plan;
   } catch (error) {
     void vscode.window.showErrorMessage(`Tool plan could not be generated: ${describe(error)}`);
+    return null;
+  }
+}
+
+/**
+ * Score and rank candidate documents against a query (`matterwave.rerankDocuments`).
+ */
+export async function rerankDocumentsCommand(
+  client: Pick<MatterWaveClient, "rerank">,
+  options?: { query?: string; documents?: string[]; model?: string },
+): Promise<RerankResult | null> {
+  let query = options?.query?.trim();
+  let documents = options?.documents?.map((d) => d.trim()).filter(Boolean);
+  const model = options?.model?.trim() || "MatterWaveAI/grt-30m-reranker";
+  if (!query || !documents || documents.length === 0) {
+    const input = await vscode.window.showInputBox({
+      title: "MatterWave: Rerank Documents (GRT-30M Reranker)",
+      prompt: "Enter query and semicolon-separated documents: <query> | <doc1> ; <doc2>",
+      placeHolder: "vector search | keyword index ; neural reranker scoring",
+      ignoreFocusOut: true,
+      validateInput: (value) => (value.includes("|") ? null : "Use '<query> | <doc1> ; <doc2>'."),
+    });
+    if (!input?.includes("|")) return null;
+    const [qPart = "", docsPart = ""] = input.split("|", 2);
+    query = qPart.trim();
+    documents = docsPart
+      .split(";")
+      .map((d) => d.trim())
+      .filter(Boolean);
+    if (!query || documents.length === 0) return null;
+  }
+  try {
+    const result = await client.rerank(query, documents, model);
+    const items = result.results ?? result.data ?? [];
+    const top = items[0];
+    const topSummary = top ? `top doc#${top.index} (score=${top.relevance_score.toFixed(4)})` : "no results";
+    void vscode.window.showInformationMessage(
+      `Reranked ${items.length} document(s) with ${result.model}: ${topSummary}.`,
+    );
+    return result;
+  } catch (error) {
+    void vscode.window.showErrorMessage(`Document reranking failed: ${describe(error)}`);
+    return null;
+  }
+}
+
+/**
+ * Synthesize speech audio from text (`matterwave.synthesizeSpeech`).
+ */
+export async function synthesizeSpeechCommand(
+  client: Pick<MatterWaveClient, "synthesizeSpeech">,
+  options?: string | { text?: string; model?: string; voice?: string },
+): Promise<SpeechSynthesisResult | null> {
+  let text = typeof options === "string" ? options.trim() : options?.text?.trim();
+  const model = (typeof options === "object" && options?.model?.trim()) || "MatterWaveAI/grt-30m-tts";
+  const voice = (typeof options === "object" && options?.voice?.trim()) || "aurora";
+  if (!text) {
+    const input = await vscode.window.showInputBox({
+      title: "MatterWave: Synthesize Speech (GRT-30M TTS)",
+      prompt: "Enter text to synthesize with MatterWaveAI/grt-30m-tts.",
+      placeHolder: "Welcome to the MatterWave GRT-30M suite.",
+      ignoreFocusOut: true,
+      validateInput: (value) => (value.trim() ? null : "Text is required."),
+    });
+    if (!input?.trim()) return null;
+    text = input.trim();
+  }
+  try {
+    const speech = await client.synthesizeSpeech(text, model, voice);
+    void vscode.window.showInformationMessage(
+      `Synthesized speech (${speech.model}, voice=${speech.voice}, ${speech.sample_rate_hz} Hz, ${speech.format}).`,
+    );
+    return speech;
+  } catch (error) {
+    void vscode.window.showErrorMessage(`Speech synthesis failed: ${describe(error)}`);
     return null;
   }
 }

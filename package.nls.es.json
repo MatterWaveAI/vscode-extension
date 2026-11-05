@@ -85,5 +85,7 @@
   "command.replayRun.title": "Repetir ejecución (simulada / contrafactual)",
   "command.resumeRunCheckpoint.title": "Reanudar ejecución desde punto de control",
   "command.showReliabilityMetrics.title": "Mostrar métricas de fiabilidad del agente",
-  "command.planTools.title": "Planificar herramientas para objetivo"
+  "command.planTools.title": "Planificar herramientas para objetivo",
+  "command.rerankDocuments.title": "Reclasificar documentos (GRT-30M Reranker)",
+  "command.synthesizeSpeech.title": "Sintetizar voz (GRT-30M TTS)"
 }
